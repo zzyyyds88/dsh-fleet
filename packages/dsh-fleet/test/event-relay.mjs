@@ -146,12 +146,19 @@ check(rows.some(row => row.sessionId === wrapped),
   'the same identity is what session/list reports', `${String(rows.length)} rows`)
 
 // ---- 2. the projection stream --------------------------------------------
-// The opening baseline must already carry this Session under its wrapped id:
-// that is what makes a node that connected earlier visible without a page reload.
-const baseline = control.frames
+// Two properties matter and they fail in opposite directions, so both are checked:
+//
+//   - the opening baseline must carry this Session under its wrapped id (a node
+//     that connected earlier is visible without a page reload);
+//   - there must be **exactly one** baseline, because a client treats any baseline
+//     as "this is now the whole picture" — a second one would wipe the first out
+//     and remote projections would look like they never worked.
+const baselines = control.frames
   .slice(0, controlBefore)
-  .find(frame => frame.value?.type === 'baseline')?.value?.value
-const blocks = Object.keys(baseline?.projections ?? {})
+  .filter(frame => frame.value?.type === 'baseline')
+check(baselines.length === 1, 'the client receives exactly one control baseline',
+  String(baselines.length))
+const blocks = Object.keys(baselines[0]?.value?.value?.projections ?? {})
 check(blocks.some(key => key.startsWith('fleet_')),
   'the control baseline carries remote projection blocks',
   `${String(blocks.filter(key => key.startsWith('fleet_')).length)} of ${String(blocks.length)}`)

@@ -17,6 +17,7 @@ import {
   remapIds,
 } from '../src/host/routing.js'
 import { Router } from '../src/host/router.js'
+import { mergeControlStream } from '../src/host/remote-control.js'
 import { RemoteWorkspaces } from '../src/host/remote-workspaces.js'
 import {
   decorateJobController,
@@ -339,6 +340,54 @@ function fakeFleet(nodeId, gateway) {
   for await (const frame of service.follow({ jobId: 'bash-1' }, undefined)) orphaned.push(frame)
   check(orphaned[0]?.job?.id === 'local-job', 'a job follow with no Session stays local')
   check(calls.length === 0, 'and asks no node', String(calls.length))
+}
+
+// ---- the merged control stream emits ONE baseline ------------------------
+// Both halves speak `baseline`, and a client treats any baseline as "this is now
+// the whole picture". Emitting the remote one and then the local one leaves the
+// remote rows wiped out — correct for one frame, empty afterwards, which reads as
+// "remote projections never worked".
+{
+  const remoteFrames = []
+  const control = {
+    baselineFrame: () => ({
+      type: 'baseline',
+      value: { projections: { [`fleet_${NODE}_${SESSION}`]: { asOfSeq: 1, values: { title: 'remote' } } } },
+    }),
+    subscribe: listener => {
+      remoteFrames.push(listener)
+      return () => {}
+    },
+  }
+  async function * local() {
+    yield { type: 'baseline', value: { projections: { 'session-local': { asOfSeq: 2, values: { title: 'local' } } } } }
+    yield { type: 'projection', sessionId: 'session-local', seq: 3, changes: [] }
+  }
+  const frames = []
+  for await (const frame of mergeControlStream(local(), control, undefined)) {
+    frames.push(frame)
+    if (frames.length === 3) break
+  }
+  const baselines = frames.filter(frame => frame.type === 'baseline')
+  check(baselines.length === 1, 'exactly one baseline reaches the client',
+    String(baselines.length))
+  const blocks = baselines[0]?.value?.projections ?? {}
+  check(Object.keys(blocks).length === 2, 'the baseline carries both halves',
+    Object.keys(blocks).join(','))
+  check(blocks[`fleet_${NODE}_${SESSION}`]?.values?.title === 'remote', 'the remote block survives')
+  check(blocks['session-local']?.values?.title === 'local', 'the local block survives')
+  check(frames.some(frame => frame.type === 'projection'), 'projection frames still stream through')
+
+  // A remote baseline change after the opening frame re-emits the merged whole,
+  // which is how a node that connects mid-session appears without a reload.
+  remoteFrames.length = 0
+  const remerge = []
+  const iterator = mergeControlStream(local(), control, undefined)[Symbol.asyncIterator]()
+  remerge.push(await iterator.next())
+  remerge.push(await iterator.next())
+  await iterator.return()
+  check(remerge.length === 2, 'the merged stream can be advanced and closed',
+    String(remerge.length))
 }
 
 if (failures.length > 0) {

@@ -178,11 +178,19 @@ export class RemoteControl {
 /**
  * Merge this Host's own control stream with the remote projection picture.
  *
- * The local generation is consumed exactly as upstream would consume it, so a
- * local Session behaves identically; every remote frame is appended as it
- * arrives. A remote `baseline` is re-published whenever the node set changes, and
- * the client treats that as "replace the remote half", which is what makes a node
- * that connects mid-session show up without a reload.
+ * The trap here is that **both** halves speak `baseline`, and a client treats any
+ * `baseline` frame as "this is now the whole picture". Emitting the remote baseline
+ * and then the local one therefore leaves the remote rows wiped out — the picture
+ * looks correct for one frame and empty afterwards, which reads as "remote
+ * projections never worked".
+ *
+ * So exactly one baseline reaches the client: the local generation's own, with the
+ * remote blocks folded into it under wrapped identities. A remote baseline change
+ * (a node that connected or dropped mid-stream) re-emits that merged frame, using
+ * the local blocks last seen — which is what upstream would do on reconnect.
+ *
+ * `projection` frames stream through unchanged in both directions: the local ones
+ * are already local, and the remote ones were wrapped by `RemoteControl`.
  *
  * @param {AsyncIterable<unknown>} local
  * @param {import('./remote-control.js').RemoteControl} control
@@ -194,12 +202,30 @@ export function mergeControlStream(local, control, signal) {
     [Symbol.asyncIterator]() {
       const queue = new AsyncQueue()
       let stopped = false
+      /** The local baseline's blocks, kept so a later remote change can re-merge. */
+      let localBlocks = {}
+      /** Whether the client has received its one and only opening baseline. */
+      let opened = false
+
+      /** One baseline frame: local blocks plus every node's wrapped blocks. */
+      const merged = () => {
+        const projections = { ...localBlocks }
+        const remote = control.baselineFrame().value.projections
+        for (const [sessionId, block] of Object.entries(remote)) projections[sessionId] = block
+        return { type: 'baseline', value: { projections } }
+      }
+
       const unsubscribe = control.subscribe(frame => {
-        if (!stopped) queue.push(frame)
+        if (stopped) return
+        // A remote baseline replaced that node's blocks, so the whole picture has
+        // to be re-sent. Before the local baseline arrives there is nothing to
+        // merge into, and the opening frame will carry the new blocks anyway.
+        if (Reflect.get(frame ?? {}, 'type') === 'baseline') {
+          if (opened) queue.push(merged())
+          return
+        }
+        queue.push(frame)
       })
-      // The remote half's opening baseline. Pushed first so a client that reads a
-      // single frame before the local baseline still has the remote rows.
-      queue.push(control.baselineFrame())
       const onAbort = () => { stopped = true }
       signal?.addEventListener('abort', onAbort, { once: true })
 
@@ -207,6 +233,17 @@ export function mergeControlStream(local, control, signal) {
         try {
           for await (const frame of local) {
             if (stopped) return
+            if (Reflect.get(frame ?? {}, 'type') === 'baseline') {
+              const value = Reflect.get(frame, 'value')
+              const projections = Reflect.get(value ?? {}, 'projections')
+              localBlocks = projections !== null && typeof projections === 'object' ? projections : {}
+              // The first baseline is the interesting one: it becomes the single
+              // merged frame. A later local baseline would carry a fresh local
+              // picture, so it replaces `localBlocks` and re-merges too.
+              opened = true
+              queue.push(merged())
+              continue
+            }
             queue.push(frame)
           }
         } catch (error) {
