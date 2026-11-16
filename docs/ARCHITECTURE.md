@@ -134,7 +134,7 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 
 两路都是 **Host 级、每连接一条**，不是按 Session 路由，所以处理方式不是转发而是**并流**：
 
-- `session/control` 由 `RemoteControl` 持有每个节点一条，合成一份 baseline（远程块的身份用本地包裹形式），每个本地消费者各拿一条合并流。节点 baseline 变化时重发整帧 —— 客户端把 baseline 当"替换"，这正是"节点中途连上也能出现"的机制。
+- `session/control` 由 `RemoteControl` 持有每个节点一条，投影块合成一份 baseline（远程块的身份用本地包裹形式），每个本地消费者各拿一条合并流。**合并后的流只发一帧 baseline**：上游客户端把任何 baseline 都当"这就是全部"，先推远程再推本地会把远程块擦掉 —— 那处 bug 只在读第二帧时暴露，看起来像"远程投影从来没生效"。节点集合变化时用最后一份本地块重折一次再发，等价于上游重连。
 - `$events` 由 `RemoteEvents` 每个节点开一条，把闭合白名单里的五个事件用 `Router.toLocal` 包一遍后在本机 `ctx.emit`。上游的 `api-remotes` 本来就会把这些事件转发给每个已连接客户端，所以**浏览器侧一行没改**，远程事件就走本地事件同一条管道。
 
 白名单是闭合的：重发一个本机也会发的事件是安全的（客户端按身份合并），但重发一个需要本机 `Agent` 才能解释的事件不是。`test/event-relay.mjs` 用的判据是"在节点上直接建的 Session" —— 本机没发过那个调用，浏览器听到的一切只可能来自中继。
@@ -397,7 +397,7 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 | 脚本 | 验证什么 | 依赖 |
 |---|---|---|
-| `routing-unit.mjs` | 身份往返、流扇出、工作区合并、本地调用直达上游 | 无（假 fleet） |
+| `routing-unit.mjs` | 身份往返、流扇出、工作区合并、本地调用直达上游、job 三个端点、control 只发一帧 baseline | 无（假 fleet） |
 | `gateway-smoke.mjs` | SSH 上的 cookie、unary RPC、流载体 upgrade | 真实节点 |
 | `descriptor-smoke.mjs` | 上游包的 descriptor 与 `static inject` 可从 `app.asar` 读到 | Electron Node |
 | `dispatch-seam.mjs` | Gateway 的 view 会读取实例 own property；声明端点集不变 | Electron Node |
