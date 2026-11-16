@@ -116,6 +116,7 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 | `workspace/create` | **按路径路由** | 绝对 POSIX 路径逐节点尝试（节点侧 `realpath` 校验必须通过） |
 | `workspace/rename` 等变更 | **按 owner 转发** | 按 workspaceId 找节点 |
 | `workspaceFiles/{list,stat,read,…}` | **路由** | 靠缝隙二解析出节点，payload 用 `workspaceFileScopeId` |
+| `job/list`、`follow`、`kill` | **路由** | 按 Session id 找节点；`follow` 的 `sessionId` 是可选的（无主 job 谁都能看），没有它就不猜节点 |
 | `terminal/list`、`watch` | **路由** | 让侧栏能报告远程 Session 的终端 |
 | `terminal/create`、`attach` … | **保持本地** | 形参里是 `Agent` 对象，远程 Session 在本地没有 Agent |
 | `session/modelCatalog`、`agentPresets/*`、`settings/*`、`pluginManager/*` | **保持本地** | 描述的是**这个安装**的模型与配置，与节点无关 |
@@ -175,7 +176,7 @@ packages/dsh-fleet/
       remote-workspaces.js  每节点一条 workspace/follow，baseline 缓存与合并
       remote-events.js  每节点一条 $events，把 api-session/* 中继进本机事件总线
       remote-control.js 每节点一条 session/control，投影块并流给每个客户端
-      decorators.js     四个命名空间的路由装饰器 + 合并后的 control 流
+      decorators.js     五个命名空间的路由装饰器（session / workspace / workspaceFiles / job / terminal）+ 合并后的 control 流
       lookups.js        workspaceFileScope lookup 覆写
       fleet.js          节点运行时状态机
     client/client.js    设置页 + 侧栏面板 + 主区页面

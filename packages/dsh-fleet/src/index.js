@@ -35,6 +35,7 @@ import { RemoteWorkspaces } from './host/remote-workspaces.js'
 import { Router } from './host/router.js'
 import { overrideWorkspaceFileScope } from './host/lookups.js'
 import {
+  decorateJobController,
   decorateSessionController,
   decorateTerminalController,
   decorateWorkspaceController,
@@ -252,12 +253,17 @@ export function apply(ctx, config = {}) {
       decorateWorkspaceController(workspace, router, workspaces),
       decorateWorkspaceFiles(files, router),
     ]
+    // The job roster is how a remote Session's background work shows up in its
+    // panel; without this a node's job list reads as empty, which is
+    // indistinguishable from "this Session started nothing".
+    const jobs = scope.get('jobController')
+    if (jobs !== undefined) undo.push(decorateJobController(jobs, router))
     const terminal = scope.get('terminalController')
     if (terminal !== undefined) undo.push(decorateTerminalController(terminal, router))
     // A remote Session id is not a local Session, so the Gateway's own lookup
     // cannot resolve a file scope for it; teach that lookup about wrapped ids.
     const undoLookup = overrideWorkspaceFileScope(scope)
-    log(`fleet: routing session, workspace, workspaceFiles${terminal === undefined ? '' : ', terminal'}`)
+    log(`fleet: routing session, workspace, workspaceFiles${jobs === undefined ? '' : ', job'}${terminal === undefined ? '' : ', terminal'}`)
     scope.effect(() => () => {
       for (const restore of undo) {
         try { restore() } catch { /* the instance may already be disposed */ }

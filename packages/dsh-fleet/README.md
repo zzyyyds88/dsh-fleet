@@ -61,7 +61,7 @@ The plugin touches **no upstream Loader row** and imports **nothing from inside
 
 | Seam | What it does |
 |---|---|
-| own property on the live Service | `sessionController`, `workspaceController`, `workspaceFiles`, `terminalController` each get a routed method *on the instance*. The Gateway discovers endpoints from the class prototype's `@Remote` descriptor and dispatches with `Reflect.get(view, name)`, so the override wins and the declared surface does not change. |
+| own property on the live Service | `sessionController`, `workspaceController`, `workspaceFiles`, `jobController`, `terminalController` each get a routed method *on the instance*. The Gateway discovers endpoints from the class prototype's `@Remote` descriptor and dispatches with `Reflect.get(view, name)`, so the override wins and the declared surface does not change. |
 | `typert.lookups.configure('workspaceFileScope', …)` | A `fleet_…` Session id is not a local Session, so the Host's own lookup answers `not-found` before the decorator could run. The override delegates every local id to the upstream provider verbatim and synthesises the scope object for a wrapped id. |
 | `webServer.register('/fleet/api')` | Node management plus `POST /fleet/api/workspaces`, because the local directory picker browses *this* machine and can never select `/root/project` on a node. |
 
@@ -155,6 +155,7 @@ exactly as before.
 |---|---|
 | `session/modelCatalog`, `session/initializeDefaultModel` | They describe *this* Host's provider roster and take no arguments. |
 | `agentPresets/*`, `settings/*`, `pluginManager/*` | Configuration of this installation, not of a node. |
+| `job/follow` without a `sessionId` | An unowned job is visible to every caller, so there is no Session to pick a node from; guessing would hand one node's output to another node's job id. `job/list` and `job/kill` *are* routed. |
 | `terminal/create`, `terminal/attach`, `terminal/close`, … | They take an `Agent` object resolved from a local Session; a remote Session has no local Agent. `terminal/list` and `terminal/watch` *are* routed, so the sidebar can report a remote Session's terminals. |
 
 ## Tests
@@ -167,7 +168,7 @@ exactly as before.
 | `node test/gateway-smoke.mjs` | The SSH transport: cookie minting, unary RPC, and the stream carrier upgrade against a real node. |
 | `node test/upstream-smoke.mjs` | The upstream controllers import and expose `static inject` from inside `app.asar`. Run under the local Electron Node. |
 | `node test/dispatch-seam.mjs` | The Gateway's view of a Service resolves an own property defined on the instance. Run under the local Electron Node. |
-| `node test/host-routing.mjs <base> <token>` | Every routed endpoint through the local `/api`, plus the ones that must stay local — including a **binary** read, which is what a remote image preview depends on. |
+| `node test/host-routing.mjs <base> <token>` | Every routed endpoint through the local `/api`, plus the ones that must stay local — including a **binary** read (what a remote image preview depends on) and the job roster (whose node-side `job/not-found` is the only way to tell routing from a silent local answer). |
 | `node test/workspace-flow.mjs <base> <token>` | The end-to-end gesture: add a remote workspace, create a Session in it, prompt it, watch the node's `bash` output arrive, and confirm the file it wrote exists on the node. |
 | `node test/tool-parity.mjs <base> <token>` | The check the mirror-based approach could not pass: the agent's own `read` / `write` / `edit` / `grep` / `glob` run against the node's real paths, with no path failure and no Windows path anywhere in the transcript. |
 | `node test/tool-git-image.mjs <base> <token>` | `git` on a real repository, `read_image` on a real PNG, and `grep` over real files — the three tools that returned `code=127` or `ENOENT` when the tools ran locally against a mirror. |

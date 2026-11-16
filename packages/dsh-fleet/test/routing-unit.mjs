@@ -19,6 +19,7 @@ import {
 import { Router } from '../src/host/router.js'
 import { RemoteWorkspaces } from '../src/host/remote-workspaces.js'
 import {
+  decorateJobController,
   decorateSessionController,
   decorateWorkspaceController,
   decorateWorkspaceFiles,
@@ -291,6 +292,53 @@ function fakeFleet(nodeId, gateway) {
   const sent = calls.find(entry => entry.endpoint === 'workspaceFiles/stat')
   check(sent.args.workspaceFileScopeId === SESSION, 'the node receives its own session identity')
   check(sent.args.path === 'a.txt', 'the file path travels unchanged')
+}
+
+// ---- the job roster routes by Session, and only by Session ---------------
+{
+  const { gateway, calls } = fakeGateway(NODE, {
+    'job/list': [ { type: 'rows', jobs: [{ id: `bash-${NODE}`, status: 'running', label: 'node job' }] } ],
+    'job/follow': [ { type: 'opened', job: { id: 'bash-x' }, from: 0 } ],
+    'job/kill': args => ({ outcome: 'requested', echoed: args.request.sessionId }),
+  })
+  const router = new Router({ fleet: fakeFleet(NODE, gateway) })
+
+  class FakeJobController {
+    async kill(request) { return { outcome: 'requested', local: request.sessionId } }
+    list() { return (async function* () { yield { type: 'rows', jobs: [{ id: 'local-job' }] } })() }
+    follow() { return (async function* () { yield { type: 'opened', job: { id: 'local-job' }, from: 0 } })() }
+  }
+  const service = new FakeJobController()
+  decorateJobController(service, router)
+
+  // A local Session still reaches the upstream method, untouched.
+  const localKill = await service.kill({ sessionId: 'local-session', jobId: 'bash-1' }, undefined)
+  check(localKill.local === 'local-session', 'a local job kill reaches the upstream method')
+  check(calls.length === 0, 'no node call for a local job', String(calls.length))
+
+  // A remote Session reaches the node, and the node sees its own identity.
+  const remoteKill = await service.kill({ sessionId: WRAPPED, jobId: 'bash-1' }, undefined)
+  check(remoteKill.outcome === 'requested', 'a remote job kill is dispatched')
+  const killed = calls.find(entry => entry.endpoint === 'job/kill')
+  check(killed?.args.request.sessionId === SESSION, 'the node receives its own session identity')
+  check(killed?.args.request.jobId === 'bash-1', 'the job id travels unchanged')
+
+  // The roster stream carries the node's rows, with its `owner` wrapped.
+  const rows = []
+  for await (const frame of service.list({ sessionId: WRAPPED }, undefined)) rows.push(frame)
+  check(rows.length === 1 && rows[0].jobs[0].id === `bash-${NODE}`,
+    'a remote job roster is proxied frame by frame', JSON.stringify(rows).slice(0, 80))
+  const listed = calls.find(entry => entry.endpoint === 'job/list')
+  check(listed?.args.request.sessionId === SESSION, 'the roster stream names the node identity')
+
+  // `job/follow` has an OPTIONAL sessionId (an unowned job is visible to every
+  // caller). With no Session there is no node to pick, so it must stay local
+  // rather than guess.
+  calls.length = 0
+  const orphaned = []
+  for await (const frame of service.follow({ jobId: 'bash-1' }, undefined)) orphaned.push(frame)
+  check(orphaned[0]?.job?.id === 'local-job', 'a job follow with no Session stays local')
+  check(calls.length === 0, 'and asks no node', String(calls.length))
 }
 
 if (failures.length > 0) {

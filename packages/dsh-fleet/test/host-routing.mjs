@@ -252,7 +252,34 @@ follow.stop()
 check(sawResult, 'the merged session/follow stream carries the remote tool result',
   `${String(follow.frames.length)} frames`)
 
-// ---- 7. what must NOT be routed ---------------------------------------
+// ---- 7. the job roster reaches the node --------------------------------
+// `job/list` and `job/kill` are addressed by Session id, so a remote Session's
+// jobs live on its node. The two states to tell apart are "the node says this job
+// does not exist" and "this Host answered without asking anyone": a job id that
+// certainly does not exist must come back as the node's own `job/not-found`, not
+// as a gateway error.
+try {
+  const killed = await call('job/kill', { request: { sessionId, jobId: 'bash-not-a-real-job' } })
+  check(false, 'job/kill reaches the node', `it answered ${JSON.stringify(killed).slice(0, 80)} instead of failing`)
+} catch (error) {
+  check(error.code === 'job/not-found',
+    'job/kill reaches the node for a remote session', `${String(error.code)} ${error.message}`)
+}
+const jobs = liveStream(carrier, 'job/list', { request: { sessionId } })
+const roster = await (async () => {
+  const until = Date.now() + 20_000
+  while (Date.now() < until) {
+    const frame = jobs.frames.find(entry => entry.value?.type === 'rows')?.value
+    if (frame !== undefined) return frame
+    await sleep(200)
+  }
+  return undefined
+})()
+jobs.stop()
+check(Array.isArray(roster?.jobs), 'job/list answers a roster for a remote session',
+  roster === undefined ? 'no rows frame' : `${String(roster.jobs.length)} job(s)`)
+
+// ---- 8. what must NOT be routed ---------------------------------------
 const catalog = await call('session/modelCatalog', {})
 check(catalog !== undefined, 'session/modelCatalog still answers from this Host')
 const presets = await call('agentPresets/list', {})

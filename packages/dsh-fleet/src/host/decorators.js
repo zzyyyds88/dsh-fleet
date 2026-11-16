@@ -1,6 +1,6 @@
 /**
- * The four routing decorators plus the merged control stream: `session`,
- * `workspace`, `workspaceFiles`, `terminal`.
+ * The five routing decorators plus the merged control stream: `session`,
+ * `workspace`, `workspaceFiles`, `job`, `terminal`.
  *
  * Each factory takes the live upstream Service and the router, and returns an
  * undo function. Nothing here replaces a Loader row, imports from inside
@@ -384,6 +384,79 @@ export function decorateWorkspaceFiles(service, router) {
         signal,
         value => router.toLocal(value, decoded.nodeId),
       )
+    },
+  })
+}
+
+/**
+ * Install the `job` namespace router.
+ *
+ * A background job belongs to the Session that started it, and a remote Session's
+ * jobs are processes on that node. Three endpoints, all addressed by Session id, so
+ * all three route:
+ *
+ *   - `list` — the roster stream the session panel renders
+ *   - `follow` — one job's output ring
+ *   - `kill` — the human cancel
+ *
+ * `follow` takes an *optional* `sessionId` (an unowned job is visible to every
+ * caller). Without one there is no node to pick, so that call stays local: this
+ * Host cannot know which machine an id-only job belongs to, and guessing would
+ * hand one node's output to another node's job id.
+ *
+ * A `JobView` carries the owning Session in `owner`, which `toLocal` wraps like
+ * every other Session identity; the job id itself is not a Session id, so it is
+ * left alone. The node's own failures do name a Session (`job/not-found` repeats
+ * it in `details`), so those details get the same wrapping — a bare node identity
+ * must never reach a browser that will treat it as local.
+ *
+ * @param {object} service - the live upstream `JobController`.
+ * @param {import('./router.js').Router} router
+ * @returns {() => void}
+ */
+export function decorateJobController(service, router) {
+  return decorateMethods(service, {
+    // A stream's first positional argument IS the request object, and the
+    // forwarded wire payload wraps it again as `{ args: { request } }`.
+    list: local => function list(request, signal) {
+      const decoded = decodeRemoteId(sessionIdIn(request))
+      if (decoded === undefined) return local(request, signal)
+      const bare = { ...request, sessionId: decoded.remoteId }
+      return remoteIterable(
+        router.node(decoded.nodeId).gateway,
+        'job/list',
+        { request: bare },
+        signal,
+        value => router.toLocal(value, decoded.nodeId),
+      )
+    },
+    follow: local => function follow(request, signal) {
+      const decoded = decodeRemoteId(sessionIdIn(request))
+      if (decoded === undefined) return local(request, signal)
+      const bare = { ...request, sessionId: decoded.remoteId }
+      return remoteIterable(
+        router.node(decoded.nodeId).gateway,
+        'job/follow',
+        { request: bare },
+        signal,
+        value => router.toLocal(value, decoded.nodeId),
+      )
+    },
+    kill: local => async function kill(request, signal) {
+      const decoded = decodeRemoteId(sessionIdIn(request))
+      if (decoded === undefined) return await local(request, signal)
+      const bare = { ...request, sessionId: decoded.remoteId }
+      try {
+        return await router.call(decoded.nodeId, 'job/kill', { request: bare }, signal)
+      } catch (error) {
+        // A node's `job/not-found` repeats the Session id in `details`. Left alone
+        // that is a bare node identity reaching the browser, which would then be
+        // used as if it named something local.
+        if (error?.details !== undefined && typeof error.details === 'object') {
+          error.details = router.toLocal(error.details, decoded.nodeId)
+        }
+        throw error
+      }
     },
   })
 }
