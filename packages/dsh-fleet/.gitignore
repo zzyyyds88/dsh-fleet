@@ -1,0 +1,6 @@
+node_modules/
+_probe/
+*.log
+*.log.err
+_*.mjs
+.DS_Store

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Remote nodes">
+  <desc>A local console connected to two remote machines.</desc>
+  <rect x="6" y="14" width="22" height="16" rx="3" fill="#247bbf"/>
+  <rect x="9.5" y="18.5" width="15" height="2.4" rx="1.2" fill="#ffffff" opacity="0.85"/>
+  <rect x="9.5" y="23" width="10" height="2.4" rx="1.2" fill="#ffffff" opacity="0.55"/>
+  <path d="M6 34h22" stroke="#247bbf" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M28 22h9" stroke="#247bbf" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M37 22c0-6 5-9 9-9s9 3 9 9v18c0 6-5 9-9 9s-9-3-9-9" fill="none" stroke="#247bbf" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="37" cy="22" r="2.6" fill="#247bbf"/>
+  <circle cx="55" cy="22" r="2.6" fill="#247bbf"/>
+  <circle cx="37" cy="40" r="2.6" fill="#247bbf"/>
+  <circle cx="55" cy="40" r="2.6" fill="#247bbf"/>
+</svg>
