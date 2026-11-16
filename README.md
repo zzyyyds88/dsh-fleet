@@ -114,7 +114,7 @@ DSH 升级后它先炸，而不是等你某天发现所有远端会话都点不�
 ### 3.3 节点只当大脑 —— 定制组合，不是 fork
 
 节点上装的是一个**独立的 DSH 安装**，有自己的 `~/.dsh`。默认它装的是 Web 组合，
-于是服务器上会加载一整套浏览器插件（57 个 `dsh-client-ui-*`、SPA dist 服务、
+于是服务器上会加载一整套浏览器插件（56 个 `dsh-client-ui-*` 包、SPA dist 服务、
 HMR 链、桌面遥测）—— 没有窗口的机器上要么空转，要么因为找不到 dist 直接报错。
 
 上游发布的 6 个 bundle 里没有"大脑"这个形态：`base`（无 Host）、`web-app`
@@ -133,7 +133,7 @@ HMR 链、桌面遥测）—— 没有窗口的机器上要么空转，要么因
 效果等价于删代码，但可逆、且跟着官方版本走。
 
 `@local/dsh-fleet-brain` 的 patch 是**从已安装的那个 release 派生**的
-（`scripts/sync-from-upstream.mjs`）：keep 全部 host-plane 行，drop 57 个 UI 行
+（`scripts/sync-from-upstream.mjs`）：keep 全部 host-plane 行，drop 56 个 UI 行
 加 9 个浏览器专属行（每个都写了理由），公式化复制 surface 值与 agent plane 的
 disable。`scripts/check-composition.mjs` 断言结果"仍然是个大脑"。
 
@@ -175,7 +175,7 @@ grep           → 命中 module.exports
 
 ```
 profile bundles : @deepseek-ai/dsh-base + @local/dsh-fleet-brain
-composed rows   : 246
+composed rows   : 138    (top-level rows; presets add 108 nested rows)
 dsh-client-ui-* : 0
 web-runtime     : 0
 ```

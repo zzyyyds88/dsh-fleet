@@ -16,7 +16,8 @@
  *
  * Usage: node test/provision-unit.mjs
  */
-import { copyableRows, credentialRefsOf, clientOnlyIds, parseComposedRows, renderBrainPatch } from '../src/host/provision.js'
+import { copyableRows, credentialRefsOf, renderBrainPatch } from '../src/host/provision.js'
+import * as compiledModule from '../src/host/provision.js'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 
@@ -136,36 +137,26 @@ const oddRef = credentialRefsOf([{
 }])
 check(oddRef.includes('custom_key_name'), 'an unusual explicit ref is still honoured', oddRef.join(','))
 
-// ---- 3. only browser UI rows are dropped ----------------------------------
-const composed = parseComposedRows([
-  '# == @deepseek-ai/dsh-base',
-  "- id: llm-deepseek",
-  "  name: '@deepseek-ai/dsh-llm-deepseek-api-key'",
-  "- id: ui-chat",
-  "  name: '@deepseek-ai/dsh-client-ui-chat'",
-  "- id: connection",
-  "  name: '@deepseek-ai/dsh-client-connection'",
-  "- id: modules",
-  "  name: '@deepseek-ai/dsh-client-modules'",
-  "- id: session-controller",
-  "  name: '@deepseek-ai/dsh-api-session-controller'",
-].join('\n'))
-check(composed.length === 5, 'the dump parser reads every row', String(composed.length))
-const disabled = clientOnlyIds(composed)
-check(disabled.length === 1 && disabled[0] === 'ui-chat',
-  'only the browser UI row is disabled', disabled.join(','))
-check(!disabled.includes('connection') && !disabled.includes('modules'),
-  'the HTTP transport and bundle composer survive — disabling them would kill the API')
+// ---- 3. the overlay carries configuration, never composition --------------
+// The bundle list is owned by @local/dsh-fleet-brain. If this overlay also tried to
+// switch browser rows off, there would be two writers for "which plugins run on a
+// node" — and a `disabled: true` naming a row that the composition never inserts is
+// dead weight that hides the real signal (a UI row appearing means the composition
+// is wrong, not that it needs switching off).
+check(!("clientOnlyIds" in compiledModule),
+  'provision exports no browser-row disable helper',
+  'that concern belongs to the brain composition')
 
 // ---- 4. the overlay is real YAML the node can boot from -------------------
 const plan = {
   rows,
-  disabled,
   version: '0.2.2-rc.3',
 }
 const text = renderBrainPatch(plan)
 check(text.includes('Managed by @local/dsh-fleet'), 'the overlay says who owns it')
 check(text.includes('0.2.2-rc.3'), 'and which version it targets')
+check(!/disabled: true/u.test(text),
+  'the overlay disables nothing — the composition already omits those rows')
 
 if (YAML === undefined) {
   log('note: no YAML parser available; skipping the round-trip checks')
@@ -178,7 +169,7 @@ if (YAML === undefined) {
   }
   if (parsed !== undefined) {
     check(Array.isArray(parsed), 'the overlay is a patch list')
-    check(parsed.length === rows.length + disabled.length,
+    check(parsed.length === rows.length,
       'every plan row became exactly one patch', `${String(parsed.length)} patches`)
     const provider = parsed.find(patch => patch.id === 'llm-deepseek')
     check(provider?.config?.baseURL === 'https://llm.example.test/v1',
@@ -190,8 +181,6 @@ if (YAML === undefined) {
       'the key ref is a plain string')
     const permission = parsed.find(patch => patch.id === 'permission')
     check(permission?.config?.defaultPreset === 'danger-full-access', 'the preset survives')
-    const off = parsed.find(patch => patch.id === 'ui-chat')
-    check(off?.disabled === true, 'the disabled row is a boolean, not the string "true"')
     // A row the overlay enables must not lose a field to quoting.
     const model = provider?.config?.models?.[0]
     check(model?.id === 'deepseek-v4.1-flash' && model?.name === 'deepseek-v4.1-flash',
@@ -214,7 +203,6 @@ if (YAML === undefined) {
         path: '/root/x',
       },
     }],
-    disabled: [],
     version: 'x',
   })
   const trickyParsed = YAML.parse(tricky)

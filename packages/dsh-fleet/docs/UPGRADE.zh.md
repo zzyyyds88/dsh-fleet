@@ -1,9 +1,19 @@
 # 升级流程
 
-这份文档写给以后维护 `@local/dsh-fleet` 的人（很可能就是未来的你）。核心原则只有一条：
+这份文档写给以后维护这套东西的人（很可能就是未来的你）。两个包要分头升级：
+
+| 包 | 什么时候动它 |
+|---|---|
+| `packages/dsh-fleet` | 插件逻辑改动；DSH 升级后**重跑测试**即可，通常不用改 |
+| `packages/dsh-fleet-brain` | **每次 DSH 升级都要重新生成** —— 它描述的是"哪个 release 组合了哪些行" |
+
+核心原则两条：
 
 > **插件不 fork 任何上游代码，也不从 `app.asar` 里 import 任何东西。**
 > 所以 DSH 升级时，插件不会"跟着坏"，但可能"悄悄失配"。下面这些检查就是发现失配的办法。
+
+> **节点的组合必须从"已安装的那个 release"派生，不能从 master 派生。**
+> 见第五节。
 
 ---
 
@@ -11,14 +21,15 @@
 
 桌面端升级 DSH（`0.2.2-rc.3` → `0.2.3` 之类）之后，按顺序做：
 
-### 1. 重跑不依赖网络的三个测试
+### 1. 重跑不依赖网络的测试
 
 ```bash
 cd packages/dsh-fleet
 node test/routing-unit.mjs      # 身份编解码、流扇出、工作区合并
 node test/multipart-unit.mjs    # Gateway 二进制应答解码
-node test/gateway-smoke.mjs     # SSH 上的 cookie / unary / 流载体
 ```
+
+`gateway-smoke.mjs` **不在这里** —— 它要一台真节点（见第 3 步）。
 
 ### 2. 重跑两条"缝隙"测试（必须用 DSH 自带的 Node，不是系统 Node）
 
@@ -34,15 +45,47 @@ $env:ELECTRON_RUN_AS_NODE = "1"
 `dispatch-seam` 挂了 = **最关键的那条缝隙没了**（Gateway 的 view 不再读取实例 own property）。
 真到这一步，插件的主路线就断了，需要回到本文第三节重新找缝，而不是"修一修"。
 
+### 2.5 重新生成节点组合，并读 diff
+
+```powershell
+$env:DSH_INSTALL_DIR = "D:\Program Files\DSH\resources\app.asar\dsh\node_modules\@deepseek-ai\dsh"
+$env:ELECTRON_RUN_AS_NODE = "1"
+cd packages/dsh-fleet-brain
+& "D:\Program Files\DSH\DeepSeek Harness.exe" "scripts/sync-from-upstream.mjs"
+& "D:\Program Files\DSH\DeepSeek Harness.exe" "scripts/check-composition.mjs"
+node scripts/embed-into-fleet.mjs
+cd ..
+git diff packages/dsh-fleet-brain/cordis.patch.yml
+```
+
+diff 里的每一种变化都要判一次：
+
+| diff 出现什么 | 怎么办 |
+|---|---|
+| 多了一行 host 服务 | 大脑大概也该保留 —— 默认已保留，确认它不是浏览器专属 |
+| 多了一行浏览器专属组件 | 加进 `scripts/sync-from-upstream.mjs` 的 `DROPPED`，并写清为什么 |
+| 某行 **id 被重命名** | 本包的 patch 会指向不存在的 id，而**上游对此是静默的**（`applyPatches` 只发一条 `ctx.logger.warn`，正常输出看不到）→ `check-composition.mjs` 会失败，按新 id 改脚本 |
+| 行数或 preset 文件变化 | 确认 `package.json` 的 `dsh.bundle.patch` 仍然列全 |
+
+`sync-from-upstream.mjs` 是幂等的：没变化时重新生成后 `git status` 应当干净 —— 不干净就说明有人手改过生成物，那是违规的（改脚本，不改生成物）。
+
 ### 3. 端到端验收（需要一个连上的节点）
 
 ```bash
+export DSH_FLEET_TEST_HOST=<节点地址>   # 见根 AGENTS.md §10：只从环境变量读，源码里没有默认值
+export DSH_FLEET_TEST_USER=root
+export DSH_FLEET_TEST_PASSWORD=...
+
+node test/gateway-smoke.mjs                              # SSH 上的 cookie / unary / 流载体
 node test/host-routing.mjs    <base> <token>
 node test/workspace-flow.mjs  <base> <token>
 node test/tool-parity.mjs     <base> <token>
 node test/tool-git-image.mjs  <base> <token>
 node test/client-bundle.mjs   <base> <token>
 ```
+
+`gateway-smoke` 只用环境变量（它不经过本地 Host）；其余五个要一个跑着的 Host
+（`dsh --profile <非 desktop> --host 127.0.0.1 --port 0 --no-open`）和一个已连接节点。
 
 这五个要一个跑着的 Host（`dsh --profile <非 desktop> --host 127.0.0.1 --port 0 --no-open`）
 和一个已连接节点。四个断言最值钱：
@@ -111,18 +154,36 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 
 ## 五、节点侧的改造：只当远程大脑
 
-节点的常驻宿主是一个**独立的 DSH 安装**，有自己的 `~/.dsh`。插件用 `--patch` 给它在启动时
-叠加一份自己拥有的 overlay（`~/.dsh-fleet/run/brain.patch.yml`），内容是：
+节点的常驻宿主是一个**独立的 DSH 安装**，有自己的 `~/.dsh`。改造分两层，职责不重叠：
+
+### 层一：组合（决定节点跑哪些插件）
+
+由 `packages/dsh-fleet-brain` 负责。节点 profile 的 `dsh.profile.bundles` 变成：
+
+```
+@deepseek-ai/dsh-base + @local/dsh-fleet-brain
+```
+
+`@deepseek-ai/dsh-web-app` **不在这个列表里**，所以浏览器面那 56 个 `dsh-client-ui-*`
+包连 `import` 都不会发生 —— 不是加载后 disable。为什么这样做、怎么从官方 patch 减出
+这一层、升级后怎么重新生成，见
+[`packages/dsh-fleet-brain/README.md`](../../dsh-fleet-brain/README.md)。
+
+### 层二：配置与凭据（overlay + Remote API）
+
+组合决定"有哪些插件"，不决定"用哪个模型、用谁的 key"。这两件事每次连接同步，
+写入 `~/.dsh-fleet/run/brain.patch.yml`（`--patch` 传入）与节点凭据库：
 
 1. **模型行**：从本机 `configEditor.configuration()` 复制 provider 路由、默认模型、权限预设。
    账号登录型的 provider 不复制（那是本机的登录态）。
 2. **凭据**：把那些行点名的 `apiKeyEnv` 对应的键从本机取出来，通过节点自己的
    `credentials/set` 推进节点的凭据库。
-3. **只留大脑**：把 `@deepseek-ai/dsh-client-ui-*` 这些纯浏览器插件全部 `disabled: true`。
 
-为什么不 fork 源码删代码：节点上装的是 npm 上的 `@deepseek-ai/dsh`，fork 就意味着
-每次官方更新都要手工合一次，而且节点与本机版本就再也对不齐了。用 `--patch` 达到同样效果，
-且**升级后自动跟随**（那份 UI 行清单是每次连接时从本机活组合里现算的，不是写死的）。
+**overlay 里没有 `disabled: true`。** 早期版本在这里写 56 条禁用浏览器行的 patch，
+但组合层已经去掉了那些行，所以那 56 条指向不存在的 id 是空转 —— 而 `applyPatches`
+对不存在的 id 只发一条走 `ctx.logger.warn` 的 `patch: entry … not found`，正常启动输出
+里看不到，是纯静默噪音。真正需要 disable 的 22 条 agent-plane 行属于组合层（它们在
+`dsh-base` 里确实存在）。
 
 **overlay 是幂等的**：内容没变就不重启节点宿主（`writePatch` 返回 `changed: false`）。
 

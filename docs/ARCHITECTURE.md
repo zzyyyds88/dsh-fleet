@@ -158,7 +158,7 @@ packages/dsh-fleet/
       fleet.js          节点运行时状态机
     client/client.js    设置页 + 侧栏面板 + 主区页面
   locale/{en,zh}.json
-  icon.svg  docs/DETAIL.zh.md  docs/UPGRADE.zh.md  README.md
+  icon.svg  docs/UPGRADE.zh.md  README.md
   test/                  见下
 ```
 
@@ -188,7 +188,7 @@ provision 阶段内部顺序也是语义的：**组合先于启动**（profile �
 
 节点的常驻宿主是一个**独立的 DSH 安装**（`npm i @deepseek-ai/dsh`），有自己的 `~/.dsh`：自己的 profile、自己的凭据库、自己的模型名册。这带来两件事：
 
-1. **它装的是 web-app 组合**，等于在服务器上加载一整套浏览器插件 —— 57 个 `dsh-client-ui-*`、SPA dist 服务、HMR 链、桌面 telemetry。没有窗口的机器上，这些要么空转，要么在缺 dist 时直接报错。
+1. **它装的是 web-app 组合**，等于在服务器上加载一整套浏览器插件 —— 56 个 `dsh-client-ui-*` 包、SPA dist 服务、HMR 链、桌面 telemetry。没有窗口的机器上，这些要么空转，要么在缺 dist 时直接报错。
 2. **它没有 provider 路由、没有 API key**，所以能启动、能答 `session/list`，然后**第一句话就失败**。从桌面端看，这和"路由坏了"长得一模一样。
 
 ### 决定：定制**组合**，不 fork **包**
@@ -222,8 +222,8 @@ provision 阶段内部顺序也是语义的：**组合先于启动**（profile �
 
 98 行的 upstream patch 手抄会腐。所以 `packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs` 做这个减法并生成 patch：
 
-- **keep**：全部 host-plane 行 —— Remote 控制器（session/workspace/workspaceFiles/job/terminal/settings）、传输层（webserver、`/api`、launch-token 认证）、服务（workspace、schedule、mcp-manager、agent-preset-registry）、`web-startup`。
-- **drop**：全部 `@deepseek-ai/dsh-client-ui-*`（节点没有窗口），加 9 个浏览器专属行，每个在脚本里写明理由：
+- **keep**：全部 host-plane 行 —— Remote 控制器（session/workspace/workspaceFiles/job/terminal/settings）、传输层（webserver、`/api`、launch token）、服务（workspace、schedule、mcp-manager、agent-preset-registry）、`web-startup`。
+- **drop**：全部 `@deepseek-ai/dsh-client-ui-*` 包的行（节点没有窗口；按**包名**判断，共 56 行 —— 其中 `entry-customization` 的 id 不以 `ui-` 开头，只按 id 前缀过滤会漏掉它），加 9 个浏览器专属行，每个在脚本里写明理由：
 
   | 行 | 为什么大脑不要 |
   |---|---|
@@ -236,17 +236,27 @@ provision 阶段内部顺序也是语义的：**组合先于启动**（profile �
   | `session-log-download` | 浏览器下载对话框 |
   | `product-analytics` / `desktop-product-telemetry` | 桌面端遥测 |
 
-- **公式化的两条**（不手抄，从上游读）：`system-prompt` 与 `session-query-sqlite` 两个 surface 值；以及 agent plane 的 22 条 `disabled: true`（大脑的 Session 和桌面一样通过 preset 挂工具，所以基础层的工具行必须同样让位）。
+- **公式化的两条**（不手抄，从上游读）：`system-prompt` 与 `session-query-sqlite` 两个 surface 值；以及 agent plane 的 22 条 `disabled: true`（大脑的 Session 和桌面一样通过 preset 挂工具，所以基础层的工具行必须同样让位）。后者是**真的 disable**，因为它指向的行都在 `dsh-base` 里存在 —— 与"disable 一个不存在的 UI 行"性质不同。
 
 **为什么必须从已安装的 release 派生**：第一版从 master 生成，多出了一行 `authentication-token`。而 `0.2.2-rc.3` 根本没有发布 `dsh-host-authentication-token` 这个包，节点启动报 `1 entry did not activate: Cannot find package '@deepseek-ai/dsh-host-authentication-token'`。master 领先于发布版，组合必须描述它要**启动进去的那个运行时**。现在脚本默认读 `DSH_INSTALL_DIR`（已安装），checkout 只作为对照手段。
 
 ### 大脑自己的运行时胶水
 
-`web-runtime` 被拿掉后，少的是"打印入口 URL"这一步 —— 而这一行是插件**解析端口和 launch token 的唯一来源**。所以 `@local/dsh-fleet-brain/runtime` 接管它：
+`web-runtime` 被拿掉后，少了两件事，而它们都直接影响插件能否连上：
 
-- 提供 `webApp` 服务（Host 契约的一部分，其它行会读）;
-- 等 Loader 组合完成后，用 `connection.authenticatedUrl()` 打印 `dsh web: <url>`，格式与本机桌面端解析的那一行完全一致;
+1. **打印入口 URL** —— 插件**解析端口和 launch token 的唯一来源**。
+2. **认领 index fallback 座位** —— cookie 交换发生在这里。`/?token=…` 由 `connection.authorizeIndex` 换成一个 303 + `Set-Cookie`；没有这个座位，请求会落到一个**没有 fallback** 的 webserver 上，得到 404。
+
+第 2 条是这块最容易被漏掉的一环，因为它失败的样子极具误导性：`/api` 本身完全正常，但任何一个"先拿 URL 再换 cookie"的客户端都会在第一步就拿到 404，看起来像"节点没有 Remote API"。
+
+所以 `@local/dsh-fleet-brain/runtime` 做三件事：
+
+- 提供 `webApp` 服务（Host 契约的一部分，其它行会读）；
+- 等 Loader 组合完成后，用 `connection.authenticatedUrl()` 打印 `dsh web: <url>`，格式与本机桌面端解析的那一行完全一致；
+- 用 `webServer.registerFallback` 认领 index 座位：入口路径走 `connection.authorizeIndex`，其余未匹配路径 404；
 - **不挂** `frontend-static`（没有 dist 可服务）、**不开**浏览器。
+
+还有一条 Cordis 的硬约束：`inject` 必须声明插件读取的每一个服务。漏了 `webServer` 会在插件体里抛 `cannot get property "webServer" without inject`，而如果抛出点在 promise 链里，症状是**宿主启动、端口在听、一行不打印** —— 就是这个模块第一次写完时的样子。
 
 ### 传送链路：生成物，不手改
 
@@ -268,12 +278,27 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 ### 幂等与顺序
 
-`connect` 的 provision 阶段现在做四件事，全部在宿主启动**之前**：
+`connect` 的 provision 阶段现在做四件事，前三个都在宿主启动**之前**：
 
 1. `writeBrainBundle` — 按 path+content 的 sha256 判断是否要重写；一致就跳过（实测第二次返回 `{changed:false}`）。
 2. `writeProfileBundles` — 只在 bundle 列表不同时写 profile manifest。
 3. `writePatch` — 模型行 + 权限预设的 overlay（下节）。
 4. 启动，`patchChanged = 任一为真` 时重启。
+
+### 职责切分：谁拥有什么
+
+这一节是上一轮返工的直接产物 —— 三个地方曾经各写一半，导致"哪份才生效"要靠猜。
+
+| 关注点 | 唯一拥有者 | 载体 |
+|---|---|---|
+| 节点跑哪些插件 | `packages/dsh-fleet-brain` | profile 的 `dsh.profile.bundles` |
+| 节点的模型名册与权限预设 | `host/provision.js` | `~/.dsh-fleet/run/brain.patch.yml`（`--patch`） |
+| 节点的 API key | `host/provision.js` | 节点凭据库（经节点 `credentials/set`） |
+| 节点上的 DSH 版本 | `remote/daemon.js` | `npm i @deepseek-ai/dsh@<本机版本>` |
+
+**overlay 里不再出现 `disabled: true`。** 它曾经写过 56 条禁用浏览器行的 patch，但组合层已经把那些行全部去掉了 —— 于是这 56 条指向不存在 id 的 patch 是纯空转。更糟的是它掩盖信号：如果哪天某个 UI 行真的出现在节点组合里，正确反应是"组合错了"，而不是"悄悄把它关掉"。实测确认 `applyPatches` 对不存在的 id 只发一条 `ctx.logger.warn("patch: entry %C not found")` 然后跳过 —— 也就是说这类空转 patch **在正常输出里根本看不见**，是纯粹的静默噪音。
+
+真正需要 `disabled: true` 的只有 agent plane 的 22 条，它们在 `dsh-base` 里确实存在；那份清单属于组合层，不属于 overlay。
 
 ### 模型与凭据：仍然用 overlay + Remote API
 
@@ -282,16 +307,49 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 1. **overlay**（`~/.dsh-fleet/run/brain.patch.yml`，`--patch` 传入）：从活的 `configEditor.configuration()` 复制 provider 路由、默认模型、权限预设。账号登录型 provider 不复制（那是本机的登录态）。overlay 是插件拥有的文件，**不改节点 profile 里的 patch**。
 2. **凭据**：那些行点名的 `apiKeyEnv` 在本机 `credentials.resolve()` 取值，通过节点自己的 `credentials/set` 写入节点凭据库。key 的 ref 不只从 `apiKeyEnv` 取 —— 那字段只有显式设置过才在组合后的 patch 里；没设时用 adapter 默认值（`llm-deepseek-api-key` → `DEEPSEEK_API_KEY`），否则会得到"provider 加载成功但没有 key"的节点。
 
-`connect` 在 `provision` 里报告：`rows` / `disabled` / `refs` / `composition{bundle, files, changed}`。
+`connect` 在 `provision` 里报告：`rows` / `refs` / `composition{bundle, files, changed}`。
 
 ### 验证
 
-- `scripts/check-composition.mjs`：断言 7 个 Remote 控制器行在、5 个传输行在、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、4 个 preset 文件都存在且被声明、整份 YAML 能解析。
-- 实测（192.168.3.93，DSH 0.2.2-rc.3）：`base + brain` 组合启动成功并打印 `dsh web: http://127.0.0.1:…?token=…`，四个端到端测试全绿。
+- `scripts/check-composition.mjs`：断言 7 个 Remote 控制器行在、4 个传输行在（`webserver` / `connection` / `api-remotes` / `web-startup`）、`brain-runtime` 在、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、4 个 preset 文件都存在且被声明、整份 YAML 能解析。
+- 实测（192.168.3.93，DSH 0.2.2-rc.3）：`base + brain` 组合启动成功并打印 `dsh web: http://127.0.0.1:…?token=…`，五个端到端测试全绿。
+
+`check-composition` 里的传输行**故意只列 4 条而不是 5 条**：早期版本断言过 `authentication-token`，而 `0.2.2-rc.3` 没有发布那个包 —— 一个契约测试必须测**这个 release 的契约**，不能测记忆里的契约。launch token 由 `connection.authenticatedUrl()` 提供，所以 `connection` 那条才是必须的。
 
 ### 遗留的一处真实风险
 
-组合层的行 id 是上游的内部命名（`session-controller`、`workspace-files` …）。上游重命名一行，本包的 patch 就会指向一个不存在的 id。Cordis 对此的处理是**静默跳过**还是报错，取决于 Loader 版本 —— 所以 `check-composition.mjs` 把它变成启动前的显式断言，而不是靠运行期发现。
+组合层的行 id 是上游的内部命名（`session-controller`、`workspace-files` …）。上游重命名一行，本包的 patch 就会指向一个不存在的 id。
+
+**上游对此是静默的**：`applyPatches`（`@deepseek-ai/cordis-plugin-include`）在 `entryMap.get(id)` 落空时只调 `warn("patch: entry %C not found", id)`，然后 `continue`；该 warn 走 `ctx.logger.warn`，正常启动输出里看不到。所以"组合少了一行"不会以任何显眼方式失败，节点会照常启动、照常答 `session/list`，只是那个端点不存在。
+
+这就是 `check-composition.mjs` 存在的理由：把它变成**启动前的显式断言**，而不是靠运行期发现。
+
+---
+
+## 六之三、运行时契约与失败形态
+
+### `/fleet/api` 的鉴权边界
+
+`/fleet/api` 用 `kind: 'prefix'` 注册，**没有写 `auth` 字段** —— 而 webserver 的默认策略是 `auth ?? 'required'`，`required` 又要求 `webserver/authorize` 的 bail 给出 `allow` + 一个 Peer。这个 bail 由 `dsh-client-connection` 的 Host 半边实现：它检查 Host/Origin fence，再验 cookie。
+
+所以这组管理端点和 `/api` **同一把锁**：没有 `?token=` 换来的 cookie 就是 401/403。这一点必须写下来，因为"我自己注册的 prefix 默认是不是开放的"是那种想当然就会错的问题。
+
+### 凭据与状态存在哪
+
+| 数据 | 位置 | 说明 |
+|---|---|---|
+| 节点记录（host/port/user/名） | `$DSH_HOME/fleet/nodes.json` | 插件自己的目录，不动 desktop profile 的任何文件 |
+| 节点密码/私钥 | DSH 凭据库的 record：`dsh-fleet/n<id>` | 走 `ctx.credentials.modifyRecord`，序列化的读-改-写，所以"只换密码、保留私钥"是安全的 |
+| 节点的模型 overlay | 节点 `~/.dsh-fleet/run/brain.patch.yml` | 插件拥有；每次连接重写 |
+| 节点的 brain bundle | 节点 `~/.dsh/profiles/web/node_modules/@local/dsh-fleet-brain/` | profile 自己的 `node_modules`（Loader 的 profile 拦截层） |
+
+### 并发、超时、失败
+
+- **每节点串行**：`Fleet.serial(runtime, action)` 把同一台机器的所有生命周期动作排在一条 promise 链上。两个并发 `connect` 不会各起一个宿主。
+- **SSH 重试**：`MAX_RETRIES = 3`，指数退避从 `BASE_DELAY_MS = 400` 起；只对可重试分类重试（连接类），认证失败直接抛。
+- **握手超时**：`READY_TIMEOUT_MS = 20 000`。
+- **Gateway 401**：`RemoteGateway.call` 捕获一次 401 → 丢掉缓存的 cookie、重新铸造 → 重试一次。之后再 401 就报 `GATEWAY_FAILURE.AUTH`，不再循环。
+- **节点不可达时**：`session/list` 等合并类端点**跳过**该节点而不是整体失败；侧栏少几行，而不是一条错误把整个列表干掉。
 
 ---
 
@@ -323,10 +381,11 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 ## 八、明确不做的事
 
 - **不改 Electron 主进程**：窗口只连本地 Host 这条约束不动。
-- **不接管 `/api` 或 `/api/remote.mux`**：它们已被 gateway 独占，`registerFallback` 也已被 static 占走。
+- **不接管 `/api` 或 `/api/remote.mux`**：它们已被 gateway 独占，**本机**的 `registerFallback` 也已被 `frontend-static` 占走（节点上则相反：大脑没有 static，那个座位空着，由 `brain-runtime` 认领）。
 - **不做本地镜像目录**：工作区路径就是节点上的真实路径。这正是工具能用的原因 —— 见下一节。
-- **不碰上游 Loader 行**：`cordis.patch.yml` 只有一条 `insert`。
-- **不 fork 任何上游包**。
+- **不碰上游 Loader 行**：插件自己的 `cordis.patch.yml` 只有一条 `insert`。
+- **不 fork 任何上游包**。节点侧改的是**组合层**，官方包一个字节没动。
+- **不做 per-node 组合定制**：所有节点共用同一份 `@local/dsh-fleet-brain`。某台机器要不同插件集时再讨论，不预留空壳配置。
 
 ---
 

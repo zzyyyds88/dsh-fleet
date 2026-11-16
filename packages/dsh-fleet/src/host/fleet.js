@@ -295,7 +295,6 @@ export class Fleet {
         // failure here must be reported without discarding a working connection.
         runtime.provision = {
           rows: plan.rows.length,
-          disabled: plan.disabled.length,
           refs: [],
           composition: {
             bundle: BRAIN_PACKAGE,

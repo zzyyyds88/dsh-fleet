@@ -36,51 +36,10 @@ export const BRAIN_PATCH_FILE = '~/.dsh-fleet/run/brain.patch.yml'
  */
 const COPIED_ROW_IDS = Object.freeze(['agent-default-model', 'permission'])
 
-/** A provider route worth copying: an `llm-*` row that is not an account login. */
+/**
+ * A provider route worth copying: an `llm-*` row that is not an account login.
+ */
 const PROVIDER_ROW = /^@deepseek-ai\/dsh-llm-(?!.*account)/u
-
-/**
- * A pure browser plugin: its whole reason to exist is a window the node lacks.
- *
- * Deliberately narrow. `@deepseek-ai/dsh-client-connection` and
- * `dsh-client-modules` also carry the string `client`, but they are the HTTP
- * transport and the bundle composer — the Host side depends on them, and disabling
- * either would take the Remote API down with the UI.
- */
-const CLIENT_ONLY_ROW = /^@deepseek-ai\/dsh-client-ui-/u
-
-/** Parse the `- id:` / `name:` pairs out of `dsh --dump-config` output. */
-export function parseComposedRows(dump) {
-  /** @type {Array<{ id: string, name: string }>} */
-  const rows = []
-  /** @type {{ id: string, name: string } | undefined} */
-  let current
-  for (const line of dump.split('\n')) {
-    const id = /^- id: (.+)$/u.exec(line)
-    if (id !== null) {
-      current = { id: id[1].trim(), name: '' }
-      rows.push(current)
-      continue
-    }
-    if (current === undefined || current.name !== '') continue
-    const name = /^\s+name: '?([^'\n]+?)'?$/u.exec(line)
-    if (name !== null) current.name = name[1].trim()
-  }
-  return rows
-}
-
-/**
- * Which composed rows a brain does not need.
- *
- * This asks the **live** composition (via `configEditor.configuration()`) rather
- * than a hardcoded list, so a UI plugin introduced by an upgrade is dropped on the
- * next connect instead of quietly loading on every node.
- * @param {Array<{ id: string, name: string }>} rows
- * @returns {string[]}
- */
-export function clientOnlyIds(rows) {
-  return rows.filter(row => CLIENT_ONLY_ROW.test(row.name)).map(row => row.id)
-}
 
 /**
  * The rows of this Host that make a prompt work: provider routes, the default
@@ -171,29 +130,34 @@ export function credentialRefsOf(rows) {
  *
  * Comments are deliberate: this file lands on somebody's server, and the next
  * person to look at it should not have to guess whether it is safe to edit.
+ *
+ * **This file carries only what the composition cannot know**: the model roster and
+ * the permission preset, which are per-Host configuration. It deliberately does NOT
+ * disable browser rows — a brain's composition has none to disable
+ * (`packages/dsh-fleet-brain`), and a `disabled: true` patch that names an absent
+ * row is dead weight that hides the real signal: if a UI row ever *does* appear, the
+ * composition is wrong and should be reported, not silently switched off.
+ *
  * @param {object} plan
  * @param {Array<{ id: string, config: Record<string, unknown> }>} plan.rows
- * @param {string[]} plan.disabled - pure-UI row ids to switch off.
  * @param {string} plan.version - the DSH version this overlay was written for.
  * @returns {string}
  */
-export function renderBrainPatch({ rows, disabled, version }) {
+export function renderBrainPatch({ rows, version }) {
   const lines = [
     '# Managed by @local/dsh-fleet. Rewritten on every connect — edits are lost.',
     `# Written for DSH ${version}. A version change rewrites this file.`,
     '#',
     '# This profile exists so the desktop app can use this machine as a remote',
-    '# brain: the Remote API and every tool stay, the browser plugins go. The model',
-    '# rows below are copied from the Host so a prompt works with no local setup.',
+    '# brain. The plugin set lives in the profile bundle list',
+    '# (@deepseek-ai/dsh-base + @local/dsh-fleet-brain); this file only carries the',
+    '# model roster and permission preset copied from the Host, so a prompt works',
+    '# with no setup on the node.',
   ]
   for (const row of rows) {
     lines.push('', `- id: ${row.id}`)
     lines.push('  config:')
     for (const line of renderYamlFields(row.config, 4)) lines.push(line)
-  }
-  if (disabled.length > 0) {
-    lines.push('', '# Browser-only rows: a node serves an API, never a window.')
-    for (const id of disabled) lines.push('', `- id: ${id}`, '  disabled: true')
   }
   return `${lines.join('\n')}\n`
 }
@@ -292,24 +256,18 @@ export class Provisioner {
   /**
    * Everything a node needs, derived from this Host's live composition.
    *
-   * The disabled list comes from the same `configuration()` call: those are the
-   * rows this Host actually composed, and the node runs the identical version, so
-   * its row ids (and the package each one loads) match by construction.
+   * Scope is deliberately **configuration, not composition**: the bundle list is
+   * owned by `@local/dsh-fleet-brain` and written by `remote/daemon.js`, so this
+   * plan carries only the model roster and the keys those rows name. Two writers
+   * for one concern would mean two places to check when a node composes wrong.
    */
   plan() {
-    const editor = this.configEditor()
-    const rows = copyableRows(editor)
-    const composed = (editor?.configuration?.() ?? []).map(row => ({
-      id: String(row.entry?.options?.id ?? ''),
-      name: String(row.entry?.options?.name ?? ''),
-    })).filter(row => row.id !== '' && row.name !== '')
-    const disabled = clientOnlyIds(composed)
+    const rows = copyableRows(this.configEditor())
     return {
       rows,
       refs: credentialRefsOf(rows),
-      disabled,
       version: this.version,
-      text: renderBrainPatch({ rows, disabled, version: this.version }),
+      text: renderBrainPatch({ rows, version: this.version }),
     }
   }
 
