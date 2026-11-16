@@ -1,8 +1,10 @@
-# DSH 远程节点插件 · 架构（v0.2）
+# DSH 远程节点插件 · 架构（v0.3）
 
 > 目标：让远程 Linux 机器上的工作区**在本地桌面端里像本地工作区一样使用**，同时顺便解决 `@artenx/dshb` 的痛点 —— **工具不可用**（grep/glob、git、read_image 在远程失效）。
 >
 > 参考实现：`zai-org/ZCode`。它远控好用的根本原因是**远端有大脑**：本地不发每条指令，只连过去用。本插件走同一条路。
+>
+> 两个包：`packages/dsh-fleet`（插件，装在桌面端）与 `packages/dsh-fleet-brain`（节点侧的 DSH 组合，只当大脑）。
 
 ---
 
@@ -123,52 +125,173 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 ## 六、包结构
 
 ```
-D:\ProjectHub\DSHpl\packages\dsh-fleet\
+D:\ProjectHub\DSHpl\
+  README.md             仓库说明
+  AGENTS.md             协作规则（本项目的硬约束）
+  docs/ARCHITECTURE.md  本文档：设计与取舍
+  packages/
+    dsh-fleet/          插件：Host 侧 + 浏览器侧
+    dsh-fleet-brain/    节点侧 bundle：只当大脑的 DSH 组合（生成物 + 生成脚本）
+  reference/            上游源码（DSH / ZCode），独立克隆，不进版本库
+```
+
+```
+packages/dsh-fleet/
   package.json          dsh.bundle.patch + dsh.client
   cordis.patch.yml      insert: dsh-fleet（单行；不禁用任何上游行）
   src/
     core/               nodes.json 注册表、凭据、HTTP 错误
     ssh/                ssh2 连接池、exec、forwardOut、错误分类
-    remote/             远端守护：probe / install / start / verify（含 brain overlay 写入）
+    remote/             远端守护：probe / install / 节点组合 / overlay / start / verify
     host/
       ssh-http.js       把 SSH channel 当 socket 用，手写 HTTP/1.1
       ws.js             手写 RFC 6455 客户端（应答 ping、帧重组）
       remote-gateway.js cookie 铸造、unary call（401 自动重试一次）、逻辑流
       multipart.js      Gateway 的 multipart 应答解码（字节附件还原）
-      provision.js      节点只当大脑：模型行复制、凭据下发、UI 行禁用、overlay 渲染
+      provision.js      模型行复制、凭据下发、overlay 渲染
+      brain-bundle.generated.js  节点组合（生成物，来自 dsh-fleet-brain）
       routing.js        身份编解码、AsyncQueue、ChangeSignal、own-property 覆写
       router.js         toRemote / toLocal / toLocalWorkspace / call / 流
       remote-workspaces.js  每节点一条 workspace/follow，baseline 缓存与合并
       decorators.js     四个命名空间的路由装饰器
       lookups.js        workspaceFileScope lookup 覆写
-      fleet.js          节点运行时状态机（probe → install → provision → start → verify）
+      fleet.js          节点运行时状态机
     client/client.js    设置页 + 侧栏面板 + 主区页面
   locale/{en,zh}.json
   icon.svg  docs/DETAIL.zh.md  docs/UPGRADE.zh.md  README.md
   test/                  见下
 ```
 
+```
+packages/dsh-fleet-brain/
+  package.json          dsh.bundle.patch（含 4 个 preset 层）
+  cordis.patch.yml      生成物：98 行 upstream → 60 行大脑组合
+  presets/*.yml         原样复制自 upstream
+  src/runtime.js        手写：大脑自己的运行时胶水（打印入口 URL、提供 webApp）
+  scripts/
+    sync-from-upstream.mjs   从已安装 release 派生组合
+    check-composition.mjs    断言结果仍然是个大脑
+    embed-into-fleet.mjs     把整包嵌进插件
+```
+
 ### 连接状态机
 
-`probe → install（版本不符才装）→ provision（下发模型与凭据）→ start → verify`。最后一步是必须的：verify 会真的发一次 `session/list`，**只有它成功才报 connected**。少了这一步，"进程起来了但会话通道不通"会伪装成成功。
+`probe → install（版本不符才装）→ provision（组合 + bundle 列表 + overlay）→ start → verify`。最后一步是必须的：verify 会真的发一次 `session/list`，**只有它成功才报 connected**。少了这一步，"进程起来了但会话通道不通"会伪装成成功。
+
+provision 阶段内部顺序也是语义的：**组合先于启动**（profile 必须已经指向 brain bundle）、**overlay 先于启动**（模型行必须已在盘上）、**凭据晚于启动**（只能通过节点自己的 Remote API 推，需要它已经在应答）。
 
 ---
 
-## 六之二、节点侧：让它只当大脑（而不是 fork 一份 DSH）
+## 六之二、节点侧：源码级定制节点组合
 
-节点的常驻宿主是一个**独立的 DSH 安装**（`npm i @deepseek-ai/dsh`），有自己的 `~/.dsh`：自己的 profile、自己的凭据库、自己的模型名册。所以新节点能启动、能答 `session/list`，然后**第一句话就失败** —— 那边没有 provider 路由、没有 API key。从桌面端看，这和"路由坏了"长得一模一样。
+### 问题
 
-**为什么不去 fork 源码删掉 UI**：节点上装的是 npm 上的包，不是我们的 checkout。fork 意味着每次官方更新都要手工合一次，而且节点与本机版本从此对不齐 —— 而 Session 日志格式随版本走，版本不一致会以"能连上但会话显示错乱"这种最难查的方式失败。用 `--patch` 达到同样效果，且**升级后自动跟随**。
+节点的常驻宿主是一个**独立的 DSH 安装**（`npm i @deepseek-ai/dsh`），有自己的 `~/.dsh`：自己的 profile、自己的凭据库、自己的模型名册。这带来两件事：
 
-插件在每次 `connect` 时做三件事，全部通过它自己拥有的文件与节点自己的 Remote API完成，**不改节点的 profile**：
+1. **它装的是 web-app 组合**，等于在服务器上加载一整套浏览器插件 —— 57 个 `dsh-client-ui-*`、SPA dist 服务、HMR 链、桌面 telemetry。没有窗口的机器上，这些要么空转，要么在缺 dist 时直接报错。
+2. **它没有 provider 路由、没有 API key**，所以能启动、能答 `session/list`，然后**第一句话就失败**。从桌面端看，这和"路由坏了"长得一模一样。
 
-1. **写一份它拥有的 overlay**（`~/.dsh-fleet/run/brain.patch.yml`），在宿主启动**之前**落盘，用 `--patch` 传入。内容是：本机 provider 路由、默认模型、权限预设 —— 从活的 `configEditor.configuration()` 复制，所以它跟着你本地配置走，不需要手抄。
-2. **把那些行点名的 key 推进节点的凭据库**：在本机 `credentials.resolve(ref)` 取值，通过节点的 `credentials/set` 写入。节点凭据库优先于它自己的环境变量，所以本机换 key，重连就同步。key 的 ref 不只从 `apiKeyEnv` 取 —— 那字段只有显式设置过才在组合后的 patch 里；没设时用 adapter 自己的默认值（`llm-deepseek-api-key` → `DEEPSEEK_API_KEY`），否则会得到一个"provider 加载成功但没有 key"的节点。
-3. **关掉浏览器插件**：每个 `@deepseek-ai/dsh-client-ui-*` 行 `disabled: true`。这份清单是每次连接从**活的组合**现算的，不是写死的，所以升级新增的 UI 插件下次连接就会被丢掉。
+### 决定：定制**组合**，不 fork **包**
 
-overlay 幂等：字节没变就不重启节点宿主。`connect` 会在 `provision` 里报告 `rows` / `disabled` / `refs`。
+这是本节的核心取舍，也是本轮否掉前一个方案的原因。
 
-实测（192.168.3.93）：202 行组合里关掉 56 个 UI 行，宿主常驻内存 375 MB → 331 MB。省的不算多（那些 UI 插件在无头宿主上本来就大半是空转），真正的收益是**少了一批没人浏览的客户端 bundle 和它们的连接状态**，以及节点配置完全由本机驱动。
+上游发布的 6 个 bundle 是：`base`（核心，无 Host）、`web-app`（核心 + 浏览器面）、`headless`（一次性任务，无 Host/HTTP）、`acp-app`、`sdk-app`、`sdk-minimal`。**没有一个是大脑**：唯一带 Host + HTTP + Remote API 的是 `web-app`，而它同时带着整个浏览器面。
+
+两条路：
+
+| | fork `@deepseek-ai/dsh-*` 源码删 UI | **定制组合层（采用）** |
+|---|---|---|
+| 节点上装什么 | 自己发布的 fork 包 | 官方包 + 一个本地 bundle |
+| 上游升级 | 每次手工 merge，冲突要人判 | `npm i` 换版本即可 |
+| 版本对齐 | 节点与本机版本从此可能不一致 | 天然一致（同版本官方包） |
+| 删 UI 的彻底程度 | 物理删除 | 组合层不含该行 → **根本不加载** |
+| 出问题的样子 | 编译错或运行期缺符号 | 组合缺行 → 启动时明确报 "entry did not activate" |
+
+关键认识：**"删掉"不等于"物理删代码"**。DSH 是 Cordis 组合式架构，一个插件是否存在于运行时完全由 profile 的组合层决定。组合层里没有 `@deepseek-ai/dsh-client-ui-*` 这些行，那些包连 `import` 都不会发生 —— 效果等价于删除，但可逆、可跟随升级。
+
+所以节点侧是一个新包 **`@local/dsh-fleet-brain`**，它是一个合法的 DSH bundle（声明 `dsh.bundle.patch`），内容是 `dsh-web-app` 减去浏览器面。节点 profile 组合：
+
+```
+@deepseek-ai/dsh-base + @local/dsh-fleet-brain      ← 现在是这个
+@deepseek-ai/dsh-base + @deepseek-ai/dsh-web-app    ← 之前是这个
+```
+
+`dsh-web-app` 这一层根本不出现在组合里，不是"加载后再 disable"。
+
+### 怎么减：从**已安装的 release** 派生，不是从 master
+
+98 行的 upstream patch 手抄会腐。所以 `packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs` 做这个减法并生成 patch：
+
+- **keep**：全部 host-plane 行 —— Remote 控制器（session/workspace/workspaceFiles/job/terminal/settings）、传输层（webserver、`/api`、launch-token 认证）、服务（workspace、schedule、mcp-manager、agent-preset-registry）、`web-startup`。
+- **drop**：全部 `@deepseek-ai/dsh-client-ui-*`（节点没有窗口），加 9 个浏览器专属行，每个在脚本里写明理由：
+
+  | 行 | 为什么大脑不要 |
+  |---|---|
+  | `web-runtime` | 挂 SPA dist、开桌面浏览器 —— 换成 `brain-runtime` |
+  | `modules` | 组装 `window.__DSH_BOOT__`、serve `/plugins/*/client.js` |
+  | `client-hmr` | 浏览器热更链 |
+  | `harness-dev-context` | 提示词里写"你正在扩展这个 GUI" —— 没有 GUI |
+  | `directory-picker` | 在节点的屏幕上弹原生目录框 |
+  | `open-in-app` | 在节点上启动桌面应用 |
+  | `session-log-download` | 浏览器下载对话框 |
+  | `product-analytics` / `desktop-product-telemetry` | 桌面端遥测 |
+
+- **公式化的两条**（不手抄，从上游读）：`system-prompt` 与 `session-query-sqlite` 两个 surface 值；以及 agent plane 的 22 条 `disabled: true`（大脑的 Session 和桌面一样通过 preset 挂工具，所以基础层的工具行必须同样让位）。
+
+**为什么必须从已安装的 release 派生**：第一版从 master 生成，多出了一行 `authentication-token`。而 `0.2.2-rc.3` 根本没有发布 `dsh-host-authentication-token` 这个包，节点启动报 `1 entry did not activate: Cannot find package '@deepseek-ai/dsh-host-authentication-token'`。master 领先于发布版，组合必须描述它要**启动进去的那个运行时**。现在脚本默认读 `DSH_INSTALL_DIR`（已安装），checkout 只作为对照手段。
+
+### 大脑自己的运行时胶水
+
+`web-runtime` 被拿掉后，少的是"打印入口 URL"这一步 —— 而这一行是插件**解析端口和 launch token 的唯一来源**。所以 `@local/dsh-fleet-brain/runtime` 接管它：
+
+- 提供 `webApp` 服务（Host 契约的一部分，其它行会读）;
+- 等 Loader 组合完成后，用 `connection.authenticatedUrl()` 打印 `dsh web: <url>`，格式与本机桌面端解析的那一行完全一致;
+- **不挂** `frontend-static`（没有 dist 可服务）、**不开**浏览器。
+
+### 传送链路：生成物，不手改
+
+```
+packages/dsh-fleet-brain/
+  cordis.patch.yml            ← 生成物（98 行上游 → 60 行大脑）
+  presets/*.patch.yml         ← 原样复制（大脑的 Session 也要有 standard preset）
+  src/runtime.js              ← 手写：唯一的大脑专属代码
+  scripts/sync-from-upstream.mjs   ← 做减法并生成上面两者
+  scripts/check-composition.mjs    ← 断言结果"仍然是个大脑"
+  scripts/embed-into-fleet.mjs     ← 把整包嵌进插件
+        ↓
+packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符串常量）
+```
+
+**为什么嵌进插件而不是运行时读路径**：插件跑在 DSH 自己的安装里（桌面构建里是 `app.asar` 内部），不能假设 `dsh-fleet-brain` 这个包在同一块盘上。嵌入后没有运行时路径假设。
+
+节点上落到 `~/.dsh/profiles/web/node_modules/@local/dsh-fleet-brain/` —— **profile 自己的 `node_modules`**，因为 Loader 解析一行 `name` 时的 profile 拦截层就是它。
+
+### 幂等与顺序
+
+`connect` 的 provision 阶段现在做四件事，全部在宿主启动**之前**：
+
+1. `writeBrainBundle` — 按 path+content 的 sha256 判断是否要重写；一致就跳过（实测第二次返回 `{changed:false}`）。
+2. `writeProfileBundles` — 只在 bundle 列表不同时写 profile manifest。
+3. `writePatch` — 模型行 + 权限预设的 overlay（下节）。
+4. 启动，`patchChanged = 任一为真` 时重启。
+
+### 模型与凭据：仍然用 overlay + Remote API
+
+组合层决定"有哪些插件"，但不决定"模型是什么、key 是哪把"。这两件事每次连接同步：
+
+1. **overlay**（`~/.dsh-fleet/run/brain.patch.yml`，`--patch` 传入）：从活的 `configEditor.configuration()` 复制 provider 路由、默认模型、权限预设。账号登录型 provider 不复制（那是本机的登录态）。overlay 是插件拥有的文件，**不改节点 profile 里的 patch**。
+2. **凭据**：那些行点名的 `apiKeyEnv` 在本机 `credentials.resolve()` 取值，通过节点自己的 `credentials/set` 写入节点凭据库。key 的 ref 不只从 `apiKeyEnv` 取 —— 那字段只有显式设置过才在组合后的 patch 里；没设时用 adapter 默认值（`llm-deepseek-api-key` → `DEEPSEEK_API_KEY`），否则会得到"provider 加载成功但没有 key"的节点。
+
+`connect` 在 `provision` 里报告：`rows` / `disabled` / `refs` / `composition{bundle, files, changed}`。
+
+### 验证
+
+- `scripts/check-composition.mjs`：断言 7 个 Remote 控制器行在、5 个传输行在、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、4 个 preset 文件都存在且被声明、整份 YAML 能解析。
+- 实测（192.168.3.93，DSH 0.2.2-rc.3）：`base + brain` 组合启动成功并打印 `dsh web: http://127.0.0.1:…?token=…`，四个端到端测试全绿。
+
+### 遗留的一处真实风险
+
+组合层的行 id 是上游的内部命名（`session-controller`、`workspace-files` …）。上游重命名一行，本包的 patch 就会指向一个不存在的 id。Cordis 对此的处理是**静默跳过**还是报错，取决于 Loader 版本 —— 所以 `check-composition.mjs` 把它变成启动前的显式断言，而不是靠运行期发现。
 
 ---
 
@@ -186,7 +309,9 @@ overlay 幂等：字节没变就不重启节点宿主。`connect` 会在 `provis
 | `tool-parity.mjs` | 镜像方案过不了的那一关：agent 自己的 `read`/`write`/`edit`/`grep`/`glob` 打的是节点真实路径，没有路径类失败，整份 transcript 里没有 Windows 路径 | 同上 |
 | `tool-git-image.mjs` | `git` 打真仓库、`read_image` 开真 PNG、`grep` 搜真文件 —— 三个在"工具在本地跑、只是对着镜像"时必然坏掉的工具 | 同上 |
 | `multipart-unit.mjs` | Gateway 的 `multipart/form-data` 应答能解：字节附件在正确的 JSON 路径上还原成 `Uint8Array`，畸形分片被拒绝而不是静默读成 `null` | 无 |
-| `provision-unit.mjs` | 下发给节点的东西是对的：provider 行复制而账号行不复制、行里没写 `apiKeyEnv` 时也能推断出 key ref、只禁用浏览器行、overlay 能过真 YAML 解析器 | Electron Node（解析器在 `app.asar` 里） |
+| `provision-unit.mjs` | 下发给节点的东西是对的：provider 行复制而账号行不复制、行里没写 `apiKeyEnv` 时也能推断出 key ref、overlay 能过真 YAML 解析器 | Electron Node（解析器在 `app.asar` 里） |
+| `dsh-fleet-brain/scripts/check-composition.mjs` | 节点组合仍然是个**大脑**：7 个 Remote 控制器行在、5 个传输行在、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、preset 文件齐全且已声明、YAML 可解析 | Electron Node（借用安装里的 YAML 解析器） |
+| `dsh-fleet-brain/scripts/sync-from-upstream.mjs` | 组合可重新生成（幂等；生成后与已提交版本一致即说明没有手改生成物） | 已安装的 DSH release |
 | `client-bundle.mjs` | 桌面端真的 serve 了这份客户端代码；三个槽位注册且能渲染 | 运行中的 Host |
 
 升级 DSH 之后该按什么顺序重跑、每个测试守的是哪条上游契约，见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](../packages/dsh-fleet/docs/UPGRADE.zh.md)。
