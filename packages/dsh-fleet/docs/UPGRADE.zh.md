@@ -82,13 +82,13 @@ node test/workspace-flow.mjs  <base> <token>
 node test/tool-parity.mjs     <base> <token>
 node test/tool-git-image.mjs  <base> <token>
 node test/client-bundle.mjs   <base> <token>
+node test/event-relay.mjs     <base> <token>
 ```
 
-`gateway-smoke` 只用环境变量（它不经过本地 Host）；其余五个要一个跑着的 Host
+`gateway-smoke` 只用环境变量（它不经过本地 Host）；其余六个要一个跑着的 Host
 （`dsh --profile <非 desktop> --host 127.0.0.1 --port 0 --no-open`）和一个已连接节点。
 
-这五个要一个跑着的 Host（`dsh --profile <非 desktop> --host 127.0.0.1 --port 0 --no-open`）
-和一个已连接节点。四个断言最值钱：
+四个断言最值钱：
 
 | 断言 | 说明它守住了什么 |
 |---|---|

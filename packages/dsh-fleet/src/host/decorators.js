@@ -1,6 +1,6 @@
 /**
- * The four routing decorators: `session`, `workspace`, `workspaceFiles`,
- * `terminal`.
+ * The four routing decorators plus the merged control stream: `session`,
+ * `workspace`, `workspaceFiles`, `terminal`.
  *
  * Each factory takes the live upstream Service and the router, and returns an
  * undo function. Nothing here replaces a Loader row, imports from inside
@@ -13,6 +13,7 @@
  *
  * @module @local/dsh-fleet/host/decorators
  */
+import { mergeControlStream } from './remote-control.js'
 import { AsyncQueue, decodeRemoteId, decorateMethods, remoteIterable } from './routing.js'
 
 /** Read a nested request field without trusting its shape. */
@@ -43,15 +44,17 @@ function sessionIdIn(request) {
  *
  * Routed: `list`, `search`, `create`, `rename`, `fork`, `prompt`, `cancel`,
  * `updateQueue`, `attachment`, `page`, `events`, `state`, `wait`, `projections`,
- * `selectModel`, `modelCatalog`, `follow`, `observeEvent`, `observeProjections`,
- * `observeState`. Everything else (`openWorkspacePath`, `skills`, …) stays local.
+ * `selectModel`, `modelCatalog`, the four per-Session streams, and `control`
+ * (merged rather than forwarded — it is Host-wide, not per-Session). Everything
+ * else (`openWorkspacePath`, `skills`, …) stays local.
  *
  * @param {object} service - the live upstream `SessionController`.
  * @param {import('./router.js').Router} router
  * @param {import('./remote-workspaces.js').RemoteWorkspaces} workspaces
+ * @param {import('./remote-control.js').RemoteControl} control
  * @returns {() => void}
  */
-export function decorateSessionController(service, router, workspaces) {
+export function decorateSessionController(service, router, workspaces, control) {
   /** The node a workspace belongs to, if the workspace is remote. */
   const nodeOfWorkspace = workspaceId => decodeRemoteId(workspaceId)
 
@@ -157,6 +160,19 @@ export function decorateSessionController(service, router, workspaces) {
     observeEvent: local => streaming('observeEvent', local),
     observeProjections: local => streaming('observeProjections', local),
     observeState: local => streaming('observeState', local),
+
+    // --- the Host-wide control stream ---------------------------------------
+    // Every attached client keeps a Session list from this stream, so a remote
+    // Session's title, model selection and pending-input flags only move if its
+    // frames reach the client. There is nothing to route here: the frame carries
+    // the Session id, and the merged stream is per consumer, so `control` becomes
+    // one merged stream instead of one forwarded call.
+    //
+    // The inner function must not be called `control`: it would shadow the
+    // `RemoteControl` argument in its own body.
+    control: local => function controlStream(signal) {
+      return mergeControlStream(local(signal), control, signal)
+    },
   })
 }
 

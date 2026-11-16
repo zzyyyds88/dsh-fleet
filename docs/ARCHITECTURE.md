@@ -110,6 +110,8 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 | `session/create` | **路由** | 目标 workspace 是远程的 → 在节点上建 Session（节点上真的有 `~/.dsh/sessions/--root-<dir>--/`） |
 | `session/prompt`、`cancel`、`rename`、`fork`、`attachment`、`page`、`events`、`state`、`wait`、`projections`、`selectModel`、`updateQueue` | **路由** | 按 `sessionId` / `address` 找到节点 |
 | `session/follow`、`observeEvent`、`observeProjections`、`observeState` | **合并/桥接** | 流方法的第一个位置参数**就是** request 对象本身（不是 `{request}` 包装），转发时按节点形参名 `request` 重新包一层 |
+| `session/control` | **合并** | Host 级、每连接一条，不是按 Session 路由：本地流 + 每个节点的投影块，并成一帧 baseline 再串增量 |
+| `$events`（网关自有端点） | **中继** | 节点的 `api-session/*` 事件重新在本机 emit，身份包成本地形式；同一流上的 waterfall 用 `next` 答掉 |
 | `workspace/follow` | **合并** | 一条流里同时推送本地 baseline 与每个节点 baseline；之后再串各自增量 |
 | `workspace/create` | **按路径路由** | 绝对 POSIX 路径逐节点尝试（节点侧 `realpath` 校验必须通过） |
 | `workspace/rename` 等变更 | **按 owner 转发** | 按 workspaceId 找节点 |
@@ -119,6 +121,24 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 | `session/modelCatalog`、`agentPresets/*`、`settings/*`、`pluginManager/*` | **保持本地** | 描述的是**这个安装**的模型与配置，与节点无关 |
 
 `workspace/create` 的按路径路由有个现实理由：**本地目录选择器只能浏览本机**，永远选不到节点上的 `/root/project`。所以远程工作区从 `/fleet/api/workspaces` 加入（设置页节点行展开后的输入框），它在节点上 `workspace/create`，再把结果包装成本地身份还回来。
+
+### 为什么"快照对"不等于"侧栏活"
+
+上面这些合并回答的是**某一刻的状态**。侧栏不是靠快照重建的：上游客户端另有两路活流，本地 Session 天然在流里，远程 Session 不在 —— 只做合并的话，行会"在，但死着"。
+
+| 活流 | 携带什么 | 不中继的症状 |
+|---|---|---|
+| `$events`（网关自有端点）→ `api-session/added`、`removed`、`status`、`activity`、`error` | 行的新增/消失、运行中的转圈、最近活动时间、agent 错误 | 新建的远程 Session 要等下一次整表拉取才出现；转圈永远不转 |
+| `session/control` → 每个 Session 的投影块（`title`、`modelSelection`、`permissions`、`inbox`…） | 标题、选中模型、待处理的审批/提问标记 | 标题停在 "New Session"，节点上改的标题永远追不过来 |
+
+两路都是 **Host 级、每连接一条**，不是按 Session 路由，所以处理方式不是转发而是**并流**：
+
+- `session/control` 由 `RemoteControl` 持有每个节点一条，合成一份 baseline（远程块的身份用本地包裹形式），每个本地消费者各拿一条合并流。节点 baseline 变化时重发整帧 —— 客户端把 baseline 当"替换"，这正是"节点中途连上也能出现"的机制。
+- `$events` 由 `RemoteEvents` 每个节点开一条，把闭合白名单里的五个事件用 `Router.toLocal` 包一遍后在本机 `ctx.emit`。上游的 `api-remotes` 本来就会把这些事件转发给每个已连接客户端，所以**浏览器侧一行没改**，远程事件就走本地事件同一条管道。
+
+白名单是闭合的：重发一个本机也会发的事件是安全的（客户端按身份合并），但重发一个需要本机 `Agent` 才能解释的事件不是。`test/event-relay.mjs` 用的判据是"在节点上直接建的 Session" —— 本机没发过那个调用，浏览器听到的一切只可能来自中继。
+
+同一 `$events` 流上还有 `approval/request`、`user-questions/request` 两个 waterfall。它们被 `next` 答掉（节点的默认行为），因为本机没有对应的 Agent 可询问；**不应答的 waterfall 会一直挂着**，那会把远程回合卡死。这是当前真实功能上限：远程会话里的审批不会弹到本地界面。
 
 ---
 
@@ -153,7 +173,9 @@ packages/dsh-fleet/
       routing.js        身份编解码、AsyncQueue、ChangeSignal、own-property 覆写
       router.js         toRemote / toLocal / toLocalWorkspace / call / 流
       remote-workspaces.js  每节点一条 workspace/follow，baseline 缓存与合并
-      decorators.js     四个命名空间的路由装饰器
+      remote-events.js  每节点一条 $events，把 api-session/* 中继进本机事件总线
+      remote-control.js 每节点一条 session/control，投影块并流给每个客户端
+      decorators.js     四个命名空间的路由装饰器 + 合并后的 control 流
       lookups.js        workspaceFileScope lookup 覆写
       fleet.js          节点运行时状态机
     client/client.js    设置页 + 侧栏面板 + 主区页面
@@ -329,7 +351,7 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 ### 验证
 
 - `scripts/check-composition.mjs`：断言 7 个 Remote 控制器行在、4 个传输行在（`webserver` / `connection` / `api-remotes` / `web-startup`）、`brain-runtime` 在、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、4 个 preset 文件都存在且被声明、整份 YAML 能解析。
-- 实测（192.168.3.93，DSH 0.2.2-rc.3）：`base + brain` 组合启动成功并打印 `dsh web: http://127.0.0.1:…?token=…`，五个端到端测试全绿。
+- 实测（192.168.x.x，DSH 0.2.2-rc.3）：`base + brain` 组合启动成功并打印 `dsh web: http://127.0.0.1:…?token=…`，五个端到端测试全绿。
 
 `check-composition` 里的传输行**故意只列 4 条而不是 5 条**：早期版本断言过 `authentication-token`，而 `0.2.2-rc.3` 没有发布那个包 —— 一个契约测试必须测**这个 release 的契约**，不能测记忆里的契约。launch token 由 `connection.authenticatedUrl()` 提供，所以 `connection` 那条才是必须的。
 
@@ -388,10 +410,13 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 | `dsh-fleet-brain/scripts/check-composition.mjs` | 节点组合仍然是个**大脑**：7 个 Remote 控制器行在、5 个传输行在、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、preset 文件齐全且已声明、YAML 可解析 | Electron Node（借用安装里的 YAML 解析器） |
 | `dsh-fleet-brain/scripts/sync-from-upstream.mjs` | 组合可重新生成（幂等；生成后与已提交版本一致即说明没有手改生成物） | 已安装的 DSH release |
 | `client-bundle.mjs` | 桌面端真的 serve 了这份客户端代码；三个槽位注册且能渲染 | 运行中的 Host |
+| `event-relay.mjs` | 在**节点上直接建**的 Session 能到达浏览器：`api-session/*` 列表事件与 `session/control` 投影帧都带着包裹后的身份到达；baseline 里有远程投影块；没有任何裸的节点 Session id 泄漏 | 运行中的 Host + 已连接节点 |
 
 升级 DSH 之后该按什么顺序重跑、每个测试守的是哪条上游契约，见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](../packages/dsh-fleet/docs/UPGRADE.zh.md)。
 
-`test/carrier.mjs` 是被后四个共用的最小测试客户端，含一条硬要求：**必须应答 Gateway 的 2 秒 ping**，否则两秒后流被静默关闭 —— 这会让路由 bug 伪装成传输 bug。
+`test/carrier.mjs` 是被后五个共用的最小测试客户端，含一条硬要求：**必须应答 Gateway 的 2 秒 ping**，否则两秒后流被静默关闭 —— 这会让路由 bug 伪装成传输 bug。
+
+`host-routing.mjs` 自己建 fixture：在远程工作区里建一个 Session、改名、并在节点上写一个 4×4 PNG 和一份文本。它曾经借用"最新一条远程 Session"和别的测试留下的 `git-image/` 目录 —— 那种写法会让结果取决于测试顺序，而一次因为目录空而失败的运行看起来和路由坏了完全一样。
 
 ---
 

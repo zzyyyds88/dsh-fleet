@@ -9,6 +9,7 @@
  * Usage: node test/host-routing.mjs <hostBase> <launchToken>
  */
 import { authenticate, call as rawCall, liveStream, openCarrier } from './carrier.mjs'
+import { nodeExec } from './node.mjs'
 
 const [base, token] = process.argv.slice(2)
 if (base === undefined || token === undefined) {
@@ -55,7 +56,7 @@ if (remoteSession === undefined) {
   log('no remote session to drive')
   process.exit(1)
 }
-const sessionId = remoteSession.sessionId
+let sessionId = remoteSession.sessionId
 
 // ---- 2. workspace/follow: one merged baseline ----------------------------
 const wsStream = liveStream(carrier, 'workspace/follow', {})
@@ -70,6 +71,35 @@ check((remoteWorkspaces[0]?.path ?? '').startsWith('/'), 'the remote workspace k
 check((baseline?.items ?? []).some(item => !String(item.workspaceId).startsWith('fleet_')),
   'local workspaces survive in the same baseline')
 wsStream.stop()
+
+if (remoteWorkspaces.length > 0) {
+  // Drive a Session this test owns, in a remote workspace, rather than whatever
+  // happens to be newest. A fresh Session has no title and an empty directory, so
+  // the file assertions below would be about ambient node state instead of about
+  // routing — and they would pass or fail depending on what ran here last.
+  const path = String(remoteWorkspaces[0].path)
+  const created = await call('session/create', {
+    request: { workspaceId: remoteWorkspaces[0].workspaceId },
+  })
+  const owned = created?.sessionId
+  if (typeof owned === 'string') {
+    sessionId = owned
+    await call('session/rename', { request: { sessionId, title: `routing fixture ${Date.now().toString(36)}` } })
+    const reread = await call('session/list', { _request: {} })
+    const row = (reread?.items ?? []).find(item => item.sessionId === sessionId)
+    check(String(row?.projections?.values?.title ?? '').length > 0,
+      'a remote row carries its title', String(row?.projections?.values?.title).slice(0, 40))
+  }
+  // A verified 4x4 solid-red RGBA PNG plus a text file, written on the node only.
+  // The binary-read assertions below need a file that certainly exists and is
+  // certainly a PNG; borrowing one from an earlier test's fixture would make this
+  // test's result depend on test order.
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAEklEQVR4nGP4z8DwHxkzkC4AADxAH+HggXe0AAAAAElFTkSuQmCC'
+  await nodeExec([
+    `printf 'routing fixture\\n' > ${path}/routing-fixture.txt`,
+    `echo '${png}' | base64 -d > ${path}/routing-fixture.png`,
+  ].join(' && '))
+}
 
 // ---- 3. unary routing ---------------------------------------------------
 const state = await call('session/state', { request: { sessionId } })
@@ -142,12 +172,12 @@ if (localRow !== undefined) {
 // This is the file-preview path (images, PDFs). A JSON-only client sees an
 // unparseable `HTTP 200` here, which is easy to misread as a broken node.
 try {
-  const listing = await call('workspaceFiles/list', { workspaceFileScopeId: sessionId, path: 'git-image' })
+  const listing = await call('workspaceFiles/list', { workspaceFileScopeId: sessionId, path: '.' })
   const binary = (listing?.entries ?? []).find(entry => entry?.type === 'file' && /\.png$/u.test(String(entry.name)))
   if (binary !== undefined) {
     const bytes = await call('workspaceFiles/readBytes', {
       workspaceFileScopeId: sessionId,
-      path: `git-image/${String(binary.name)}`,
+      path: String(binary.name),
       options: {},
     })
     const payload = bytes?.data

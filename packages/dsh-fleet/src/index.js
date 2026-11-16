@@ -29,6 +29,8 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { apiError, describeFailure, readJsonBody, sendJson } from './core/http-error.js'
 import { Fleet } from './host/fleet.js'
+import { RemoteControl } from './host/remote-control.js'
+import { RemoteEvents } from './host/remote-events.js'
 import { RemoteWorkspaces } from './host/remote-workspaces.js'
 import { Router } from './host/router.js'
 import { overrideWorkspaceFileScope } from './host/lookups.js'
@@ -87,6 +89,7 @@ export function apply(ctx, config = {}) {
   })
   const workspaces = new RemoteWorkspaces(fleet)
   const router = new Router({ fleet, log })
+  const control = new RemoteControl(fleet, router, log)
   /** @type {Array<() => void>} */
   const disposers = []
 
@@ -245,7 +248,7 @@ export function apply(ctx, config = {}) {
     const files = scope.get('workspaceFiles')
     if (session === undefined || workspace === undefined || files === undefined) return
     const undo = [
-      decorateSessionController(session, router, workspaces),
+      decorateSessionController(session, router, workspaces, control),
       decorateWorkspaceController(workspace, router, workspaces),
       decorateWorkspaceFiles(files, router),
     ]
@@ -303,7 +306,27 @@ export function apply(ctx, config = {}) {
     ctx.on(event, () => scheduleSync(event))
   }
 
+  // ---- Node events -----------------------------------------------------------
+  // `session/list` and `workspace/follow` are snapshots. The sidebar also *listens*:
+  // upstream's client half keeps its list live from five `api-session/*` events, and
+  // a remote Session emits none locally. This relays a node's forwarded-event stream
+  // into this Host's own bus with the identities wrapped, so a remote row updates
+  // through exactly the path a local one uses.
+  const remoteEvents = new RemoteEvents(fleet, router, {
+    emit: (event, args) => ctx.emit(event, ...args),
+    log,
+  })
+
   // ---- Boot and teardown ----------------------------------------------------
+  disposers.push(fleet.subscribe(() => {
+    remoteEvents.sync()
+    control.sync()
+  }))
+  disposers.push(ctx.effect(() => () => {
+    remoteEvents.dispose()
+    control.dispose()
+  }, 'dsh-fleet: node events and control'))
+
   disposers.push(ctx.effect(() => {
     if (config.autoConnect === false) return () => undefined
     const timer = fleet.autoConnect(2_000)
@@ -317,6 +340,5 @@ export function apply(ctx, config = {}) {
     }
     router.dispose()
     workspaces.dispose()
-    fleet.dispose()
-  }, 'dsh-fleet: routes and connections'))
+    fleet.dispose()  }, 'dsh-fleet: routes and connections'))
 }

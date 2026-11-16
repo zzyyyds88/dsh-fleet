@@ -97,6 +97,13 @@ DSH 的桌面端很好用，但它的**工具全部跑在本机**。当你需要
 因为它们本来就是本地的。同时远端会话出现在**同一个侧栏**里，手机端自然也能读到 ——
 对 Host 来说它们就是普通会话。
 
+列表是快照，侧栏靠的是活流。上游客户端另外订阅两路，本地会话天然在流里，
+远端会话不在 —— 只做合并的话行会"在，但死着"（标题停在 "New Session"、
+运行中转圈不转、在节点上新建的会话要等下一次整表拉取才出现）。所以插件还并流
+两件事：每个节点一条 `$events`（`api-session/*` 重发到本机事件总线）和一条
+`session/control`（每会话的 `title`、`modelSelection`、待处理审批标记）。
+两路都是 Host 级、每连接一条，所以是**并流**而不是转发 —— 浏览器侧同样一行没改。
+
 ### 3.2 三处运行时缝隙（而不是改上游代码）
 
 插件**不 import 任何 `@deepseek-ai/*`**，唯一运行时依赖是 `ssh2`。
@@ -180,7 +187,7 @@ read_image     → image/png image, 4x4 px, 75 bytes
 grep           → 命中 module.exports
 ```
 
-**节点确实是个大脑**（实测 192.168.3.93 / DSH 0.2.2-rc.3）：
+**节点确实是个大脑**（实测 192.168.x.x / DSH 0.2.2-rc.3）：
 
 ```
 profile bundles : @deepseek-ai/dsh-base + @local/dsh-fleet-brain
@@ -189,13 +196,13 @@ dsh-client-ui-* : 0
 web-runtime     : 0
 ```
 
-**测试矩阵**：9 项，分三层。
+**测试矩阵**：14 项，分三层。
 
 | 层 | 脚本 |
 |---|---|
 | 纯逻辑 | `routing-unit`、`multipart-unit`、`provision-unit`、`check-composition` |
 | 契约缝隙（读 `app.asar`，需 Electron 的 Node） | `dispatch-seam`、`upstream-smoke` |
-| 端到端（要运行中的 Host + 连上的节点） | `host-routing`、`workspace-flow`、`tool-parity`、`tool-git-image`、`client-bundle` |
+| 端到端（要运行中的 Host + 连上的节点） | `gateway-smoke`、`host-routing`、`workspace-flow`、`tool-parity`、`tool-git-image`、`client-bundle`、`event-relay` |
 
 ---
 

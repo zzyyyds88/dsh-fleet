@@ -172,9 +172,10 @@ exactly as before.
 | `node test/tool-parity.mjs <base> <token>` | The check the mirror-based approach could not pass: the agent's own `read` / `write` / `edit` / `grep` / `glob` run against the node's real paths, with no path failure and no Windows path anywhere in the transcript. |
 | `node test/tool-git-image.mjs <base> <token>` | `git` on a real repository, `read_image` on a real PNG, and `grep` over real files — the three tools that returned `code=127` or `ENOENT` when the tools ran locally against a mirror. |
 | `node test/client-bundle.mjs <base> <token>` | The shell serves this plugin's client module, and its three slots register and render. |
+| `node test/event-relay.mjs <base> <token>` | A Session created **on the node** reaches the browser: its `api-session/*` list events and its `session/control` projections both arrive under the wrapped identity. This is what makes a remote row's title, spinner and new-Session insertion happen live instead of on the next full list pull. |
 
-The last five need a running Host; `host-routing`, `workspace-flow`, `tool-parity`
-and `tool-git-image` also need at least one connected node. Set
+The last six need a running Host; `host-routing`, `workspace-flow`, `tool-parity`,
+`tool-git-image` and `event-relay` also need at least one connected node. Set
 `DSH_FLEET_TEST_HOST` / `DSH_FLEET_TEST_USER` / `DSH_FLEET_TEST_PASSWORD` to point
 them at a different machine.
 
