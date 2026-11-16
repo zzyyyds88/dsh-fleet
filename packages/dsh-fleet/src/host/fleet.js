@@ -13,8 +13,18 @@ import { NodeRegistry } from '../core/registry.js'
 import { SecretStore, authFromSecret } from '../core/secrets.js'
 import { SshConnection } from '../ssh/connection.js'
 import { RemoteHost } from '../remote/daemon.js'
+import { BRAIN_FILES, BRAIN_PACKAGE } from './brain-bundle.generated.js'
 import { Provisioner } from './provision.js'
 import { RemoteGateway } from './remote-gateway.js'
+
+/**
+ * The bundle list a node's profile composes.
+ *
+ * `dsh-base` is the shared core; the brain bundle is that core plus a Host and the
+ * Remote API, with the browser surface removed. Upstream's `dsh-web-app` is
+ * deliberately absent: a node serves no window, so it never even loads that layer.
+ */
+export const BRAIN_BUNDLES = Object.freeze(['@deepseek-ai/dsh-base', BRAIN_PACKAGE])
 /** Connection lifecycle of one node, as a settings surface shows it. */
 export const NODE_STATE = Object.freeze({
   IDLE: 'idle',
@@ -250,11 +260,15 @@ export class Fleet {
         this.#publish()
         const installed = await runtime.host.installedVersion()
         if (installed !== this.version) await runtime.host.install(runtime.facts)
-        // Provision BEFORE starting: the overlay has to be on disk for the host to
-        // load it, and a node whose brain rows are missing would come up looking
-        // healthy and then fail its first prompt.
+        // Customise the node BEFORE starting it: install the brain bundle where the
+        // Loader resolves bundles from, point the profile at it, and write the model
+        // overlay. All three have to be on disk for the host to load them, and a node
+        // that came up with the wrong composition would look healthy and then either
+        // serve a browser surface it has no use for or load no tools at all.
         runtime.phase = 'provision'
         this.#publish()
+        const composition = await runtime.host.writeBrainBundle(BRAIN_FILES, BRAIN_PACKAGE)
+        const bundles = await runtime.host.writeProfileBundles(BRAIN_BUNDLES)
         const provisioner = new Provisioner({
           configEditor: this.configEditor,
           credentials: this.credentials,
@@ -267,7 +281,7 @@ export class Fleet {
         this.#publish()
         runtime.serving = await runtime.host.ensureServing({
           force: options.force === true,
-          patchChanged: wrote.changed,
+          patchChanged: wrote.changed || composition.changed || bundles.changed,
         })
         runtime.phase = 'verify'
         this.#publish()
@@ -279,7 +293,16 @@ export class Fleet {
         }
         // Credentials last: they can only be pushed once the host answers, and a
         // failure here must be reported without discarding a working connection.
-        runtime.provision = { rows: plan.rows.length, disabled: plan.disabled.length, refs: [] }
+        runtime.provision = {
+          rows: plan.rows.length,
+          disabled: plan.disabled.length,
+          refs: [],
+          composition: {
+            bundle: BRAIN_PACKAGE,
+            files: composition.files,
+            changed: composition.changed || bundles.changed,
+          },
+        }
         try {
           runtime.provision.refs = await provisioner.pushCredentials(runtime.gateway, plan.refs)
         } catch (error) {

@@ -16,6 +16,8 @@
  *
  * @module @local/dsh-fleet/remote/daemon
  */
+import { createHash } from 'node:crypto'
+import { basename } from 'node:path'
 import { SSH_FAILURE, toSshError } from '../ssh/connection.js'
 
 /** The Node major version the resident host needs. */
@@ -31,6 +33,11 @@ export const REMOTE_LAYOUT = Object.freeze({
   patch: '~/.dsh-fleet/run/brain.patch.yml',
   packageJson: '~/.dsh-fleet/runtime/package.json',
   cli: '~/.dsh-fleet/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js',
+  /** The node's DSH home and the profile this plugin owns. */
+  home: '~/.dsh',
+  profile: '~/.dsh/profiles/web',
+  /** Where the Loader resolves a bundle's row names from for that profile. */
+  profileModules: '~/.dsh/profiles/web/node_modules',
 })
 
 const PROBE_COMMAND = `
@@ -214,6 +221,123 @@ fi
       throw toSshError(new Error(`writing the brain overlay failed: ${(result.stderr || result.stdout).trim().slice(-400)}`))
     }
     return { changed: result.stdout.includes('written') }
+  }
+
+  /**
+   * Install the brain bundle under the node's DSH runtime, and point the profile
+   * at it.
+   *
+   * This is the source-level customisation of the node: the profile composes
+   * `dsh-base` + `@local/dsh-fleet-brain` instead of `dsh-base` + `dsh-web-app`, so
+   * the node never loads the browser surface at all — it is not loaded and then
+   * disabled, it is absent from the composition.
+   *
+   * The package lands in the **profile's** `node_modules`, which is where the
+   * Loader resolves a bundle's row names from (a profile's interception layer is
+   * its own `node_modules`). It is written by `exec`, not SFTP: one `sh` round trip
+   * for the whole tree beats a dozen SFTP round trips on a slow link, and the runtime
+   * is already a directory this plugin owns.
+   *
+   * @param {Record<string, string>} files - package-relative path → contents.
+   * @param {string} packageName - the bundle's package name.
+   * @returns {Promise<{ changed: boolean, files: number }>}
+   */
+  async writeBrainBundle(files, packageName) {
+    const target = `${REMOTE_LAYOUT.profileModules}/${packageName}`
+    // A digest over path+content decides `changed` without shipping the tree twice.
+    const digest = createHash('sha256')
+    for (const path of Object.keys(files).sort()) {
+      digest.update(path).update('\0').update(files[path]).update('\0')
+    }
+    const wanted = digest.digest('hex')
+    const stamp = `${target}/.fleet-digest`
+
+    const payload = Object.entries(files).map(([path, text]) => ({
+      path,
+      // `base64 -d` per file keeps a heredoc out of the picture entirely.
+      data: Buffer.from(text, 'utf8').toString('base64'),
+    }))
+    const script = `
+set -eu
+target=${target}
+stamp=${stamp}
+if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "${wanted}" ]; then
+  echo unchanged
+  exit 0
+fi
+rm -rf "$target"
+mkdir -p "$target"
+cd "$target"
+while IFS='\t' read -r rel data; do
+  mkdir -p "$(dirname "$rel")"
+  printf '%s' "$data" | base64 -d > "$rel"
+done <<'FLEET_BRAIN_FILES_EOF'
+${payload.map(file => `${file.path}\t${file.data}`).join('\n')}
+FLEET_BRAIN_FILES_EOF
+printf '%s' "${wanted}" > "$stamp"
+echo written
+`.trim()
+    const result = await this.connection.exec({
+      argv: ['sh', '-c', script],
+      timeoutMs: 120_000,
+      // The script echoes nothing but its verdict, so a small cap is enough.
+      maxBytes: 64 * 1024,
+    })
+    if (result.code !== 0) {
+      throw toSshError(new Error(
+        `installing the brain bundle failed: ${(result.stderr || result.stdout).trim().slice(-600)}`,
+      ))
+    }
+    return { changed: result.stdout.includes('written'), files: Object.keys(files).length }
+  }
+
+  /**
+   * Point the profile at `bundles`, writing its manifest only when it differs.
+   *
+   * The profile manifest is the *only* place the bundle list lives, so this is what
+   * makes a node a brain rather than a web app. It is written as JSON with the
+   * profile's own `dsh.profile.bundles` order preserved for everything else.
+   * @param {readonly string[]} bundles
+   * @returns {Promise<{ changed: boolean }>}
+   */
+  async writeProfileBundles(bundles) {
+    const manifestPath = `${REMOTE_LAYOUT.profile}/package.json`
+    const read = await this.connection.exec({
+      argv: ['sh', '-c', `cat ${manifestPath} 2>/dev/null || echo '{}'`],
+      timeoutMs: 15_000,
+    })
+    /** @type {Record<string, unknown>} */
+    let manifest = {}
+    try {
+      manifest = JSON.parse(read.stdout)
+    } catch {
+      // A corrupt manifest is replaced rather than preserved: it cannot compose
+      // anything, and keeping its bytes would only hide that.
+    }
+    const current = manifest?.dsh?.profile?.bundles
+    const same = Array.isArray(current) && current.length === bundles.length
+      && current.every((name, index) => name === bundles[index])
+    if (same) return { changed: false }
+
+    const next = {
+      ...manifest,
+      name: manifest.name ?? `dsh-profile-${basename(REMOTE_LAYOUT.profile)}`,
+      private: true,
+      dependencies: manifest.dependencies ?? {},
+      dsh: {
+        ...(manifest.dsh ?? {}),
+        profile: { ...(manifest.dsh?.profile ?? {}), bundles: [...bundles] },
+      },
+    }
+    const encoded = Buffer.from(`${JSON.stringify(next, null, 2)}\n`, 'utf8').toString('base64')
+    const write = await this.connection.exec({
+      argv: ['sh', '-c', `mkdir -p ${REMOTE_LAYOUT.profile} && printf '%s' '${encoded}' | base64 -d > ${manifestPath}`],
+      timeoutMs: 30_000,
+    })
+    if (write.code !== 0) {
+      throw toSshError(new Error(`writing the profile manifest failed: ${(write.stderr || write.stdout).trim().slice(-400)}`))
+    }
+    return { changed: true }
   }
 
   /**

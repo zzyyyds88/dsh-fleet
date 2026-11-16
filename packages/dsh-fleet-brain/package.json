@@ -1,0 +1,50 @@
+{
+  "name": "@local/dsh-fleet-brain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The node-side DeepSeek Harness composition: a brain that runs agents and serves the Remote API, with the browser surface removed. Derived from @deepseek-ai/dsh-web-app by scripts/sync-from-upstream.mjs, so an upstream change shows up as a reviewable diff.",
+  "exports": {
+    ".": "./src/runtime.js",
+    "./runtime": "./src/runtime.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./presets/*.patch.yml": "./presets/*.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "presets/*.patch.yml",
+    "cordis.patch.yml",
+    "scripts",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/standard.patch.yml",
+        "./presets/ptc.patch.yml",
+        "./presets/minimal.patch.yml",
+        "./presets/cordis.patch.yml"
+      ]
+    }
+  },
+  "scripts": {
+    "sync": "node scripts/sync-from-upstream.mjs",
+    "check": "node scripts/check-composition.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-base": "*",
+    "@deepseek-ai/dsh-web-app": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-base": { "optional": true },
+    "@deepseek-ai/dsh-web-app": { "optional": true }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}
