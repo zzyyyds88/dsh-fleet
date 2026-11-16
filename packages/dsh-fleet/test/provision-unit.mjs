@@ -71,7 +71,7 @@ const rows = copyableRows({
   configuration: () => [
     {
       entry: { options: { id: 'llm-deepseek', name: '@deepseek-ai/dsh-llm-deepseek-api-key' } },
-      inherited: { baseURL: 'http://192.168.3.91:6700/v1', apiKeyEnv: 'DEEPSEEK_API_KEY' },
+      inherited: { baseURL: 'https://llm.example.test/v1', apiKeyEnv: 'DEEPSEEK_API_KEY' },
       override: {
         models: [{ id: 'deepseek-v4.1-flash', name: 'deepseek-v4.1-flash', maxTokens: 256000 }],
       },
@@ -107,7 +107,7 @@ check(ids.includes('permission'), 'the permission preset is copied')
 check(!ids.includes('ui-chat'), 'a browser row is not copied')
 
 const deepseek = rows.find(row => row.id === 'llm-deepseek')
-check(deepseek?.config.baseURL === 'http://192.168.3.91:6700/v1',
+check(deepseek?.config.baseURL === 'https://llm.example.test/v1',
   'inherited config is merged in', deepseek?.config.baseURL)
 check(Array.isArray(deepseek?.config.models) && deepseek.config.models.length === 1,
   'this profile’s override wins over the layer below',
@@ -126,7 +126,7 @@ check(nested.includes('OPENAI_API_KEY'), 'a nested provider’s apiKeyEnv is fou
 // provision a node whose provider loads but cannot authenticate.
 const noExplicitRef = credentialRefsOf([{
   name: '@deepseek-ai/dsh-llm-deepseek-api-key',
-  config: { baseURL: 'http://192.168.3.91:6700/v1' },
+  config: { baseURL: 'https://llm.example.test/v1' },
 }])
 check(noExplicitRef.includes('DEEPSEEK_API_KEY'),
   'an adapter’s default key ref is inferred when the row omits it', noExplicitRef.join(','))
@@ -181,7 +181,7 @@ if (YAML === undefined) {
     check(parsed.length === rows.length + disabled.length,
       'every plan row became exactly one patch', `${String(parsed.length)} patches`)
     const provider = parsed.find(patch => patch.id === 'llm-deepseek')
-    check(provider?.config?.baseURL === 'http://192.168.3.91:6700/v1',
+    check(provider?.config?.baseURL === 'https://llm.example.test/v1',
       'the provider URL survives the round trip', provider?.config?.baseURL)
     check(Array.isArray(provider?.config?.models) && provider.config.models[0]?.maxTokens === 256000,
       'the model list stays a list of objects, not a string',

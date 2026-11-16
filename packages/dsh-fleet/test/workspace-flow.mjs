@@ -16,6 +16,7 @@
  * Usage: node test/workspace-flow.mjs <hostBase> <launchToken>
  */
 import { Client } from 'ssh2'
+import { nodeConfig } from './node.mjs'
 import { authenticate, call as rawCall, liveStream, openCarrier } from './carrier.mjs'
 
 const [base, token] = process.argv.slice(2)
@@ -24,12 +25,7 @@ if (base === undefined || token === undefined) {
   process.exit(2)
 }
 
-const NODE = Object.freeze({
-  host: process.env.DSH_FLEET_TEST_HOST ?? '192.168.3.93',
-  port: 22,
-  username: process.env.DSH_FLEET_TEST_USER ?? 'root',
-  password: process.env.DSH_FLEET_TEST_PASSWORD ?? 'Azzy.1123',
-})
+const NODE = nodeConfig()
 
 const log = message => process.stderr.write(`[workspace-flow] ${message}\n`)
 const failures = []

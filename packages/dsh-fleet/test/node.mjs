@@ -3,8 +3,8 @@
  *
  * There is deliberately **no default credential and no default address**: this is
  * a public repository, and a test that quietly falls back to somebody's LAN IP and
- * password is a test that leaks one. Configure it once and the four node-backed
- * tests pick it up:
+ * password is a test that leaks one. Configure it once and the node-backed tests
+ * pick it up:
  *
  * ```bash
  * export DSH_FLEET_TEST_HOST=192.0.2.10      # RFC 5737 documentation address
@@ -55,12 +55,15 @@ export function nodeConfig() {
  * The tests use this as an independent witness: the plugin says a file was
  * written, and this reads it over a separate connection to prove it.
  * @param {string} command
+ * @param {object} [options]
+ * @param {ReturnType<typeof nodeConfig>} [options.config] - reuse a resolved config.
  * @returns {Promise<string>}
  */
-export async function nodeExec(command) {
+export async function nodeExec(command, options = {}) {
   const client = new Client()
+  const config = options.config ?? nodeConfig()
   await new Promise((resolve, reject) => {
-    client.on('ready', resolve).on('error', reject).connect({ ...nodeConfig(), readyTimeout: 20_000 })
+    client.on('ready', resolve).on('error', reject).connect({ ...config, readyTimeout: 20_000 })
   })
   try {
     return await new Promise((resolve, reject) => {
