@@ -142,13 +142,13 @@ packages/dsh-fleet/
   src/
     core/               nodes.json 注册表、凭据、HTTP 错误
     ssh/                ssh2 连接池、exec、forwardOut、错误分类
-    remote/             远端守护：probe / install / 节点组合 / overlay / start / verify
+    remote/             远端守护：probe / install / 节点 profile / 配置 / start / verify
     host/
       ssh-http.js       把 SSH channel 当 socket 用，手写 HTTP/1.1
       ws.js             手写 RFC 6455 客户端（应答 ping、帧重组）
       remote-gateway.js cookie 铸造、unary call（401 自动重试一次）、逻辑流
       multipart.js      Gateway 的 multipart 应答解码（字节附件还原）
-      provision.js      模型行复制、凭据下发、overlay 渲染
+      provision.js      模型行复制、凭据下发、配置渲染
       brain-bundle.generated.js  节点组合（生成物，来自 dsh-fleet-brain）
       routing.js        身份编解码、AsyncQueue、ChangeSignal、own-property 覆写
       router.js         toRemote / toLocal / toLocalWorkspace / call / 流
@@ -176,9 +176,9 @@ packages/dsh-fleet-brain/
 
 ### 连接状态机
 
-`probe → install（版本不符才装）→ provision（组合 + bundle 列表 + overlay）→ start → verify`。最后一步是必须的：verify 会真的发一次 `session/list`，**只有它成功才报 connected**。少了这一步，"进程起来了但会话通道不通"会伪装成成功。
+`probe → install（版本不符才装）→ provision（brain bundle + profile 清单 + 配置）→ start → verify`。最后一步是必须的：verify 会真的发一次 `session/list`，**只有它成功才报 connected**。少了这一步，"进程起来了但会话通道不通"会伪装成成功。
 
-provision 阶段内部顺序也是语义的：**组合先于启动**（profile 必须已经指向 brain bundle）、**overlay 先于启动**（模型行必须已在盘上）、**凭据晚于启动**（只能通过节点自己的 Remote API 推，需要它已经在应答）。
+provision 阶段内部顺序也是语义的：**组合先于启动**（profile 必须已经指向 brain bundle）、**配置先于启动**（模型行必须已在盘上）、**凭据晚于启动**（只能通过节点自己的 Remote API 推，需要它已经在应答）。
 
 ---
 
@@ -274,7 +274,7 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 **为什么嵌进插件而不是运行时读路径**：插件跑在 DSH 自己的安装里（桌面构建里是 `app.asar` 内部），不能假设 `dsh-fleet-brain` 这个包在同一块盘上。嵌入后没有运行时路径假设。
 
-节点上落到 `~/.dsh/profiles/web/node_modules/@local/dsh-fleet-brain/` —— **profile 自己的 `node_modules`**，因为 Loader 解析一行 `name` 时的 profile 拦截层就是它。
+节点上落到 `~/.dsh/profiles/fleet/node_modules/@local/dsh-fleet-brain/` —— **profile 自己的 `node_modules`**，因为 Loader 解析一行 `name` 时的 profile 拦截层就是它。
 
 ### 幂等与顺序
 
@@ -282,7 +282,7 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 1. `writeBrainBundle` — 按 path+content 的 sha256 判断是否要重写；一致就跳过（实测第二次返回 `{changed:false}`）。
 2. `writeProfileBundles` — 只在 bundle 列表不同时写 profile manifest。
-3. `writePatch` — 模型行 + 权限预设的 overlay（下节）。
+3. `writePatch` — 模型行 + 权限预设，写进节点自有 profile 的 patch（下节）。
 4. 启动，`patchChanged = 任一为真` 时重启。
 
 ### 职责切分：谁拥有什么
@@ -292,7 +292,7 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 | 关注点 | 唯一拥有者 | 载体 |
 |---|---|---|
 | 节点跑哪些插件 | `packages/dsh-fleet-brain` | profile 的 `dsh.profile.bundles` |
-| 节点的模型名册与权限预设 | `host/provision.js` | `~/.dsh-fleet/run/brain.patch.yml`（`--patch`） |
+| 节点的模型名册与权限预设 | `host/provision.js` | `~/.dsh/profiles/fleet/cordis.patch.yml` |
 | 节点的 API key | `host/provision.js` | 节点凭据库（经节点 `credentials/set`） |
 | 节点上的 DSH 版本 | `remote/daemon.js` | `npm i @deepseek-ai/dsh@<本机版本>` |
 
@@ -300,14 +300,31 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 真正需要 `disabled: true` 的只有 agent plane 的 22 条，它们在 `dsh-base` 里确实存在；那份清单属于组合层，不属于 overlay。
 
-### 模型与凭据：仍然用 overlay + Remote API
+### 模型与凭据：节点自有 profile 的 patch + Remote API
 
-组合层决定"有哪些插件"，但不决定"模型是什么、key 是哪把"。这两件事每次连接同步：
+组合层决定"有哪些插件"，但不决定"模型是什么、key 是哪把"。这两件事由本机驱动，并且**不只是连接那一刻**：
 
-1. **overlay**（`~/.dsh-fleet/run/brain.patch.yml`，`--patch` 传入）：从活的 `configEditor.configuration()` 复制 provider 路由、默认模型、权限预设。账号登录型 provider 不复制（那是本机的登录态）。overlay 是插件拥有的文件，**不改节点 profile 里的 patch**。
+1. **配置**（`~/.dsh/profiles/fleet/cordis.patch.yml`）：从活的 `configEditor.configuration()` 复制 provider 路由、默认模型、权限预设。账号登录型 provider 不复制（那是本机的登录态）。这是**插件自有 profile** 的配置层，节点宿主会热重载它 —— 改配置不需要重启宿主。
 2. **凭据**：那些行点名的 `apiKeyEnv` 在本机 `credentials.resolve()` 取值，通过节点自己的 `credentials/set` 写入节点凭据库。key 的 ref 不只从 `apiKeyEnv` 取 —— 那字段只有显式设置过才在组合后的 patch 里；没设时用 adapter 默认值（`llm-deepseek-api-key` → `DEEPSEEK_API_KEY`），否则会得到"provider 加载成功但没有 key"的节点。
+3. **跟随**：本机订阅自己的 `app-boot/config-reload`（`configEditor` 每次写配置后 emit）与 `credentials/reference-updated`，把 `syncConfig()` 派给所有已连接节点。两次事件可能连续来，所以合并到 250ms 的定时器上，避免读到只应用了一半的组合。
 
 `connect` 在 `provision` 里报告：`rows` / `refs` / `composition{bundle, files, changed}`。
+
+#### 为什么不是 `--patch` overlay（实测过一次，推翻了原来的设计）
+
+`--patch` 传入的覆盖层**不在 HMR 的监视列表里**。上游 `dsh-hmr` 只 watch 两个路径：`profile.patchPath` 与 `$DSH_HOME/cordis.patch.yml`。所以 overlay 方案有两个无法回避的缺陷：改配置要重启宿主、且只在连接时同步。
+
+节点上逐条验证过（`docs/adr-0001`）：
+
+| 实验 | 结果 |
+|---|---|
+| 往 overlay 里加一行指向不存在包的行 | 进程不变、日志零新增 —— 确认不被 watch |
+| 往 `profiles/fleet/cordis.patch.yml` 写 3 个模型（原子 `mv`） | 8 秒后 `session/modelCatalog` 返回它们，**PID 不变** |
+| 用 `>` 原地改写同一个文件 | 同样生效（chokidar + `awaitWriteFinish` 两种写法都收得到） |
+
+换到自有 profile 还顺手解决了一个所有权问题：`web` 是上游的 profile，插件不该和别的东西抢同一个 `cordis.patch.yml`。现在 `~/.dsh/profiles/fleet` 完全属于这个插件。
+
+同期验证了真实链路：本地把 `reasoningEffort: high` 改成 `max` → 8 秒内节点 profile patch 里就是 `max`，节点 PID 不变；改回 `high` 同样跟着回来。
 
 ### 验证
 
@@ -340,8 +357,8 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 |---|---|---|
 | 节点记录（host/port/user/名） | `$DSH_HOME/fleet/nodes.json` | 插件自己的目录，不动 desktop profile 的任何文件 |
 | 节点密码/私钥 | DSH 凭据库的 record：`dsh-fleet/n<id>` | 走 `ctx.credentials.modifyRecord`，序列化的读-改-写，所以"只换密码、保留私钥"是安全的 |
-| 节点的模型 overlay | 节点 `~/.dsh-fleet/run/brain.patch.yml` | 插件拥有；每次连接重写 |
-| 节点的 brain bundle | 节点 `~/.dsh/profiles/web/node_modules/@local/dsh-fleet-brain/` | profile 自己的 `node_modules`（Loader 的 profile 拦截层） |
+| 节点的模型配置 | 节点 `~/.dsh/profiles/fleet/cordis.patch.yml` | 插件拥有；每次连接重写，本地一改就重新下发（宿主热重载，不重启） |
+| 节点的 brain bundle | 节点 `~/.dsh/profiles/fleet/node_modules/@local/dsh-fleet-brain/` | profile 自己的 `node_modules`（Loader 的 profile 拦截层） |
 
 ### 并发、超时、失败
 
@@ -367,7 +384,7 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 | `tool-parity.mjs` | 镜像方案过不了的那一关：agent 自己的 `read`/`write`/`edit`/`grep`/`glob` 打的是节点真实路径，没有路径类失败，整份 transcript 里没有 Windows 路径 | 同上 |
 | `tool-git-image.mjs` | `git` 打真仓库、`read_image` 开真 PNG、`grep` 搜真文件 —— 三个在"工具在本地跑、只是对着镜像"时必然坏掉的工具 | 同上 |
 | `multipart-unit.mjs` | Gateway 的 `multipart/form-data` 应答能解：字节附件在正确的 JSON 路径上还原成 `Uint8Array`，畸形分片被拒绝而不是静默读成 `null` | 无 |
-| `provision-unit.mjs` | 下发给节点的东西是对的：provider 行复制而账号行不复制、行里没写 `apiKeyEnv` 时也能推断出 key ref、overlay 能过真 YAML 解析器 | Electron Node（解析器在 `app.asar` 里） |
+| `provision-unit.mjs` | 下发给节点的东西是对的：provider 行复制而账号行不复制、行里没写 `apiKeyEnv` 时也能推断出 key ref、配置能过真 YAML 解析器 | Electron Node（解析器在 `app.asar` 里） |
 | `dsh-fleet-brain/scripts/check-composition.mjs` | 节点组合仍然是个**大脑**：7 个 Remote 控制器行在、5 个传输行在、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、preset 文件齐全且已声明、YAML 可解析 | Electron Node（借用安装里的 YAML 解析器） |
 | `dsh-fleet-brain/scripts/sync-from-upstream.mjs` | 组合可重新生成（幂等；生成后与已提交版本一致即说明没有手改生成物） | 已安装的 DSH release |
 | `client-bundle.mjs` | 桌面端真的 serve 了这份客户端代码；三个槽位注册且能渲染 | 运行中的 Host |

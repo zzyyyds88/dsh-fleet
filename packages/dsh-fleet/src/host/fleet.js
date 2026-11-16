@@ -269,19 +269,17 @@ export class Fleet {
         this.#publish()
         const composition = await runtime.host.writeBrainBundle(BRAIN_FILES, BRAIN_PACKAGE)
         const bundles = await runtime.host.writeProfileBundles(BRAIN_BUNDLES)
-        const provisioner = new Provisioner({
-          configEditor: this.configEditor,
-          credentials: this.credentials,
-          version: this.version,
-          log: message => this.log(`[${runtime.record.name}] ${message}`),
-        })
+        const provisioner = this.#provisionerFor(runtime)
         const plan = provisioner.plan()
         const wrote = await runtime.host.writePatch(plan.text)
         runtime.phase = 'start'
         this.#publish()
         runtime.serving = await runtime.host.ensureServing({
           force: options.force === true,
-          patchChanged: wrote.changed || composition.changed || bundles.changed,
+          // Only the bundle's *code* needs a restart (modules re-import). A config
+          // change reaches a running host through its profile patch, which the host
+          // hot-reloads — see docs/adr-0001.
+          bundleChanged: composition.changed || bundles.changed || bundles.revertedPrevious,
         })
         runtime.phase = 'verify'
         this.#publish()
@@ -327,7 +325,9 @@ export class Fleet {
     })
   }
 
-  /** Take one node down: cancel routing state, drop SSH, stop the resident Host. */
+  /**
+   * Take one node down: cancel routing state, drop SSH, stop the resident Host.
+   */
   async disconnect(runtime) {
     return await this.serial(runtime, async () => {
       runtime.gateway.reset()
@@ -344,7 +344,9 @@ export class Fleet {
     })
   }
 
-  /** Connect every enabled node at startup without blocking the Host. */
+  /**
+   * Connect every enabled node at startup without blocking the Host.
+   */
   autoConnect(delayMs = 2_000) {
     return setTimeout(() => {
       for (const runtime of this.list()) {
@@ -353,6 +355,60 @@ export class Fleet {
         void this.connect(runtime).catch(() => undefined)
       }
     }, delayMs)
+  }
+
+  /**
+   * Push this Host's current model roster and keys to every **connected** node.
+   *
+   * This is what makes "the local Host is the only source of truth" true at every
+   * moment rather than only at connect time: a model added, a provider edited or a
+   * key rotated locally reaches a running node without a reconnect. The node's
+   * profile patch is hot-reloaded by its own `dsh-hmr`, so no restart is involved.
+   *
+   * Nodes that are not connected are skipped on purpose — `connect` writes the same
+   * content, so there is nothing to queue for later.
+   * @param {string} reason - logged, so a surprise sync is traceable.
+   * @returns {Promise<Array<{ id: string, name: string, rows: number, changed: boolean, error?: string }>>}
+   */
+  async syncConfig(reason) {
+    const results = []
+    for (const runtime of this.list()) {
+      if (runtime.state !== NODE_STATE.CONNECTED) continue
+      results.push(await this.serial(runtime, async () => {
+        const report = { id: runtime.record.id, name: runtime.record.name, rows: 0, changed: false }
+        try {
+          const provisioner = this.#provisionerFor(runtime)
+          const plan = provisioner.plan()
+          report.rows = plan.rows.length
+          report.changed = (await runtime.host.writePatch(plan.text)).changed
+          report.refs = await provisioner.pushCredentials(runtime.gateway, plan.refs)
+          if (runtime.provision !== undefined) {
+            runtime.provision.rows = plan.rows.length
+            runtime.provision.refs = report.refs
+          }
+          this.log(`[${runtime.record.name}] config synced after ${reason}`
+            + `${report.changed ? '' : ' (node already current)'}`)
+        } catch (error) {
+          // One unreachable node must not stop the others, and it must not be silent.
+          report.error = error instanceof Error ? error.message : String(error)
+          this.log(`[${runtime.record.name}] config sync after ${reason} failed: ${report.error}`)
+        }
+        return report
+      }))
+    }
+    return results
+  }
+
+  /** A provisioner bound to one node's logging and this Host's live config. */
+  #provisionerFor(runtime) {
+    return new Provisioner({
+      // `Provisioner` calls the accessor itself, so a late-composed `configEditor`
+      // is picked up rather than captured as `undefined` at construction time.
+      configEditor: this.configEditor,
+      credentials: this.credentials,
+      version: this.version,
+      log: message => this.log(`[${runtime.record.name}] ${message}`),
+    })
   }
 
   /** Release every connection and gateway. */

@@ -77,9 +77,9 @@ DSH 的桌面端很好用，但它的**工具全部跑在本机**。当你需要
                     │  SSH :22（唯一入口，节点不开放端口）
                     ▼
 ┌──────────────── 远端 Linux · 常驻大脑 ───────────────────┐
-│  dsh --profile web --host 127.0.0.1 --port 0 --no-open   │
+│  dsh --profile fleet --host 127.0.0.1 --port 0 --no-open  │
 │    ├─ 完整 DSH Host：rg / git / read_image / bash / PTY   │
-│    └─ 会话、工作区、审批、终端全在本地… 不，全在远端      │
+│    └─ 会话、工作区、审批、终端全部在远端                   │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -146,12 +146,21 @@ disable。`scripts/check-composition.mjs` 断言结果"仍然是个大脑"。
 组合决定"加载哪些插件"，不决定"用什么模型、用谁的 key"。这两件事每次 `connect`
 同步，全部由本机驱动：
 
-1. **overlay**：把本机活的 provider 路由、默认模型、权限预设写成一份插件自己拥有的
-   `~/.dsh-fleet/run/brain.patch.yml`，启动时 `--patch` 传入。
+1. **配置**：本机活的 provider 路由、默认模型、权限预设写进节点的
+   `~/.dsh/profiles/fleet/cordis.patch.yml`。这是节点**自有 profile** 的配置层，
+   也正是节点宿主会热重载的文件之一 —— 改完立刻生效，**不重启、不断会话、不用重连**。
 2. **凭据**：那些行点名的 key 在本机 `credentials.resolve()` 取值，通过节点自己的
-   `credentials/set` 推进节点凭据库。本机换 key，重连就同步。
+   `credentials/set` 推进节点凭据库。
+3. **跟随**：本机订阅自己的 `app-boot/config-reload` 与 `credentials/reference-updated`，
+   本地一改配置或换 key，就给所有已连接节点重新下发一次。
 
-三步都幂等（内容摘要决定要不要重写），只有真变了才重启节点宿主。
+> 早期版本用 `--patch` 传一份 overlay。实测发现它**不在 HMR 的监视列表里**
+> （上游只 watch profile patch 和 home patch），所以改配置必须重启节点宿主，
+> 而且只在连接时同步一次。换成节点自有 profile 的 patch 后，两个问题都消失。
+> 实验记录见 [`docs/adr-0001-node-config-carrier.zh.md`](docs/adr-0001-node-config-carrier.zh.md)。
+
+三步都幂等（内容摘要决定要不要重写）。只有 **brain bundle 的代码**变了才重启宿主 ——
+模块要重新 import，那是唯一需要重启的情形。
 
 ---
 

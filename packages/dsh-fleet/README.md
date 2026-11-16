@@ -79,23 +79,29 @@ its own credential store, its own model roster. Two consequences:
 
 The plugin closes both on every connect:
 
-1. **The composition is customised at the source level.** The node's profile
-   composes `@deepseek-ai/dsh-base` + `@local/dsh-fleet-brain` instead of
+1. **The composition is customised at the source level.** The node gets its own
+   profile, `~/.dsh/profiles/fleet`, whose bundle list is
+   `@deepseek-ai/dsh-base` + `@local/dsh-fleet-brain` instead of
    `dsh-base` + `dsh-web-app`. The browser layer is not loaded and then disabled —
    it is **absent from the composition**, so its packages are never imported.
    *(see [`../dsh-fleet-brain`](../dsh-fleet-brain))* for how that layer is derived
    from the official one on every upstream release.
-2. **A patch overlay it owns** (`~/.dsh-fleet/run/brain.patch.yml`) is written
-   before the host starts, and passed as `--patch`. It carries this Host's provider
-   routes, default model and permission preset — copied from the live
-   `configEditor.configuration()`, so it follows your local configuration.
+2. **Configuration goes into the profile the plugin owns**, at
+   `~/.dsh/profiles/fleet/cordis.patch.yml`. That file is one of the two the node
+   host hot-reloads, so a model roster or key change reaches a running node
+   **without a restart and without dropping a session**. The content is copied from
+   the live `configEditor.configuration()` and follows every local change: the
+   plugin subscribes to this Host's `app-boot/config-reload` and
+   `credentials/reference-updated`, then re-sends to every connected node.
+   *(rationale and the measurements behind it:
+   [`docs/adr-0001-node-config-carrier.zh.md`](../../docs/adr-0001-node-config-carrier.zh.md))*
 3. **The API keys** those rows name are resolved here and pushed into the node's
    credential store over its own Remote API (`credentials/set`), so a node needs no
-   manual setup and a rotated key syncs on the next connect.
+   manual setup and a rotated key syncs the moment you save it.
 
-All three are idempotent (a content digest decides), and the node host is only
-restarted when one actually changed. `connect` reports what it did under
-`provision` (`rows`, `refs`, `composition`).
+All three are idempotent (a content digest decides). The node host is restarted only
+when the **brain bundle's code** changes, because modules have to be re-imported.
+`connect` reports what it did under `provision` (`rows`, `refs`, `composition`).
 
 ### Identity: one string answers three questions
 
@@ -157,7 +163,7 @@ exactly as before.
 |---|---|
 | `node test/routing-unit.mjs` | Identity round-trips, stream fan-out, workspace merging, and the rule that a local call reaches the upstream method untouched. Fake fleet, no network. |
 | `node test/multipart-unit.mjs` | The Gateway's `multipart/form-data` answers decode: byte attachments become `Uint8Array` at the right JSON path, and malformed parts are refused instead of silently read as `null`. |
-| `node test/provision-unit.mjs` | What a node is given: provider rows copied but account routes not, the credential ref inferred even when a row omits `apiKeyEnv`, only browser rows disabled, and the overlay round-trips through a real YAML parser. Run it under the harness's Electron Node to get the round-trip half — the parser lives in `app.asar`. |
+| `node test/provision-unit.mjs` | What a node is given: provider rows copied but account routes not, the credential ref inferred even when a row omits `apiKeyEnv`, no browser row ever reaches the overlay (the composition owns that), and the rendered patch round-trips through a real YAML parser. Run it under the harness's Electron Node to get the round-trip half — the parser lives in `app.asar`. |
 | `node test/gateway-smoke.mjs` | The SSH transport: cookie minting, unary RPC, and the stream carrier upgrade against a real node. |
 | `node test/upstream-smoke.mjs` | The upstream controllers import and expose `static inject` from inside `app.asar`. Run under the local Electron Node. |
 | `node test/dispatch-seam.mjs` | The Gateway's view of a Service resolves an own property defined on the instance. Run under the local Electron Node. |

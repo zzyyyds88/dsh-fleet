@@ -25,9 +25,6 @@
  */
 import { randomUUID } from 'node:crypto'
 
-/** Path (relative to the node root) of the overlay this plugin owns. */
-export const BRAIN_PATCH_FILE = '~/.dsh-fleet/run/brain.patch.yml'
-
 /**
  * Rows copied verbatim from this Host.
  *

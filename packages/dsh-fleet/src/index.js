@@ -274,6 +274,35 @@ export function apply(ctx, config = {}) {
     configEditor = scope.get('configEditor')
   })
 
+  // ---- Keeping connected nodes in step --------------------------------------
+  // The local Host is the only source of truth for "which model, whose key", so a
+  // change here has to reach a running node without asking the user to reconnect.
+  // Two upstream signals cover every way that configuration can change:
+  //
+  //   `app-boot/config-reload`        — emitted after `configEditor` rewrites config
+  //   `credentials/reference-updated` — emitted when a key value is written
+  //
+  // Both are plain Cordis events, so subscribing needs no upstream import. The sync
+  // itself writes the node's *profile* patch, which the node host hot-reloads
+  // (see `docs/adr-0001`) — no restart, no dropped session.
+  //
+  // `app-boot/config-reload` fires while the Loader is still settling and
+  // `credentials/reference-updated` can fire several times for one edit, so the sync
+  // is coalesced onto one timer rather than run per event. Reading configuration
+  // synchronously inside the event would see a half-applied composition.
+  /** @type {ReturnType<typeof setTimeout> | undefined} */
+  let pendingSync
+  const scheduleSync = reason => {
+    clearTimeout(pendingSync)
+    pendingSync = setTimeout(() => {
+      void fleet.syncConfig(reason).catch(error => log(`fleet: config sync failed: ${error.message}`))
+    }, 250)
+    pendingSync.unref?.()
+  }
+  for (const event of ['app-boot/config-reload', 'credentials/reference-updated']) {
+    ctx.on(event, () => scheduleSync(event))
+  }
+
   // ---- Boot and teardown ----------------------------------------------------
   disposers.push(ctx.effect(() => {
     if (config.autoConnect === false) return () => undefined
@@ -282,6 +311,7 @@ export function apply(ctx, config = {}) {
   }, 'dsh-fleet: automatic connection'))
 
   disposers.push(ctx.effect(() => () => {
+    clearTimeout(pendingSync)
     for (const dispose of disposers.splice(0)) {
       try { dispose() } catch { /* already disposed */ }
     }

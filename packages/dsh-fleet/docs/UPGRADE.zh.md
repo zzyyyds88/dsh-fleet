@@ -112,8 +112,8 @@ node test/client-bundle.mjs   <base> <token>
 | Gateway 每 2 秒 ping 一次，不应答就断 | `dsh-api-gateway` (`websocketHeartbeatIntervalMs`) | 流两秒后静默消失 | `gateway-smoke.mjs` |
 | `typert.lookups.configure(key, …)` 每 key 一次，且**优先于** provider | `dsh-typert-registry` | `workspaceFileScope` 无法解析远端会话 | `host-routing.mjs` |
 | `SessionId` 无格式校验（只是 brand） | `dsh-session` | 不能再塞 `fleet_…` 身份 | `routing-unit.mjs` |
-| 模型行的 id/包名 + `configEditor.configuration()` 的返回形状 | `dsh-config-editor`、`dsh-llm-*` | 下发到节点的 overlay 缺字段 | `provision-unit.mjs` |
-| `dsh --patch <file>` 接受额外 patch 层 | `dsh` CLI / `dsh-app-boot` | 节点无法只当大脑 | `provision-unit.mjs`（结构）+ 实测 |
+| 模型行的 id/包名 + `configEditor.configuration()` 的返回形状 | `dsh-config-editor`、`dsh-llm-*` | 下发到节点的配置缺字段 | `provision-unit.mjs` |
+| profile 的 `cordis.patch.yml` 会被 `dsh-hmr` 热重载 | `dsh-hmr`（只 watch profile patch 与 home patch） | 改配置要重启节点宿主 | 实测（见 adr-0001） |
 | 客户端插件槽位名（`settings.section` / `sidebar.panellist` / `main`） | `dsh-client-ui-*` | 设置页或侧栏面板不出现 | `client-bundle.mjs` |
 
 **查上游契约的办法**（不用读 TypeScript 源码）：
@@ -169,25 +169,29 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 这一层、升级后怎么重新生成，见
 [`packages/dsh-fleet-brain/README.md`](../../dsh-fleet-brain/README.md)。
 
-### 层二：配置与凭据（overlay + Remote API）
+### 层二：配置与凭据（自有 profile 的 patch + Remote API）
 
 组合决定"有哪些插件"，不决定"用哪个模型、用谁的 key"。这两件事每次连接同步，
-写入 `~/.dsh-fleet/run/brain.patch.yml`（`--patch` 传入）与节点凭据库：
+写入节点自有 profile 的 `~/.dsh/profiles/fleet/cordis.patch.yml` 与节点凭据库：
 
 1. **模型行**：从本机 `configEditor.configuration()` 复制 provider 路由、默认模型、权限预设。
    账号登录型的 provider 不复制（那是本机的登录态）。
 2. **凭据**：把那些行点名的 `apiKeyEnv` 对应的键从本机取出来，通过节点自己的
    `credentials/set` 推进节点的凭据库。
 
-**overlay 里没有 `disabled: true`。** 早期版本在这里写 56 条禁用浏览器行的 patch，
+**配置里没有 `disabled: true`。** 早期版本在这里写 56 条禁用浏览器行的 patch，
 但组合层已经去掉了那些行，所以那 56 条指向不存在的 id 是空转 —— 而 `applyPatches`
 对不存在的 id 只发一条走 `ctx.logger.warn` 的 `patch: entry … not found`，正常启动输出
 里看不到，是纯静默噪音。真正需要 disable 的 22 条 agent-plane 行属于组合层（它们在
 `dsh-base` 里确实存在）。
 
-**overlay 是幂等的**：内容没变就不重启节点宿主（`writePatch` 返回 `changed: false`）。
+**配置是幂等的**：内容没变就不写盘（`writePatch` 返回 `changed: false`）。变了也只靠节点宿主的
+热重载，**不重启** —— 那个 profile patch 正是 HMR 监视的两个文件之一。
 
-**凭据不会重复写**：每次连接都会推一次（覆盖写），所以本机换了 key，重连节点就同步了。
+**本地一改就跟随**：本机订阅 `app-boot/config-reload` 与 `credentials/reference-updated`，
+所以改模型或换 key 不需要重连节点。详见 [`docs/adr-0001`](../../../docs/adr-0001-node-config-carrier.zh.md)。
+
+**凭据同样跟随**：每次下发都覆盖写一遍；而且换 key 会触发同一条同步路径。
 
 ---
 
