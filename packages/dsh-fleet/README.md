@@ -67,26 +67,35 @@ The plugin touches **no upstream Loader row** and imports **nothing from inside
 
 ### The node is a brain, not a second desktop
 
-A node runs a **separate DSH installation** with its own `~/.dsh`, so it boots with
-no model route and no API key — it would answer `session/list` and then fail the
-first prompt. The plugin closes that gap on every connect, without editing the
-node's own profile:
+A node is a **separate DSH installation** with its own `~/.dsh` — its own profile,
+its own credential store, its own model roster. Two consequences:
 
-1. **A patch overlay it owns** (`~/.dsh-fleet/run/brain.patch.yml`) is written
+1. It ships the **Web composition**, so a server with no screen loads a whole browser
+   surface: 57 `dsh-client-ui-*` rows, an SPA dist server, a reload chain, desktop
+   telemetry. Either it idles them or it fails to start without a dist to point at.
+2. It has **no provider route and no API key**, so it boots, answers `session/list`,
+   and then fails the first prompt — which from the desktop looks exactly like a
+   routing bug.
+
+The plugin closes both on every connect:
+
+1. **The composition is customised at the source level.** The node's profile
+   composes `@deepseek-ai/dsh-base` + `@local/dsh-fleet-brain` instead of
+   `dsh-base` + `dsh-web-app`. The browser layer is not loaded and then disabled —
+   it is **absent from the composition**, so its packages are never imported.
+   *(see [`../dsh-fleet-brain`](../dsh-fleet-brain))* for how that layer is derived
+   from the official one on every upstream release.
+2. **A patch overlay it owns** (`~/.dsh-fleet/run/brain.patch.yml`) is written
    before the host starts, and passed as `--patch`. It carries this Host's provider
    routes, default model and permission preset — copied from the live
    `configEditor.configuration()`, so it follows your local configuration.
-2. **The API keys** those rows name are resolved here and pushed into the node's
+3. **The API keys** those rows name are resolved here and pushed into the node's
    credential store over its own Remote API (`credentials/set`), so a node needs no
    manual setup and a rotated key syncs on the next connect.
-3. **The browser plugins are switched off.** A node serves an API, never a window,
-   so every `@deepseek-ai/dsh-client-ui-*` row is disabled. The list is recomputed
-   from the live composition each time, so a UI plugin added by an upgrade is
-   dropped on the next connect rather than quietly loading on every node.
 
-The overlay is idempotent: if the bytes are unchanged, the node host is not
-restarted. `connect` reports what it did under `provision` (`rows`, `disabled`,
-`refs`).
+All three are idempotent (a content digest decides), and the node host is only
+restarted when one actually changed. `connect` reports what it did under
+`provision` (`rows`, `refs`, `composition`).
 
 ### Identity: one string answers three questions
 

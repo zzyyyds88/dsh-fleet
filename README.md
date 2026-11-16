@@ -39,6 +39,7 @@ DSH 的桌面端很好用，但它的工具**全跑在本机**。一旦你想用
 |---|---|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 完整设计：路线取舍、三处运行时缝隙、身份编码、故障分析 |
 | [`packages/dsh-fleet/README.md`](packages/dsh-fleet/README.md) | 插件说明、安装、测试矩阵 |
+| [`packages/dsh-fleet-brain/README.md`](packages/dsh-fleet-brain/README.md) | 节点侧组合：怎么从官方 web-app 减出"只当大脑"的一层 |
 | [`packages/dsh-fleet/docs/DETAIL.zh.md`](packages/dsh-fleet/docs/DETAIL.zh.md) | 实现细节 |
 | [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md) | **DSH 升级后要重跑什么**，每条上游契约由哪个测试守着 |
 
