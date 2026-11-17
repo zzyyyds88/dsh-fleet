@@ -34,7 +34,7 @@ import { RemoteEvents } from './host/remote-events.js'
 import { RemoteWaterfalls } from './host/remote-waterfall.js'
 import { RemoteWorkspaces } from './host/remote-workspaces.js'
 import { Router } from './host/router.js'
-import { overrideWorkspaceFileScope } from './host/lookups.js'
+import { overrideAgentLookup, overrideWorkspaceFileScope } from './host/lookups.js'
 import {
   decorateJobController,
   decorateSessionController,
@@ -264,12 +264,17 @@ export function apply(ctx, config = {}) {
     // A remote Session id is not a local Session, so the Gateway's own lookup
     // cannot resolve a file scope for it; teach that lookup about wrapped ids.
     const undoLookup = overrideWorkspaceFileScope(scope)
+    // The same problem one level up: every `agent: Agent` parameter is resolved from
+    // `agentId` before the method runs, so `terminal/create|attach|close|…` fails for
+    // a remote Session before its decorator can route anything.
+    const undoAgent = overrideAgentLookup(scope)
     log(`fleet: routing session, workspace, workspaceFiles${jobs === undefined ? '' : ', job'}${terminal === undefined ? '' : ', terminal'}`)
     scope.effect(() => () => {
       for (const restore of undo) {
         try { restore() } catch { /* the instance may already be disposed */ }
       }
       try { undoLookup?.() } catch { /* already gone */ }
+      try { undoAgent?.() } catch { /* already gone */ }
     }, 'dsh-fleet: routing decorators')
   })
 

@@ -22,6 +22,7 @@ import { RemoteWorkspaces } from '../src/host/remote-workspaces.js'
 import {
   decorateJobController,
   decorateSessionController,
+  decorateTerminalController,
   decorateWorkspaceController,
   decorateWorkspaceFiles,
 } from '../src/host/decorators.js'
@@ -340,6 +341,140 @@ function fakeFleet(nodeId, gateway) {
   for await (const frame of service.follow({ jobId: 'bash-1' }, undefined)) orphaned.push(frame)
   check(orphaned[0]?.job?.id === 'local-job', 'a job follow with no Session stays local')
   check(calls.length === 0, 'and asks no node', String(calls.length))
+}
+
+// ---- the terminal namespace routes both key shapes ------------------------
+// `terminal` has two families: three endpoints take a Session id, six take an
+// `Agent` object. The decorator keys off `agent.id`, so the test drives both and
+// proves a local call still reaches the upstream body untouched.
+{
+  const { gateway, calls } = fakeGateway(NODE, {
+    'terminal/list': () => [{ id: 't-node', title: 'node shell', state: 'running' }],
+    'terminal/environment': () => ({ cwd: '/root/x', maxInputBytes: 1024 }),
+    'terminal/shells': () => [{ path: '/bin/bash', args: [], name: 'bash' }],
+    'terminal/create': args => ({ id: args.request.id, title: 'created', cwd: '/root/x' }),
+    'terminal/rename': () => null,
+    'terminal/close': () => null,
+  })
+  const router = new Router({ fleet: fakeFleet(NODE, gateway) })
+
+  class FakeTerminalController {
+    list(sessionId) { return [{ id: 't-local', title: 'local', sessionId }] }
+    environment(agent) { return { cwd: '/local', agentId: agent?.id } }
+    shells(agent) { return [{ path: 'pwsh', args: [], name: 'pwsh', forAgent: agent?.id }] }
+    async create(agent, request) { return { id: request.id, local: agent?.id } }
+    async rename(agent, id, title) { return { local: [agent?.id, id, title] } }
+    async close(agent, id) { return { local: [agent?.id, id] } }
+  }
+  const service = new FakeTerminalController()
+  decorateTerminalController(service, router)
+
+  // A local Session still reaches the upstream body.
+  check((await service.list('session-local'))[0].id === 't-local', 'a local terminal list stays local')
+  check(calls.length === 0, 'and asks no node', String(calls.length))
+
+  // `list` routes by Session id.
+  const rows = await service.list(WRAPPED)
+  check(rows[0]?.id === 't-node', 'a remote terminal list is proxied', JSON.stringify(rows))
+  check(calls.at(-1)?.args.sessionId === SESSION, 'the node receives its own Session id')
+
+  // The six `Agent`-shaped endpoints route by `agent.id`. A remote call arrives
+  // with the placeholder `{ id: <wrapped> }` that `overrideAgentLookup` synthesized.
+  const placeholder = { id: WRAPPED }
+  const env = await service.environment(placeholder)
+  check(env.cwd === '/root/x', 'a remote terminal environment is proxied', JSON.stringify(env))
+  check(calls.at(-1)?.args.agentId === SESSION, 'the node receives a bare agentId, not a fleet_ one')
+
+  const shells = await service.shells(placeholder)
+  check(shells[0]?.name === 'bash', 'shell discovery is proxied')
+
+  const created = await service.create(placeholder, { id: 't-new', cols: 80, rows: 24 })
+  check(created.id === 't-new', 'a remote terminal create returns the node info')
+  check(calls.at(-1)?.args.request.id === 't-new', 'and its request travels intact')
+
+  await service.rename(placeholder, 't-new', 'renamed')
+  check(calls.at(-1)?.endpoint === 'terminal/rename', 'rename is routed')
+  check(calls.at(-1)?.args.title === 'renamed', 'with the new title')
+
+  await service.close(placeholder, 't-new')
+  check(calls.at(-1)?.endpoint === 'terminal/close', 'close is routed')
+
+  // A local Agent must never be sent to a node.
+  calls.length = 0
+  const localEnv = await service.environment({ id: 'session-local' })
+  check(localEnv.agentId === 'session-local', 'a local agent still reaches the upstream method')
+  check(calls.length === 0, 'and no node is contacted', String(calls.length))
+}
+
+// ---- `attach` pumps the uplink in both directions ------------------------
+// This is the only endpoint that owns two directions at once, and the upstream
+// body must never run: it would take `invocation.uplink()` a second time and throw.
+{
+  const uplinkItems = []
+  let closed = false
+  const gateway = {
+    calls: [],
+    async call() { throw new Error('attach is a stream, not a call') },
+    async openStream(endpoint, args, handlers) {
+      this.calls.push({ endpoint, args })
+      // Frames only; the node keeps the attachment open until the browser is done,
+      // which is what makes the uplink direction observable.
+      handlers.onFrame({ type: 'snapshot', sequence: 0, screen: 'node screen', info: { id: args.id }, writable: true })
+      handlers.onFrame({ type: 'output', sequence: 1, data: 'hello' })
+      return {
+        close: () => { closed = true },
+        send: value => { uplinkItems.push(value); return true },
+        endUplink: () => { uplinkItems.push('END') },
+      }
+    },
+  }
+  const router = new Router({ fleet: fakeFleet(NODE, gateway) })
+
+  class FakeTerminalController {
+    attach() { throw new Error('the upstream attach must never run for a remote Session') }
+  }
+  const service = new FakeTerminalController()
+  decorateTerminalController(service, router)
+
+  // Stand in for the Gateway's call context: `this.ctx.invocation` is the call.
+  const browser = [{ type: 'write', sequence: 1, data: 'x' }]
+  const fakeThis = {
+    ctx: {
+      invocation: {
+        uplink: () => (async function* () { yield* browser })(),
+      },
+    },
+  }
+  const stream = service.attach.call(fakeThis, { id: WRAPPED }, 't-node', undefined)
+  const seen = []
+  // Consume two frames, then stop — like a user closing the terminal window. The
+  // uplink pump has to have received the browser's input by then.
+  const iterator = stream[Symbol.asyncIterator]()
+  seen.push((await iterator.next()).value)
+  seen.push((await iterator.next()).value)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  await iterator.return()
+  check(seen.some(frame => frame.type === 'snapshot'), 'the node snapshot reaches the browser',
+    JSON.stringify(seen).slice(0, 90))
+  check(seen.some(frame => frame.type === 'output' && frame.data === 'hello'),
+    'and so does its output')
+  check(gateway.calls[0]?.endpoint === 'terminal/attach', 'the node was asked to attach')
+  check(gateway.calls[0]?.args.agentId === SESSION, 'with its own agent identity')
+  check(gateway.calls[0]?.args.id === 't-node', 'and the terminal id unchanged')
+  check(uplinkItems[0]?.data === 'x', 'browser input reaches the node',
+    JSON.stringify(uplinkItems))
+  check(uplinkItems.at(-1) === 'END', 'and the uplink is half-closed, not cancelled')
+  check(closed, 'the node stream is closed when the browser stops consuming')
+
+  // A local attachment still reaches the upstream body (which here throws, proving
+  // it was called).
+  let threw
+  try {
+    await service.attach({ id: 'session-local' }, 't-1', undefined)
+  } catch (error) {
+    threw = error.message
+  }
+  check(String(threw).includes('upstream attach'), 'a local attach reaches the upstream method', threw)
 }
 
 // ---- the merged control stream emits ONE baseline ------------------------

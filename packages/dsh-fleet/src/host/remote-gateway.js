@@ -33,15 +33,53 @@ class LogicalStream {
   /**
    * @param {string} endpoint
    * @param {{ onFrame: (value: unknown) => void, onEnd: (failure?: unknown) => void }} handlers
+   * @param {import('./ws.js').WebSocketClient | undefined} carrier
    */
-  constructor(endpoint, handlers) {
+  constructor(endpoint, handlers, carrier) {
     this.endpoint = endpoint
     this.handlers = handlers
+    this.carrier = carrier
     this.id = `s-${randomUUID()}`
     this.closed = false
+    /** Whether the uplink was already half-closed, so it is not sent twice. */
+    this.uplinkEnded = false
+  }
+
+  /** Send one uplink item on this stream, if the carrier is still writable. */
+  send(value) {
+    if (this.closed || this.carrier === undefined) return false
+    try {
+      return this.carrier.send(JSON.stringify({ type: 'item', streamId: this.id, value }))
+    } catch {
+      return false
+    }
+  }
+
+  /** Half-close the uplink: the node's `uplink()` iteration ends. Idempotent. */
+  endUplink() {
+    if (this.closed || this.uplinkEnded || this.carrier === undefined) return
+    this.uplinkEnded = true
+    try {
+      this.carrier.send(JSON.stringify({ type: 'end', streamId: this.id }))
+    } catch { /* the carrier is already gone */ }
   }
 
   close() {
+    if (this.closed) return
+    this.closed = true
+    // Telling the node this stream is done matters for anything that holds a
+    // resource on its side (a terminal attachment, a live follow). Without it the
+    // node keeps the attachment until its own heartbeat gives up.
+    if (this.carrier !== undefined) {
+      try {
+        this.carrier.send(JSON.stringify({ type: 'cancel', streamId: this.id }))
+      } catch { /* the carrier is already gone */ }
+    }
+    this.handlers.onEnd()
+  }
+
+  /** The node ended this stream itself: drop it locally without telling it back. */
+  finish() {
     if (this.closed) return
     this.closed = true
     this.handlers.onEnd()
@@ -248,26 +286,31 @@ export class RemoteGateway {
     }
     if (frame.type === 'end') {
       this.streams.delete(frame.streamId)
-      stream?.close()
+      stream?.finish()
       return
     }
     if (frame.type === 'error') {
       this.streams.delete(frame.streamId)
+      stream?.finish()
       stream?.handlers.onEnd(frame.error)
-      try { stream?.close() } catch { /* closing anyway */ }
     }
   }
 
   /**
    * Open one logical stream on the shared carrier.
+   *
+   * The returned handle can also carry a *node-bound uplink*: a browser-facing
+   * method that is itself a stream (`terminal/attach`, for instance) takes its
+   * uplink items from this Host's own mux and has to hand them to the node instead
+   * of consuming them locally. `send`/`endUplink` are that direction.
    * @param {string} endpoint
    * @param {Record<string, unknown>} args
    * @param {{ onFrame: (value: unknown) => void, onEnd: (failure?: unknown) => void }} handlers
-   * @returns {Promise<{ close: () => void }>}
+   * @returns {Promise<{ close: () => void, send: (value: unknown) => boolean, endUplink: () => void }>}
    */
   async openStream(endpoint, args, handlers) {
     const carrier = await this.carrierClient()
-    const stream = new LogicalStream(endpoint, handlers)
+    const stream = new LogicalStream(endpoint, handlers, carrier)
     this.streams.set(stream.id, stream)
     const sent = carrier.send(JSON.stringify({ type: 'open', streamId: stream.id, endpoint, payload: { args } }))
     if (!sent) {
@@ -278,9 +321,10 @@ export class RemoteGateway {
       close: () => {
         if (!this.streams.has(stream.id)) return
         this.streams.delete(stream.id)
-        try { carrier.send(JSON.stringify({ type: 'cancel', streamId: stream.id })) } catch { /* closing */ }
-        stream.closed = true
+        stream.close()
       },
+      send: value => stream.send(value),
+      endUplink: () => stream.endUplink(),
     }
   }
 }

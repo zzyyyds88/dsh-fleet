@@ -464,26 +464,38 @@ export function decorateJobController(service, router) {
 /**
  * Install the `terminal` namespace router.
  *
- * A remote Session's terminals are PTYs on that node. `list` and `watch` take a
- * Session id, so both are forwarded; every other terminal endpoint takes an
- * `Agent` object that the Gateway resolves from `agentId` on *this* Host, which a
- * remote Session has no local Agent for. Those endpoints therefore stay local:
- * the sidebar simply reports no controllable terminals for a remote Session,
- * rather than pretending to own one it cannot drive.
+ * A remote Session's terminals are PTYs on that node. Six of the nine endpoints
+ * take an `Agent` object that the Gateway resolves from `agentId` on *this* Host —
+ * which a remote Session has no local Agent for. `host/lookups.js` teaches that
+ * lookup to hand back a placeholder for a wrapped identity, so this decorator can
+ * route them like the rest.
+ *
+ * `attach` is the awkward one: it is `mode: 'stream'` **and** it consumes the
+ * invocation's uplink, so this method owns two directions at once. Local browser
+ * input is pumped to the node, node frames are pumped to the browser. The upstream
+ * body is never reached, which is deliberate — it would call `uplink()` a second
+ * time and throw.
+ *
+ * `readScreen` / `inspectActivity` / `openForAgent` are not `@Remote`, so the
+ * browser cannot call them at all; nothing to route.
  *
  * @param {object} service - the live upstream `TerminalController`.
  * @param {import('./router.js').Router} router
- * @returns {() => void}
+ * @returns {() =\u003e void}
  */
 export function decorateTerminalController(service, router) {
+  /** The node a wrapped Session identity names, and the node's own id for it. */
+  const target = sessionId => decodeRemoteId(sessionId)
+
   return decorateMethods(service, {
     list: local => async function list(sessionId, signal) {
-      const decoded = decodeRemoteId(sessionId)
+      const decoded = target(sessionId)
       if (decoded === undefined) return await local(sessionId, signal)
       return await router.call(decoded.nodeId, 'terminal/list', { sessionId: decoded.remoteId }, signal)
     },
+
     watch: local => function watch(sessionId, signal) {
-      const decoded = decodeRemoteId(sessionId)
+      const decoded = target(sessionId)
       if (decoded === undefined) return local(sessionId, signal)
       return remoteIterable(
         router.node(decoded.nodeId).gateway,
@@ -491,6 +503,137 @@ export function decorateTerminalController(service, router) {
         { sessionId: decoded.remoteId },
         signal,
       )
+    },
+
+    // `retain` is what the browser opens before it attaches; routing one without the
+    // other leaves the window hold waiting forever.
+    retain: local => function retain(sessionId, id, signal) {
+      const decoded = target(sessionId)
+      if (decoded === undefined) return local(sessionId, id, signal)
+      return remoteIterable(
+        router.node(decoded.nodeId).gateway,
+        'terminal/retain',
+        { sessionId: decoded.remoteId, id },
+        signal,
+      )
+    },
+
+    environment: local => async function environment(agent, signal) {
+      const decoded = target(agent?.id)
+      if (decoded === undefined) return await local(agent, signal)
+      return await router.call(decoded.nodeId, 'terminal/environment', { agentId: decoded.remoteId }, signal)
+    },
+
+    shells: local => async function shells(agent, signal) {
+      const decoded = target(agent?.id)
+      if (decoded === undefined) return await local(agent, signal)
+      return await router.call(decoded.nodeId, 'terminal/shells', { agentId: decoded.remoteId }, signal)
+    },
+
+    create: local => async function create(agent, request, signal) {
+      const decoded = target(agent?.id)
+      if (decoded === undefined) return await local(agent, request, signal)
+      return await router.call(
+        decoded.nodeId,
+        'terminal/create',
+        { agentId: decoded.remoteId, request },
+        signal,
+      )
+    },
+
+    rename: local => async function rename(agent, id, title) {
+      const decoded = target(agent?.id)
+      if (decoded === undefined) return await local(agent, id, title)
+      const value = await router.call(
+        decoded.nodeId,
+        'terminal/rename',
+        { agentId: decoded.remoteId, id, title },
+      )
+      return value === undefined ? undefined : router.toLocal(value, decoded.nodeId)
+    },
+
+    close: local => async function close(agent, id) {
+      const decoded = target(agent?.id)
+      if (decoded === undefined) return await local(agent, id)
+      const value = await router.call(decoded.nodeId, 'terminal/close', { agentId: decoded.remoteId, id })
+      return value === undefined ? undefined : router.toLocal(value, decoded.nodeId)
+    },
+
+    /**
+     * Open a remote terminal attachment and pump both directions.
+     *
+     * The local uplink is taken exactly once, here, and its items are the node's
+     * items verbatim: `TerminalInput` is plain JSON and its `sequence` numbers are
+     * generated by the browser, so re-numbering or reordering would break the node's
+     * gap check. The stream ends when the browser stops, when the node ends it, or
+     * when either signal aborts.
+     */
+    attach: local => function attach(agent, id, signal) {
+      const decoded = target(agent?.id)
+      if (decoded === undefined) return local(agent, id, signal)
+      const runtime = router.node(decoded.nodeId)
+      // The Gateway runs this method on a view whose Context carries the call, so
+      // `this.ctx.invocation` is *this* attachment. It is available once per call —
+      // and because the upstream body below is never reached, it is ours alone.
+      const invocation = this?.ctx?.invocation
+      if (invocation === undefined) throw new Error('Terminal attachment requires a Remote invocation')
+      const uplink = invocation.uplink()
+      return {
+        [Symbol.asyncIterator]() {
+          const queue = new AsyncQueue()
+          let remote
+          let finished = false
+          const finish = () => {
+            if (finished) return
+            finished = true
+            try { remote?.close() } catch { /* already closing */ }
+            queue.end()
+          }
+          void runtime.gateway.openStream(
+            'terminal/attach',
+            { agentId: decoded.remoteId, id },
+            {
+              onFrame: value => queue.push(router.toLocal(value, decoded.nodeId)),
+              onEnd: failure => {
+                if (failure === undefined) finish()
+                else {
+                  if (!finished) { finished = true; try { remote?.close() } catch { /* closing */ } }
+                  queue.fail(failure)
+                }
+              },
+            },
+          ).then(
+            handle => {
+              remote = handle
+              if (finished) { handle.close(); return }
+              // Local → node. The uplink is the browser's items; half-closing it must
+              // half-close the node's, not cancel the whole stream.
+              void (async () => {
+                try {
+                  for await (const item of uplink) {
+                    if (finished) return
+                    if (!handle.send(item)) return
+                  }
+                  handle.endUplink()
+                } catch {
+                  // A rejected local item already failed the local stream.
+                }
+              })()
+            },
+            error => queue.fail(error),
+          )
+          const onAbort = () => finish()
+          signal?.addEventListener('abort', onAbort, { once: true })
+          return {
+            next: () => queue.next(),
+            return: async () => {
+              signal?.removeEventListener('abort', onAbort)
+              finish()
+              return { done: true, value: undefined }
+            },
+          }
+        },
+      }
     },
   })
 }
