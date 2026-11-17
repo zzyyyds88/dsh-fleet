@@ -198,3 +198,25 @@ node packages\dsh-fleet\test\multi-node-acceptance.mjs <base> <token>
 - 退出码 0 只证明那一层；构建通过不代表界面正确，单测通过不代表端到端可用。
 - 跑不了的项必须写明原因与替代证据，不许隐瞒。
 - 每轮验收后把失败项、修复、重跑结果追加到本文档末尾的「验收记录」。
+
+## 验收记录
+
+### 2026-11-17 · DSH 0.2.2-rc.3 · 节点 linux-x64
+
+| 节 | 结果 | 证据 |
+|---|---|---|
+| 1 侧栏 | 通过 | 真实 Chrome 读 DOM：`grouptest`、`fleet-second`、`fleet-brain-test` 三个远程工区与本地工区在同一列表（`.scratch/browser-acceptance.png`） |
+| 2 会话 | 通过 | 真下指令 → 节点真跑 write/bash/grep → `turn/end={kind:completed}` → 助手说 DONE → 独立 SSH 读到 `acceptance-*.txt` 字节与 prompt 一致（20 字节） |
+| 3 终端 | 通过 | `environment` 返回 `/root/grouptest` + 65536；shells 为 `bash,pwsh`；attach 首帧 snapshot 且 writable；echo 命令收到 2 次回显；节点 ack；close 后花名册为空 |
+| 4 审批/提问 | 通过 | `waterfall-unit` 7 段全过（允许的才转发、拒绝/超时各自结算、断线取消卡片、问题按自己名字转发） |
+| 5 多节点 | 通过 | 同一机器两个 `remoteRoot` 同时 connected；两边工区 id 唯一；各建 Session 前缀各自 nodeId、读回落到正确节点；合并列表两行；移除一台不影响另一台 |
+| 6 版本闸门 | 通过 | `version-unit` 全过；`artefact-acceptance` 在真节点 8 秒装完 832MiB、原生包 `sherpa-onnx-linux-x64`/`sharp-linux-x64`（无 win-x64）、二次安装与回滚均通过；实测一台 3.9GB 的旧树被替换成 832MiB |
+| 7 插件开关 | 通过 | 207 行，147 开 / 60 关 / 134 锁定；关掉的行写进节点 profile patch 的 disabled 块；结构行无法关闭（实测关掉会 `1 required plugin did not activate`） |
+| 8 纯逻辑 | 通过 | routing-unit / multipart-unit / provision-unit / waterfall-unit / version-unit / dispatch-seam / upstream-smoke / descriptor-smoke |
+| 9 端到端 | 通过 | workspace-flow / host-routing / tool-parity / tool-git-image / client-bundle / event-relay / gateway-smoke / session / terminal / multi-node / browser |
+
+本轮修掉的问题：①`REMOTE_LAYOUT` 是常量，第二个节点复用第一个的 runtime（多节点验收第一次
+就抓到）；②制品裁剪规则误删 `yaml/dist/doc/directives.js`，节点启动即 `MODULE_NOT_FOUND` 而
+版本闸门说"已是最新"，为此加了 `.fleet-artefact.json` 打包戳；③把 `connection`/`web-startup`
+当浏览器行关掉导致节点没有 HTTP 服务，为此加了 `STRUCTURAL_ROWS` + 从已安装 `dsh-base` 解析
+必需行；④浏览器验收固定采样一次会撞上侧栏重绘，改成有界轮询。
