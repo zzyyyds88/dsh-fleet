@@ -6,6 +6,35 @@
 
 脚本只是把下面的人工步骤固定下来；判断标准以本文档为准，不以脚本退出码为准。
 
+## 一条命令跑完
+
+```powershell
+node packages/dsh-fleet/test/run-all.mjs
+```
+
+它会自己启动一个 `--profile fleettest` 的 Host、连上已记录的节点，按三层跑完全部 22 个套件，
+每个套件一行结论，失败的附最后几行输出与完整日志路径。**任何一层失败都以非零退出**。
+
+```powershell
+node packages/dsh-fleet/test/run-all.mjs --list              # 打印矩阵，不跑
+node packages/dsh-fleet/test/run-all.mjs --layer offline     # 秒级：纯逻辑 + 组合检查
+node packages/dsh-fleet/test/run-all.mjs --layer contract    # 契约缝隙（用 Electron 的 Node 读 app.asar）
+node packages/dsh-fleet/test/run-all.mjs --layer e2e         # 端到端：Host + 节点
+node packages/dsh-fleet/test/run-all.mjs --skip artefact,browser --keep-host
+node packages/dsh-fleet/test/run-all.mjs --host <base> --token <t>   # 复用已在跑的 Host
+```
+
+跑它需要两个外部条件，缺了就**报告 SKIP 并说明原因**，绝不写成通过：
+
+| 条件 | 由谁提供 | 缺了会怎样 |
+|---|---|---|
+| 节点凭据 | `DSH_FLEET_TEST_HOST/USER/PASSWORD\|KEY_FILE` | 端到端全部 SKIP；若整层一个都没跑，命令以**退出码 1** 结束，因为"证明用户能干活"的那一层没有被检验 |
+| Chrome 调试端口 | `DSH_BROWSER_DEBUG_PORT`（默认 9222，需以 `--remote-debugging-port` 启动） | 只有 `browser` 一个套件 SKIP |
+| 节点上的 Release 制品 | 已发布的 `v<版本>` | 只有 `artefact` 一个套件 SKIP（可 `--skip artefact`） |
+
+套件可以自己声明"这台部署跑不了"并退出码 3，runner 会把它记成 SKIP 而不是 PASS —— 目前只有
+`approval` 用它：节点被设成 `danger-full-access` 时根本不会发审批请求，硬跑只会是一串空断言。
+
 ## 0. 前置
 
 | 项 | 要求 |
@@ -178,7 +207,7 @@ $env:ELECTRON_RUN_AS_NODE = "1"
 & "D:\Program Files\DSH\DeepSeek Harness.exe" packages\dsh-fleet\test\upstream-smoke.mjs
 ```
 
-## 9. 端到端（需要运行中的 Host + 连上的节点）
+## 9. 端到端（需要运行中的 Host + 连上的节点；也可交给 `run-all.mjs --layer e2e`）
 
 ```powershell
 node packages\dsh-fleet\test\host-routing.mjs    <base> <token>
@@ -208,15 +237,34 @@ node packages\dsh-fleet\test\multi-node-acceptance.mjs <base> <token>
 | 1 侧栏 | 通过 | 真实 Chrome 读 DOM：`grouptest`、`fleet-second`、`fleet-brain-test` 三个远程工区与本地工区在同一列表（`.scratch/browser-acceptance.png`） |
 | 2 会话 | 通过 | 真下指令 → 节点真跑 write/bash/grep → `turn/end={kind:completed}` → 助手说 DONE → 独立 SSH 读到 `acceptance-*.txt` 字节与 prompt 一致（20 字节） |
 | 3 终端 | 通过 | `environment` 返回 `/root/grouptest` + 65536；shells 为 `bash,pwsh`；attach 首帧 snapshot 且 writable；echo 命令收到 2 次回显；节点 ack；close 后花名册为空 |
-| 4 审批/提问 | 通过 | `waterfall-unit` 7 段全过（允许的才转发、拒绝/超时各自结算、断线取消卡片、问题按自己名字转发） |
+| 4 审批/提问 | 通过 | `waterfall-unit` 7 段全过（允许的才转发、拒绝/超时各自结算、断线取消卡片、问题按自己名字转发）；`approval-acceptance` 在真节点上走完整条链：节点 `approval/asked` → 本机 `waterfall` 帧带着包裹后的 agentId → 答复 `$events/result` → 节点 `approval/decided=allowed-once` → 文件真的写出来；第二次改成拒绝，节点记 `rejected` 且文件不存在；`ask_user_question` 用 `{answers:[{id,selected}]}` 批量答复，节点的工具结果原样回带 `red` |
 | 5 多节点 | 通过 | 同一机器两个 `remoteRoot` 同时 connected；两边工区 id 唯一；各建 Session 前缀各自 nodeId、读回落到正确节点；合并列表两行；移除一台不影响另一台 |
 | 6 版本闸门 | 通过 | `version-unit` 全过；`artefact-acceptance` 在真节点 8 秒装完 832MiB、原生包 `sherpa-onnx-linux-x64`/`sharp-linux-x64`（无 win-x64）、二次安装与回滚均通过；实测一台 3.9GB 的旧树被替换成 832MiB |
 | 7 插件开关 | 通过 | 207 行中，节点组合里真的有的 133 行默认开、其余 74 行标为「节点不加载」且不可开关；把 `plan-mode` 关掉后节点 patch 出现对应 disabled 条目、拨回默认即消失；14 个结构行（HTTP 服务 + Remote API 控制器/传输）不可关闭 —— 实测关掉要么 `1 required plugin did not activate`，要么节点活着但 `session/list` 不存在 |
 | 8 纯逻辑 | 通过 | routing-unit / multipart-unit / provision-unit / waterfall-unit / version-unit / dispatch-seam / upstream-smoke / descriptor-smoke |
-| 9 端到端 | 通过 | workspace-flow / host-routing / tool-parity / tool-git-image / client-bundle / event-relay / gateway-smoke / session / terminal / multi-node / browser |
+| 9 端到端 | 通过 | workspace-flow / host-routing / tool-parity / tool-git-image / client-bundle / event-relay / gateway-smoke / session / terminal / multi-node / artefact / browser / approval |
 
 本轮修掉的问题：①`REMOTE_LAYOUT` 是常量，第二个节点复用第一个的 runtime（多节点验收第一次
 就抓到）；②制品裁剪规则误删 `yaml/dist/doc/directives.js`，节点启动即 `MODULE_NOT_FOUND` 而
 版本闸门说"已是最新"，为此加了 `.fleet-artefact.json` 打包戳；③把 `connection`/`web-startup`
 当浏览器行关掉导致节点没有 HTTP 服务，为此加了 `STRUCTURAL_ROWS` + 从已安装 `dsh-base` 解析
 必需行；④浏览器验收固定采样一次会撞上侧栏重绘，改成有界轮询（截图超时不再算失败、CDP 定时器成功即清）；⑤插件开关第一版按名字猜默认值、把 `connection`/`web-startup` 当浏览器行、并给 59 行节点从不加载的行写了 disabled —— 三处都实测炸过，现在默认值取节点实际组合、结构行实测收敛、只对节点真有的行写 disabled。
+
+### 2026-11-17 · 一条命令跑完 22 个套件
+
+`node test/run-all.mjs` 在 `fleettest` + 真节点上跑出 **22 passed, 0 failed, 0 skipped in 250s**：
+
+| 层 | 套件 |
+|---|---|
+| offline（6） | routing / multipart / provision / waterfall / version / composition |
+| contract（3） | descriptor / dispatch / upstream（都走 Electron 的 Node 读 `app.asar`） |
+| e2e（13） | gateway / host-routing / workspace-flow / tool-parity / tool-git-image / client-bundle / event-relay / session / terminal / multi-node / artefact / approval / browser |
+
+runner 自己的三条硬约束（都实测过会踩）：
+
+- **退出码要真的表示结论。** 七个套件原本 `process.exitCode = 1` 后又 `process.exit(0)`，
+  失败被吞掉；runner 会把它读成通过。全部改成按 `failures.length` 退出。
+- **没跑 ≠ 通过。** 请求 `--layer e2e` 却一个都没能跑时，命令以退出码 1 结束，并明说
+  "the layer that proves a user can work was not exercised"。
+- **SKIP 必须带原因。** 缺节点凭据、缺 Chrome 端口、节点无 Release 制品、节点被设成
+  `danger-full-access` 不会发审批请求 —— 四种都报告原因，不写成通过。

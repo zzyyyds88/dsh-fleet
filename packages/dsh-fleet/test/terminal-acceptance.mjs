@@ -47,7 +47,7 @@ check(remoteRow !== undefined, 'there is a remote Session to open a terminal in'
 if (remoteRow === undefined) {
   log(`FAILED: ${failures.join(', ')}`)
   process.exitCode = 1
-  process.exit(0)
+  process.exit(failures.length === 0 ? 0 : 1)
 }
 const sessionId = remoteRow.sessionId
 
@@ -165,4 +165,4 @@ if (failures.length > 0) {
 } else {
   log('all checks passed')
 }
-process.exit(0)
+process.exit(failures.length === 0 ? 0 : 1)

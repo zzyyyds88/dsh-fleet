@@ -59,7 +59,7 @@ check(existing.length >= 1, 'at least one node is configured', `${String(existin
 const first = existing[0]
 if (first === undefined) {
   log(`FAILED: ${failures.join(', ')}`)
-  process.exit(0)
+  process.exit(failures.length === 0 ? 0 : 1)
 }
 
 // The first node has to be up too: this test is about two nodes at once, so an idle
@@ -100,7 +100,7 @@ check(typeof secondId === 'string' && secondId !== first.id,
   'a second node has its own identity', secondId)
 if (secondId === undefined) {
   log(`FAILED: ${failures.join(', ')}`)
-  process.exit(0)
+  process.exit(failures.length === 0 ? 0 : 1)
 }
 
 // Forget a second node on purpose when this test ran before: two records pointing at
@@ -219,4 +219,4 @@ if (failures.length > 0) {
 } else {
   log('all checks passed')
 }
-process.exit(0)
+process.exit(failures.length === 0 ? 0 : 1)

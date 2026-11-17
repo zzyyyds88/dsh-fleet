@@ -44,8 +44,16 @@ check(fleetRows.length > 0, 'session/list carries remote sessions',
   `${String(fleetRows.length)} of ${String(rows.length)} rows`)
 const remoteSession = fleetRows.find(item => String(item.cwd ?? '').startsWith('/'))
 check(remoteSession !== undefined, 'a remote row keeps its remote cwd', remoteSession?.cwd)
-check(String(remoteSession?.projections?.values?.title ?? '').length > 0,
-  'a remote row carries its title', String(remoteSession?.projections?.values?.title).slice(0, 40))
+// Projections have to survive the merge, but not every remote Session has a title: a
+// Session that was created moments ago and has not been named yet has none, and the
+// newest row is exactly such a Session here. Asserting on whichever row sorts first made
+// this check depend on what ran on the node a second earlier — measured: it failed in a
+// full run and passed a minute later, which reads like a broken projection but is a test
+// that picked a row with no title. The title is asserted on a row this test names itself
+// in section 3 below; here the question is only whether any row carries one at all.
+const titled = fleetRows.find(item => String(item.projections?.values?.title ?? '').length > 0)
+check(titled !== undefined, 'remote rows carry their title projection through the merge',
+  titled === undefined ? 'no remote row has a title' : String(titled.projections.values.title).slice(0, 40))
 
 // A local row must still be a local row.
 check(rows.some(item => !String(item.sessionId).startsWith('fleet_')),

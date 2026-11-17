@@ -69,7 +69,7 @@ if (remote === undefined) {
   carrier.close()
   log(`FAILED: ${failures.join(', ')}`)
   process.exitCode = 1
-  process.exit(0)
+  process.exit(failures.length === 0 ? 0 : 1)
 }
 
 // ---- 2. open a real Session in it, exactly like clicking "New session" -----
@@ -212,4 +212,4 @@ if (failures.length > 0) {
 } else {
   log('all checks passed')
 }
-process.exit(0)
+process.exit(failures.length === 0 ? 0 : 1)

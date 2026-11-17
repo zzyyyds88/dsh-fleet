@@ -127,4 +127,4 @@ if (failures.length > 0) {
 } else {
   log('all checks passed')
 }
-process.exit(0)
+process.exit(failures.length === 0 ? 0 : 1)

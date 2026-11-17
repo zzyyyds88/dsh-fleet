@@ -38,7 +38,7 @@ class Cdp {
     this.pending = new Map()
   }
 
-  static async attach(port = 9222) {
+  static async attach(port = Number(process.env.DSH_BROWSER_DEBUG_PORT ?? 9222)) {
     const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()
     const page = targets.find(target => target.type === 'page')
     if (page === undefined) throw new Error('no page target; start Chrome with --remote-debugging-port')
@@ -209,4 +209,4 @@ if (failures.length > 0) {
 } else {
   log('all checks passed')
 }
-process.exit(0)
+process.exit(failures.length === 0 ? 0 : 1)

@@ -512,9 +512,25 @@ profile 名也按 root 派生（`~/.dsh-fleet` 仍是 `fleet`，`~/.dsh-fleet-b`
 | `terminal-acceptance.mjs` | 远程会话里的真 PTY：`environment`/`shells`/`create` 走路由后的 agent lookup、attach 首帧 snapshot、写入 `echo` 命令、读到输出与节点 ack、`close` 后从花名册消失 | 同上 |
 | `multi-node-acceptance.mjs` | 同时连两台（同一机器两个 `remoteRoot`）：侧栏两边的工区都在且 id 唯一、各自建的 Session 落到各自节点、合并列表里是两行、移除一台不影响另一台 | 同上 |
 | `artefact-acceptance.mjs` | 在真节点上跑真安装脚本：下载、校验 sha256、解压、替换、`--version`、二次安装、回滚；断言原生包是 `linux-x64` 而非 `win-x64` | 节点 + 已发布的 Release 制品 |
+| `approval-acceptance.mjs` | **审批与提问真的走完一整圈**：节点 `approval/asked` → 本机 `$events` 上的 `waterfall` 帧（agentId 已包裹）→ 用 `$events/result` 答复 → 节点 `approval/decided` 记下所选值 → 文件真的写出；第二次改成拒绝，文件不存在；`ask_user_question` 用批量 `{answers:[{id,selected}]}` 往返 | 运行中的 Host + 已连接节点（节点需 `approval: ask`） |
 | `browser-acceptance.mjs` | 真 Chrome + CDP：渲染后的侧栏文本里**真的有**远程工区；插件自己的入口可达；截图留证。API 测试看不见"baseline 把远程行冲掉"这类问题 | 运行中的 Host + 带 `--remote-debugging-port` 的 Chrome |
 | `version-unit.mjs` | 版本闸门的每个分支（含 rc 排序）、制品 URL、安装脚本内容、每节点 layout 派生、开关语义与锁定行 | 无 |
 | `waterfall-unit.mjs` | 审批/提问中继：允许的 waterfall 才发到浏览器、拒绝与超时各自结算、节点断开时卡片被取消、问题按自己的名字转发 | 无 |
+
+### 一条命令跑完
+
+`test/run-all.mjs` 是这套矩阵的唯一入口：它自己起一个隔离 profile 的 Host、连上已记录的节点、
+按 **offline / contract / e2e** 三层依次执行，一个套件一行结论。它存在的理由不是省几条命令，而是
+那三条容易做错的事：
+
+- **契约测试必须用 Electron 的 Node 跑**（要读 `app.asar` 里的上游包），端到端必须用普通 Node 但
+  需要一个活着的 Host。这两件事靠人记，迟早会漏；漏了的表现是"某个测试一直超时"，与真的坏了
+  长得一样。
+- **退出码必须代表结论。** 曾经有七个套件在记录失败后又 `process.exit(0)`，把失败吞掉。runner
+  读的是退出码，所以它自己也要守这条：任何一层失败都非零退出。
+- **没跑不等于通过。** 请求了端到端却一个都没能跑（没有节点、没有 Host）时退出码是 1，并说明
+  "the layer that proves a user can work was not exercised"。缺 Chrome 端口、缺 Release 制品、
+  节点不会发审批请求这类局部条件则记 SKIP 并给出原因 —— 套件可以退出码 3 声明"这台部署跑不了"。
 
 升级 DSH 之后该按什么顺序重跑、每个测试守的是哪条上游契约，见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](../packages/dsh-fleet/docs/UPGRADE.zh.md)。
 

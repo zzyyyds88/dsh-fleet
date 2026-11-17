@@ -1,0 +1,700 @@
+/**
+ * Run the whole acceptance matrix with one command, and report honestly.
+ *
+ * The three layers answer three different questions and none of them substitutes for
+ * another: pure logic proves a branch, the seam tests prove the plugin still fits inside
+ * the installed DSH, and the end-to-end tests prove that a user's click reaches a real
+ * node. A green unit run says nothing about whether a remote Session can write a file, and
+ * a green end-to-end run says nothing about which release it ran against. So this runner
+ * keeps them separate, prints one row per suite, and **fails if any suite fails**.
+ *
+ * It is also the only place that knows how to launch what the end-to-end layer needs:
+ * the seam tests must run under Electron's Node (they read `app.asar`), and the end-to-end
+ * tests need a Host of their own plus a connected node. Discovering that by hand is the
+ * step people skip, and a skipped step here reads exactly like a passing one.
+ *
+ * Usage:
+ *   node test/run-all.mjs                     # everything it can run here
+ *   node test/run-all.mjs --layer offline     # no Host, no node: seconds
+ *   node test/run-all.mjs --layer contract    # seam tests under Electron's Node
+ *   node test/run-all.mjs --layer e2e         # launches a Host and a node
+ *   node test/run-all.mjs --host <base> --token <t>   # reuse a running Host
+ *   node test/run-all.mjs --skip artefact,browser     # the slow / external ones
+ *   node test/run-all.mjs --list
+ *
+ * Options:
+ *   --layer <a,b>`     offline | contract | e2e      (default: all three)
+ *   --host/--token     reuse a running Host instead of spawning one
+ *   --profile <name>   profile to launch the Host with (default: fleettest)
+ *   --skip <a,b>`      suite names to skip, e.g. browser,artefact
+ *   --only <a,b>`      run just these suite names
+ *   --keep-host        do not stop a Host this run started (for debugging)
+ *   --list             print the matrix and exit
+ *
+ * A suite that cannot run is reported as SKIP with the reason — never as a pass. A suite
+ * that fails prints its own last lines, because the interesting part of a failure is
+ * almost never the exit code.
+ *
+ * @module @local/dsh-fleet/test/run-all
+ */
+import { spawn } from 'node:child_process'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const PACKAGE = resolve(HERE, '..')
+const REPO = resolve(PACKAGE, '..', '..')
+const LOGS = join(REPO, '.scratch', 'run-all')
+
+// ---- arguments ------------------------------------------------------------
+
+const argv = process.argv.slice(2)
+const flag = name => argv.includes(`--${name}`)
+const value = (name, fallback) => {
+  const at = argv.indexOf(`--${name}`)
+  return at >= 0 && argv[at + 1] !== undefined ? argv[at + 1] : fallback
+}
+const list = name => (value(name, '') === '' ? undefined : value(name).split(',').map(part => part.trim()).filter(Boolean))
+
+const layers = list('layer') ?? ['offline', 'contract', 'e2e']
+const only = list('only')
+const skipped = list('skip') ?? []
+const keepHost = flag('keep-host')
+const reuseHost = value('host')
+const reuseToken = value('token')
+const profile = value('profile', 'fleettest')
+
+// ---- the matrix -----------------------------------------------------------
+
+/**
+ * One suite.
+ *
+ * `needs` is what decides whether it can run here, and it is checked rather than assumed:
+ * reporting an end-to-end suite as skipped-because-there-is-no-node is honest, reporting
+ * it as passed because the process exited 0 after bailing early is not.
+ *
+ * @typedef {object} Suite
+ * @property {string} name
+ * @property {'offline' | 'contract' | 'e2e'} layer
+ * @property {string[]} file - path parts under the repository root.
+ * @property {'node' | 'electron'} runtime - which Node has to execute it.
+ * @property {number} timeoutMs
+ * @property {'host' | 'node' | 'chrome' | 'release' | undefined} needs
+ * @property {string} proves - one line, for the matrix printout.
+ */
+
+/** @type {Suite[]} */
+const SUITES = [
+  // ---- pure logic: no Host, no node, no Electron --------------------------
+  {
+    name: 'routing',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'routing-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 120_000,
+    proves: 'identity round-trip, stream fan-out, workspace merge, local passthrough, job endpoints',
+  },
+  {
+    name: 'multipart',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'multipart-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 120_000,
+    proves: 'a multipart reply decodes into bytes at the right JSON path; malformed parts are rejected',
+  },
+  {
+    name: 'provision',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'provision-unit.mjs'],
+    runtime: 'electron',
+    timeoutMs: 180_000,
+    proves: 'what is written onto a node: provider rows copied, account rows not, the result parses as YAML',
+  },
+  {
+    name: 'waterfall',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'waterfall-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 120_000,
+    proves: 'approval/question relay: only allowed waterfalls cross, refusal and timeout each settle once',
+  },
+  {
+    name: 'version',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'version-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 120_000,
+    proves: 'version gate branches, artefact URLs, install script, per-node layout, switch semantics',
+  },
+  {
+    name: 'composition',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet-brain', 'scripts', 'check-composition.mjs'],
+    runtime: 'electron',
+    timeoutMs: 180_000,
+    proves: 'the node composition is still a brain: Remote controllers in, no client-UI rows, YAML parses',
+  },
+
+  // ---- contract seams: must run under Electron's Node ---------------------
+  {
+    name: 'descriptor',
+    layer: 'contract',
+    file: ['packages', 'dsh-fleet', 'test', 'descriptor-smoke.mjs'],
+    runtime: 'electron',
+    timeoutMs: 180_000,
+    proves: 'the upstream descriptors and `static inject` are readable from the installed release',
+  },
+  {
+    name: 'dispatch',
+    layer: 'contract',
+    file: ['packages', 'dsh-fleet', 'test', 'dispatch-seam.mjs'],
+    runtime: 'electron',
+    timeoutMs: 180_000,
+    proves: 'the Gateway still dispatches to an own property on the instance, and the endpoint set is unchanged',
+  },
+  {
+    name: 'upstream',
+    layer: 'contract',
+    file: ['packages', 'dsh-fleet', 'test', 'upstream-smoke.mjs'],
+    runtime: 'electron',
+    timeoutMs: 180_000,
+    proves: 'the upstream controllers the decorators wrap still export what the wrappers expect',
+  },
+
+  // ---- end to end: a real Host, a real node -------------------------------
+  {
+    name: 'gateway',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'gateway-smoke.mjs'],
+    runtime: 'node',
+    timeoutMs: 300_000,
+    needs: 'node',
+    proves: 'cookie, unary RPC and the stream carrier work over SSH against a resident node',
+  },
+  {
+    name: 'host-routing',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'host-routing.mjs'],
+    runtime: 'node',
+    timeoutMs: 600_000,
+    needs: 'host',
+    proves: 'every routed endpoint through the local `/api`, plus one binary read; unprompted endpoints stay local',
+  },
+  {
+    name: 'workspace-flow',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'workspace-flow.mjs'],
+    runtime: 'node',
+    timeoutMs: 600_000,
+    needs: 'host',
+    proves: 'add remote workspace → new Session → send a prompt → the node runs it → the file is on the node disk',
+  },
+  {
+    name: 'tool-parity',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'tool-parity.mjs'],
+    runtime: 'node',
+    timeoutMs: 900_000,
+    needs: 'host',
+    proves: 'the agent\'s own read/write/edit/grep/glob hit node paths; no Windows path leaks into the transcript',
+  },
+  {
+    name: 'tool-git-image',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'tool-git-image.mjs'],
+    runtime: 'node',
+    timeoutMs: 900_000,
+    needs: 'host',
+    proves: 'git against a real repo, `read_image` on a real PNG, grep on a real file — the three a mirror scheme breaks',
+  },
+  {
+    name: 'client-bundle',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'client-bundle.mjs'],
+    runtime: 'node',
+    timeoutMs: 300_000,
+    needs: 'host',
+    proves: 'the desktop really serves this client code and the three slots are registered and render',
+  },
+  {
+    name: 'event-relay',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'event-relay.mjs'],
+    runtime: 'node',
+    timeoutMs: 300_000,
+    needs: 'host',
+    proves: 'a Session created on the node reaches the browser wrapped, with no bare node id leaking',
+  },
+  {
+    name: 'session',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'session-acceptance.mjs'],
+    runtime: 'node',
+    timeoutMs: 900_000,
+    needs: 'host',
+    proves: 'drive a real remote turn (write/bash/grep), read `session/follow`, then witness the bytes over a separate SSH',
+  },
+  {
+    name: 'terminal',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'terminal-acceptance.mjs'],
+    runtime: 'node',
+    timeoutMs: 600_000,
+    needs: 'host',
+    proves: 'a real PTY on the node: environment, shells, create, attach snapshot, echo round-trip, close',
+  },
+  {
+    name: 'multi-node',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'multi-node-acceptance.mjs'],
+    runtime: 'node',
+    timeoutMs: 900_000,
+    needs: 'host',
+    proves: 'two nodes at once: distinct ids, sessions land on the right one, removing one leaves the other intact',
+  },
+  {
+    name: 'artefact',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'artefact-acceptance.mjs'],
+    runtime: 'node',
+    timeoutMs: 1_500_000,
+    needs: 'release',
+    proves: 'the real install script on the real node: download, checksum, unpack, replace, version, rollback',
+  },
+  {
+    name: 'approval',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'approval-acceptance.mjs'],
+    runtime: 'node',
+    timeoutMs: 900_000,
+    needs: 'host',
+    proves: 'a node approval reaches this Host as a waterfall, the answer resumes the remote turn, and a refusal is honoured',
+  },
+  {
+    name: 'browser',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'browser-acceptance.mjs'],
+    runtime: 'node',
+    timeoutMs: 600_000,
+    needs: 'chrome',
+    proves: 'a real Chrome renders the remote workspaces in the ordinary sidebar, and the plugin entry is reachable',
+  },
+]
+
+if (flag('list')) {
+  for (const suite of SUITES) {
+    process.stdout.write(`${suite.layer.padEnd(9)} ${suite.name.padEnd(16)} ${suite.runtime.padEnd(9)} ${suite.proves}\n`)
+  }
+  process.exit(0)
+}
+
+// ---- environment ----------------------------------------------------------
+
+/**
+ * Where DSH is installed, for the seam tests and for the desktop binary.
+ *
+ * Two constraints make this less obvious than it looks. First, the plugin runs under
+ * Electron's Node, which can stat paths *inside* `app.asar`; this runner runs under plain
+ * Node, which cannot — so the layout is discovered from things that really exist on disk
+ * (the desktop executable, the `app.asar` file) rather than by probing the install
+ * directory, which would report "not found" for a perfectly good installation. Second,
+ * when the plugin passes `DSH_INSTALL_DIR` in, it is trusted as-is for the same reason.
+ *
+ * @returns {{ installDir: string | undefined, electron: string | undefined, why: string }}
+ */
+function locateInstall() {
+  const fromEnv = process.env.DSH_INSTALL_DIR
+  if (fromEnv !== undefined && fromEnv.length > 0) {
+    return { installDir: fromEnv, electron: electronFor(fromEnv), why: 'DSH_INSTALL_DIR' }
+  }
+  // The CLI ships inside the desktop app; that is the only instance whose `app.asar` the
+  // plugin is written against, so there is nothing to look for besides this one app.
+  const executables = [
+    'C:\\Program Files\\DSH\\DeepSeek Harness.exe',
+    'C:\\Program Files (x86)\\DSH\\DeepSeek Harness.exe',
+    '/opt/DSH/DeepSeek Harness',
+    '/opt/DSH/deepseek-harness',
+    '/usr/lib/DSH/DeepSeek Harness',
+  ].filter(candidate => existsSync(candidate))
+  if (executables.length === 0) {
+    return { installDir: undefined, electron: undefined, why: 'the desktop app was not found' }
+  }
+  const electron = executables[0]
+  const asar = join(dirname(electron), 'resources', 'app.asar')
+  const installDir = join(asar, 'dsh', 'node_modules', '@deepseek-ai', 'dsh')
+  // `app.asar` is a real file, so this check works under plain Node; the directory inside
+  // it is not stat-able here, which is fine — Electron will find it.
+  return {
+    installDir,
+    electron,
+    why: existsSync(asar) ? 'discovered next to the desktop app' : 'the desktop app has no app.asar',
+  }
+}
+
+/** The desktop executable that can act as a Node (`ELECTRON_RUN_AS_NODE=1`). */
+function electronFor(installDir) {
+  // …/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh → …/resources → <app>
+  const resources = resolve(installDir, '..', '..', '..', '..', '..')
+  const app = dirname(resources)
+  for (const name of ['DeepSeek Harness.exe', 'DeepSeek Harness', 'dsh-desktop']) {
+    const candidate = join(app, name)
+    if (existsSync(candidate)) return candidate
+  }
+  return undefined
+}
+
+const install = locateInstall()
+if (install.installDir !== undefined) process.env.DSH_INSTALL_DIR = install.installDir
+
+/** The SSH node the end-to-end suites need, if it was configured at all. */
+const nodeConfigured = typeof process.env.DSH_FLEET_TEST_HOST === 'string'
+  && process.env.DSH_FLEET_TEST_HOST.length > 0
+  && typeof process.env.DSH_FLEET_TEST_USER === 'string'
+  && process.env.DSH_FLEET_TEST_USER.length > 0
+
+// ---- reporting ------------------------------------------------------------
+
+const rows = []
+const paint = (text, code) => (process.stdout.isTTY ? `\u001B[${code}m${text}\u001B[0m` : text)
+const PASS = text => paint(text, '32')
+const FAIL = text => paint(text, '31')
+const SKIP = text => paint(text, '33')
+const DIM = text => paint(text, '2')
+
+/**
+ * Run one suite to completion, capturing its output in a file.
+ *
+ * Output goes to a file rather than a pipe on purpose: a pipe this process does not drain
+ * fast enough would block the child, and an end-to-end suite that stalls because its own
+ * log filled up looks exactly like a broken route. A file also leaves the evidence behind.
+ *
+ * @param {Suite} suite
+ * @param {string[]} extraArgs
+ * @returns {Promise<{ status: 'PASS' | 'FAIL' | 'TIMEOUT', ms: number, log: string }>}
+ */
+async function runSuite(suite, extraArgs = []) {
+  mkdirSync(LOGS, { recursive: true })
+  const logPath = join(LOGS, `${suite.name}.log`)
+  const target = join(REPO, ...suite.file)
+  if (!existsSync(target)) {
+    writeFileSync(logPath, `${target} does not exist\n`, 'utf8')
+    return { status: 'FAIL', ms: 0, log: logPath }
+  }
+
+  const electronMode = suite.runtime === 'electron'
+  if (electronMode && install.electron === undefined) {
+    writeFileSync(logPath, 'the desktop executable was not found; cannot run under Electron\'s Node\n', 'utf8')
+    return { status: 'FAIL', ms: 0, log: logPath }
+  }
+
+  const executable = electronMode ? install.electron : process.execPath
+  // `--expose-internals` is what the seam tests need to require upstream internals; it is
+  // only meaningful under the desktop binary, so the plain-Node path does not get it.
+  const args = electronMode ? ['--expose-internals', target, ...extraArgs] : [target, ...extraArgs]
+  // The third argument to `openSync` is the **mode**, and it only applies when `O_CREAT` is
+  // set. Passing the flags value there by habit made every log file read-only on Windows
+  // (mode 577 has no owner-write bit), so the next run could not truncate its own log and
+  // died with EPERM before running a single suite — measured, and it looked like a
+  // sandbox denial rather than a mistake in this file.
+  const fd = openSync(logPath, 'w', 0o644)
+  const env = { ...process.env }
+  // Clear a caller's value first: an inherited `ELECTRON_RUN_AS_NODE=1` would make the
+  // plain-Node suites run under the desktop binary and a stale `=0` would break the seams.
+  delete env.ELECTRON_RUN_AS_NODE
+  if (electronMode) env.ELECTRON_RUN_AS_NODE = '1'
+
+  const started = Date.now()
+  const child = spawn(executable, args, {
+    cwd: REPO,
+    // No pipes: see the doc comment. `stdio: 'ignore'` for stdin keeps an interactive
+    // prompt from silently swallowing the run.
+    stdio: ['ignore', fd, fd],
+    env,
+    windowsHide: true,
+  })
+  closeSync(fd)
+
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    child.kill()
+  }, suite.timeoutMs)
+
+  const code = await new Promise(resolveCode => {
+    child.on('error', error => {
+      writeFileSync(logPath, `spawn failed: ${String(error?.message ?? error)}\n`, 'utf8')
+      resolveCode(-1)
+    })
+    child.on('close', exitCode => resolveCode(exitCode ?? -1))
+  })
+  clearTimeout(timer)
+
+  const ms = Date.now() - started
+  if (timedOut) return { status: 'TIMEOUT', ms, log: logPath }
+  // A suite that finds this deployment cannot exercise it exits 3 and says why in its own
+  // output. That is a SKIP, not a pass: reporting it as PASS would let a deployment that
+  // can never ask for approval look fully accepted.
+  if (code === 3) return { status: 'SKIP', ms, log: logPath, reason: tail(logPath, 1)[0] }
+  return { status: code === 0 ? 'PASS' : 'FAIL', ms, log: logPath }
+}
+
+/** The last few lines of a failure, which is where the reason always is. */
+function tail(logPath, lines = 8) {
+  try {
+    return readFileSync(logPath, 'utf8').trim().split('\n').slice(-lines)
+  } catch {
+    return ['(the log could not be read)']
+  }
+}
+
+const duration = ms => (ms < 1000 ? `${String(ms)}ms` : `${(ms / 1000).toFixed(1)}s`)
+
+// ---- a Host for the end-to-end layer -------------------------------------
+
+/**
+ * Launch the Host this run will talk to, and read its one-time launch token.
+ *
+ * The token is the browser's only way in and it is different on every start, so it has to
+ * be scraped from the log the Host writes — that log line is the documented way a real
+ * desktop gets its URL too.
+ *
+ * @returns {Promise<{ base: string, token: string, stop: () => void } | { error: string }>}
+ */
+async function launchHost() {
+  if (install.electron === undefined || install.installDir === undefined) {
+    return { error: 'the desktop executable was not found, so no Host can be launched' }
+  }
+  // This path is *inside* `app.asar`, and plain Node cannot stat anything in there — an
+  // `existsSync` here answers "missing" for a file Electron opens fine, which is exactly
+  // how the first version of this runner skipped all ten end-to-end suites while claiming
+  // a clean run. So the file is not checked: Electron is the one that can read it, and if
+  // it really cannot, the Host exits and the log says why.
+  const cli = join(install.installDir, '..', 'dsh-desktop-host', 'lib', 'cli.js')
+
+  mkdirSync(LOGS, { recursive: true })
+  const logPath = join(LOGS, 'host.log')
+  const fd = openSync(logPath, 'w', 0o644)
+  const child = spawn(install.electron, [
+    '--expose-internals', cli,
+    '--profile', profile,
+    '--host', '127.0.0.1',
+    '--port', '0',
+    '--no-open',
+  ], {
+    cwd: REPO,
+    stdio: ['ignore', fd, fd],
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    windowsHide: true,
+  })
+  closeSync(fd)
+
+  const stop = () => { try { child.kill() } catch { /* already gone */ } }
+  const deadline = Date.now() + 90_000
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) {
+      return { error: `the Host exited with ${String(child.exitCode)}; see ${logPath}` }
+    }
+    let text = ''
+    try {
+      text = readFileSync(logPath, 'utf8')
+    } catch { /* not written yet */ }
+    const match = /dsh web: (http:\/\/\S+)/u.exec(text)
+    if (match !== null) {
+      const url = new URL(match[1])
+      return { base: `${url.protocol}//${url.host}`, token: url.searchParams.get('token') ?? '', stop }
+    }
+    await new Promise(resolveWait => setTimeout(resolveWait, 500))
+  }
+  stop()
+  return { error: `the Host did not print a URL within 90s; see ${logPath}` }
+}
+
+/**
+ * Bring every recorded node to `connected`.
+ *
+ * A recorded node already holds its credentials, so nothing has to be passed in; a node
+ * that is merely idle is a setup gap this runner can close, and one that is failing is a
+ * real failure the end-to-end layer should be told about rather than silently skip past.
+ *
+ * @param {string} base
+ * @param {string} cookie
+ * @returns {Promise<string | undefined>} a reason, when the nodes could not be brought up
+ */
+async function connectNodes(base, cookie) {
+  const headers = { cookie, 'content-type': 'application/json' }
+  let nodes = []
+  try {
+    nodes = (await fetch(`${base}/fleet/api/nodes`, { headers }).then(response => response.json())).nodes ?? []
+  } catch (error) {
+    return `the node list could not be read: ${String(error?.message ?? error)}`
+  }
+  if (nodes.length === 0) {
+    return 'no node is recorded in this profile; add one in the settings surface once, '
+      + 'or set DSH_FLEET_TEST_HOST/USER/PASSWORD'
+  }
+
+  for (const node of nodes) {
+    if (node.state === 'connected') continue
+    await fetch(`${base}/fleet/api/nodes/${node.id}/connect`, { method: 'POST', headers, body: '{}' })
+    const deadline = Date.now() + 300_000
+    while (Date.now() < deadline) {
+      await new Promise(resolveWait => setTimeout(resolveWait, 2000))
+      const current = (await fetch(`${base}/fleet/api/nodes`, { headers }).then(r => r.json()))
+        .nodes?.find(candidate => candidate.id === node.id)
+      if (current?.state === 'connected') break
+      if (current?.state === 'failed') return `node ${node.name} failed to connect: ${String(current.error ?? '')}`
+    }
+  }
+
+  const after = (await fetch(`${base}/fleet/api/nodes`, { headers }).then(r => r.json())).nodes ?? []
+  const down = after.filter(node => node.state !== 'connected')
+  if (down.length === after.length) return 'no node reached `connected`'
+  return undefined
+}
+
+// ---- main -----------------------------------------------------------------
+
+const RUNNABLE = s => (only === undefined ? layers.includes(s.layer) : only.includes(s.name))
+const WANTED = s => RUNNABLE(s) && !skipped.includes(s.name)
+
+if (SUITES.filter(WANTED).length === 0) {
+  process.stdout.write(`nothing to run: layers=${layers.join(',')} only=${String(only)} skip=${skipped.join(',')}\n`)
+  process.stdout.write('see --list for the matrix\n')
+  process.exit(2)
+}
+
+process.stdout.write(`${DIM('dsh-fleet acceptance')}\n`)
+process.stdout.write(`${DIM(`  install  ${String(install.installDir ?? '(not found)')}`)}\n`)
+process.stdout.write(`${DIM(`  electron ${String(install.electron ?? '(not found)')}`)}\n`)
+process.stdout.write(`${DIM(`  node     ${nodeConfigured ? 'DSH_FLEET_TEST_* is set' : 'DSH_FLEET_TEST_* is not set'}`)}\n`)
+process.stdout.write('\n')
+
+/** Suites that need a Host and therefore have to wait for one. */
+const hostSuites = SUITES.filter(suite => WANTED(suite) && suite.needs === 'host')
+
+let host
+/** One Host for the whole end-to-end layer; launching one per suite would reconnect the
+ *  node a dozen times and turn a fast run into a slow one for no extra proof. */
+async function ensureHost() {
+  if (host !== undefined) return host
+  if (reuseHost !== undefined && reuseToken !== undefined) {
+    host = { base: reuseHost, token: reuseToken, stop: () => {}, reused: true }
+    return host
+  }
+  const launched = await launchHost()
+  if (launched.error !== undefined) {
+    host = { error: launched.error }
+    return host
+  }
+  const { authenticate } = await import('./carrier.mjs')
+  let cookie
+  try {
+    cookie = await authenticate(launched.base, launched.token)
+  } catch (error) {
+    launched.stop()
+    host = { error: `the Host refused the launch token: ${String(error?.message ?? error)}` }
+    return host
+  }
+  const problem = await connectNodes(launched.base, cookie)
+  host = { ...launched, cookie, ...(problem === undefined ? {} : { error: problem }) }
+  return host
+}
+
+/** Why a suite cannot run here, or `undefined` when it can. */
+function blocked(suite) {
+  if (suite.needs === 'node' || suite.needs === 'host' || suite.needs === 'release') {
+    if (!nodeConfigured) return 'DSH_FLEET_TEST_HOST/USER are not set'
+  }
+  if (suite.needs === 'release') {
+    // The artefact test downloads from the public release; it is the one suite whose
+    // result depends on something this machine does not control.
+    if (process.env.DSH_FLEET_SKIP_RELEASE === '1') return 'DSH_FLEET_SKIP_RELEASE=1'
+  }
+  if (suite.needs === 'chrome') {
+    if (process.env.DSH_BROWSER_DEBUG_PORT === undefined) {
+      return 'no Chrome with --remote-debugging-port (set DSH_BROWSER_DEBUG_PORT)'
+    }
+  }
+  if (suite.needs === 'host' || suite.needs === 'chrome') {
+    if (host?.error !== undefined) return host.error
+  }
+  return undefined
+}
+
+const results = []
+const started = Date.now()
+
+for (const suite of SUITES) {
+  if (!WANTED(suite)) continue
+  const label = `${suite.layer}/${suite.name}`
+
+  // The seam tests need the install to read from; without it they would fail with a
+  // confusing module error rather than the real reason.
+  const needsInstall = suite.runtime === 'electron' || suite.needs === 'host'
+  if (needsInstall && install.installDir === undefined) {
+    process.stdout.write(`${SKIP('SKIP')} ${label.padEnd(26)} ${DIM(install.why)}\n`)
+    results.push({ label, status: 'SKIP', reason: install.why })
+    continue
+  }
+
+  if (suite.needs === 'host' || suite.needs === 'chrome') await ensureHost()
+  const reason = blocked(suite)
+  if (reason !== undefined) {
+    process.stdout.write(`${SKIP('SKIP')} ${label.padEnd(26)} ${DIM(reason)}\n`)
+    results.push({ label, status: 'SKIP', reason })
+    continue
+  }
+
+  const extraArgs = []
+  if (suite.needs === 'host' || suite.needs === 'chrome') {
+    extraArgs.push(host.base, host.token)
+  }
+  // The in-progress line exists to say which suite is currently slow, so it is written on a
+  // terminal and skipped when the report goes to a file. The escape sequence is what makes
+  // the verdict replace that line; without a terminal it would be noise in the middle of
+  // the report.
+  const tty = process.stdout.isTTY === true
+  if (tty) process.stdout.write(`${DIM('....')} ${label.padEnd(26)} ${DIM(suite.proves)}\r`)
+  const outcome = await runSuite(suite, extraArgs)
+  const verdict = outcome.status === 'PASS' ? PASS('PASS') : outcome.status === 'SKIP' ? SKIP('SKIP') : FAIL(outcome.status)
+  results.push({ label, ...outcome })
+  const note = outcome.status === 'SKIP' ? ` ${DIM(`— ${String(outcome.reason ?? '').slice(0, 90)}`)}` : ''
+  process.stdout.write(`${tty ? '\u001B[2K\r' : ''}${verdict} ${label.padEnd(26)} ${duration(outcome.ms).padStart(7)}  ${DIM(suite.proves)}${note}\n`)
+  if (outcome.status !== 'PASS') {
+    for (const line of tail(outcome.log)) process.stdout.write(`     ${DIM('│')} ${line}\n`)
+    process.stdout.write(`     ${DIM('│')} ${DIM(`full log: ${outcome.log}`)}\n`)
+  }
+}
+
+if (host?.stop !== undefined && !keepHost && host.reused !== true) host.stop()
+
+// ---- the verdict ----------------------------------------------------------
+
+const failed = results.filter(row => row.status === 'FAIL' || row.status === 'TIMEOUT')
+const skippedRows = results.filter(row => row.status === 'SKIP')
+const passed = results.filter(row => row.status === 'PASS')
+
+process.stdout.write(`\n${DIM('─'.repeat(72))}\n`)
+process.stdout.write(`${String(passed.length)} passed, ${String(failed.length)} failed, `
+  + `${String(skippedRows.length)} skipped in ${duration(Date.now() - started)}\n`)
+if (failed.length > 0) {
+  process.stdout.write(`\n${FAIL('failed')}:\n`)
+  for (const row of failed) process.stdout.write(`  ${row.label}  ${row.log ?? ''}\n`)
+}
+if (skippedRows.length > 0) {
+  process.stdout.write(`\n${SKIP('skipped')} (not a pass):\n`)
+  for (const row of skippedRows) process.stdout.write(`  ${row.label.padEnd(26)} ${row.reason ?? ''}\n`)
+}
+
+// A run in which everything was skipped proves nothing, and must not exit 0 just because
+// nothing failed. The end-to-end layer is the part a user actually feels, so a request for
+// it that could not run at all is a failure of the run, not a quiet success.
+const askedE2e = layers.includes('e2e') && SUITES.some(suite => suite.layer === 'e2e' && WANTED(suite))
+const noE2eRan = askedE2e && results.every(row => !row.label.startsWith('e2e/') || row.status === 'SKIP')
+if (askedE2e && noE2eRan) {
+  process.stdout.write(`\n${FAIL('no end-to-end suite could run')} — the layer that proves a user can work was not exercised\n`)
+  process.exit(1)
+}
+
+process.exit(failed.length === 0 ? 0 : 1)
