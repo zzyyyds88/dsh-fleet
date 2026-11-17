@@ -125,6 +125,20 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 | `terminal/create`、`attach` … | **保持本地** | 形参里是 `Agent` 对象，远程 Session 在本地没有 Agent |
 | `session/modelCatalog`、`agentPresets/*`、`settings/*`、`pluginManager/*` | **保持本地** | 描述的是**这个安装**的模型与配置，与节点无关 |
 
+### 还有哪些带身份的端点没路由
+
+上表是"已经决定的"。浏览器会调、fleet 没路由的端点还有一批 —— 它们不是被决定为本地，
+而是**还没被验收到**：`commands/list|execute`、`goals/*`、`skills/list`、`fileReferences/list`、
+`sessionReferenceResolver/candidates`、`messageFeedback/*`、`sessionFeedback/record`、
+`toolResults/watch`、`fileUploads/upload`、`agentPresets/*`、`userQuestions/answer|attachWait`、
+`subagents/prompt|interruptByUser`、`schedule/*`、`dynamicCordisRunner/*`。
+
+判据不是"名字像不像远程"，而是**它读的状态在谁那儿**：`commands/list` 列的是节点上那份
+组合的命令，远程会话里应当问节点；`settings/*` 描述的是这台安装，应当保持本地。没有路由时
+的表现是**静默落到本地实现**：不报错、拿到的是一份"看起来合理但属于另一台机器"的答案。
+这正是子代理历史与智能体协作那两条 bug 的共同形态，所以下一轮验收要从这份清单里挑真正
+被界面调到的那些，逐条判定"该转发还是该保持本地"，而不是等用户遇到再说。
+
 `workspace/create` 的按路径路由有个现实理由：**本地目录选择器只能浏览本机**，永远选不到节点上的 `/root/project`。所以远程工作区从 `/fleet/api/workspaces` 加入（设置页节点行展开后的输入框），它在节点上 `workspace/create`，再把结果包装成本地身份还回来。
 
 ### 形参里是 `Agent` 的两个例外
