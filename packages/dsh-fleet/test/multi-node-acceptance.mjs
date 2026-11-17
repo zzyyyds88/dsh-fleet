@@ -15,9 +15,10 @@
  * proves the *identity* layer keeps them apart even when nothing else does.
  *
  * Run:
- *   DSH_FLEET_TEST_HOST=… DSH_FLEET_TEST_USER=… DSH_FLEET_TEST_PASSWORD=… \
+ *   DSH_FLEET_TEST_HOST=… DSH_FLEET_TEST_USER=… DSH_FLEET_TEST_KEY_FILE=… \
  *   node test/multi-node-acceptance.mjs <hostBase> <launchToken>
  */
+import { readFileSync } from 'node:fs'
 import { nodeExec } from './node.mjs'
 import { authenticate, call, liveStream, openCarrier } from './carrier.mjs'
 
@@ -80,6 +81,16 @@ check((await nodes()).find(node => node.id === first.id)?.state === 'connected',
 
 const secondHost = process.env.DSH_FLEET_TEST_HOST2 ?? first.host
 const secondRoot = process.env.DSH_FLEET_SECOND_ROOT ?? '~/.dsh-fleet-b'
+// The second record needs its own credential: a key-only environment (the normal case
+// for a public repo, since there is no default password) must be able to add it the same
+// way `node.mjs` reaches the first one. Without this the second node is created but
+// never authenticates, and the test would report "two nodes are not both connected"
+// for what is really a missing credential in this shell.
+const secondKeyFile = process.env.DSH_FLEET_TEST_KEY_FILE2 ?? process.env.DSH_FLEET_TEST_KEY_FILE
+const secondKey = secondKeyFile === undefined || secondKeyFile.length === 0
+  ? undefined
+  : readFileSync(secondKeyFile, 'utf8')
+const secondSecret = process.env.DSH_FLEET_TEST_PASSWORD2 ?? process.env.DSH_FLEET_TEST_PASSWORD
 const created = await fetch(`${base}/fleet/api/nodes`, {
   method: 'POST',
   headers: { cookie, 'content-type': 'application/json' },
@@ -89,7 +100,8 @@ const created = await fetch(`${base}/fleet/api/nodes`, {
       host: secondHost,
       port: Number(process.env.DSH_FLEET_TEST_PORT2 ?? first.port),
       username: process.env.DSH_FLEET_TEST_USER2 ?? first.username,
-      password: process.env.DSH_FLEET_TEST_PASSWORD2 ?? process.env.DSH_FLEET_TEST_PASSWORD,
+      ...(secondSecret === undefined || secondSecret.length === 0 ? {} : { password: secondSecret }),
+      ...(secondKey === undefined ? {} : { privateKey: secondKey, auth: { kind: 'key' } }),
       remoteRoot: secondRoot,
       enabled: true,
     },
