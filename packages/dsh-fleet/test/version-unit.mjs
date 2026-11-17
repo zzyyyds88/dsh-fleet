@@ -17,15 +17,21 @@ import {
   requiresProvisioning,
 } from '../src/core/version.js'
 import {
+  BUILD_STAMP,
+  RUNTIME_BUILD,
   artefactName,
   artefactUrls,
   DEFAULT_MIRROR,
+  inspectRuntime,
   installScript,
   platformTag,
   rollbackScript,
 } from '../src/remote/artefact.js'
+import { remoteLayout } from '../src/remote/daemon.js'
 import {
   classifyRow,
+  isStructuralRow,
+  parsePatchRowIds,
   parseSwitches,
   renderSyncBlock,
   resolveSwitches,
@@ -215,6 +221,59 @@ const check = (ok, label, detail) => {
   check(rendered.includes('turned off by hand'), 'and marks the hand-made decision')
   check(!rendered.includes('- id: llm'), 'an enabled row does not appear at all')
 
+  // A row the node's own composition needs is on and locked, whatever its name looks
+  // like. This is the case that broke a node outright: `connection`, `file-upload`,
+  // `locale`, `shortcuts`, `resources` and `web-startup` are all `@deepseek-ai/dsh-client-*`
+  // or browser-shaped, yet the brain composes them and `webserver`/`brain-runtime`
+  // cannot start without `webStartup`. Measured: six plugins waiting for services and no
+  // HTTP server at all.
+  const required = ['sidebar', 'pickerr']
+  const withRequired = resolveSwitches(rows, { sidebar: { sync: false } }, required)
+  const sidebarRow = withRequired.find(row => row.id === 'sidebar')
+  check(sidebarRow?.sync === true, 'a row the node composition needs stays on')
+  check(sidebarRow?.source === 'required', 'and says the composition is why', sidebarRow?.source)
+  check(sidebarRow?.locked === true, 'so the UI cannot offer a switch for it')
+
+  // A row that IS required and is also browser-shaped must not be disabled either.
+  const disableRequired = rowsToDisable(withRequired)
+  check(!disableRequired.includes('sidebar'), 'and it never reaches the disable list')
+
+  // Parsing the generated patch is how the plugin learns that set; a hand-written list
+  // would go stale on the next upstream sync and take a node down with it.
+  const ids = parsePatchRowIds([
+    '- id: one',
+    '  config:',
+    '    path: x',
+    '- insert:',
+    '    - id: two',
+    "      name: '@deepseek-ai/x'",
+    '- id: three',
+  ].join('\n'))
+  check(JSON.stringify(ids) === JSON.stringify(['one', 'two', 'three']),
+    'patch row ids are read in file order', JSON.stringify(ids))
+  check(parsePatchRowIds('').length === 0, 'an empty patch has no rows')
+  check(parsePatchRowIds(undefined).length === 0, 'a missing patch has no rows')
+  check(parsePatchRowIds('- id: one\n- id: one').length === 1, 'a repeated id is listed once')
+
+  // The rows a node cannot start without are locked even though they are not in the
+  // patch's row list — `web`, for instance, comes from `dsh-base` and every web tool
+  // injects it. Switching it off left a node whose tool calls answered
+  // "tool-web: waiting for web" instead of doing anything.
+  const structural = resolveSwitches(
+    [{ id: 'web', name: '@deepseek-ai/dsh-web' }, { id: 'webserver', name: '@deepseek-ai/dsh-host-webserver' }],
+    { web: { sync: false }, webserver: { sync: false } },
+  )
+  check(structural.every(row => row.sync && row.locked),
+    'a row a node cannot start without is locked, even after an explicit off')
+  check(structural.some(row => row.reason.includes('cannot start')),
+    'and the reason says why', structural[0]?.reason)
+  check(rowsToDisable(structural).length === 0,
+    'so nothing structural ever reaches the disable block')
+  check(isStructuralRow('web') && isStructuralRow('web-startup') && isStructuralRow('brain-runtime'),
+    'the structural set covers the rows measured to be fatal')
+  check(!isStructuralRow('office-kit') && !isStructuralRow('workflow-ptc'),
+    'and leaves genuinely optional rows switchable')
+
   const parsed = parseSwitches({ bash: { sync: false }, llm: true, junk: { sync: 'yes' } })
   check(parsed.bash?.sync === false, 'a stored switch round-trips')
   check(parsed.llm?.sync === true, 'a bare boolean is accepted as a shorthand')
@@ -227,6 +286,87 @@ const check = (ok, label, detail) => {
   const none = resolveSwitches(rows, {})
   check(rowsToDisable(none).every(id => id === 'sidebar' || id === 'picker'),
     'only the browser rows are disabled when nothing was set by hand', rowsToDisable(none).join(','))
+}
+
+// ---- one node's own filesystem layout, derived from its root ---------------
+// Two node records can name the same machine under different roots — the ordinary way
+// to test a second node. With one global layout the second node silently reused the
+// first one's runtime and resident host, so "two connected nodes" was one node counted
+// twice. Measured on one machine before this was fixed.
+{
+  const first = remoteLayout()
+  const defaultAgain = remoteLayout('~/.dsh-fleet')
+  const second = remoteLayout('~/.dsh-fleet-b')
+  check(first.runtime === '~/.dsh-fleet/runtime', 'the default root keeps its runtime')
+  check(first.profile === defaultAgain.profile,
+    'the historical root keeps the profile an earlier build created', first.profile)
+  check(first.profileName === 'fleet', 'and the profile name a resident host is started with',
+    first.profileName)
+  check(remoteLayout('~/.dsh-fleet/').profileName === 'fleet', 'a trailing slash changes nothing')
+  check(second.runtime === '~/.dsh-fleet-b/runtime', 'a second root gets its own runtime')
+  check(second.profileName === 'fleet-b', 'and its own profile name', second.profileName)
+  check(second.profile !== first.profile, 'so the two nodes cannot overwrite each other\'s patch',
+    `${first.profile} vs ${second.profile}`)
+  check(second.run !== first.run && second.status !== first.status,
+    'their run directories and status files are distinct too')
+  check(remoteLayout('~/.brains/scratch').profileName === 'fleet-scratch',
+    'a deeper root names itself after its last segment')
+  check(remoteLayout('/').profileName === 'fleet',
+    'a root that reduces to nothing falls back rather than colliding silently')
+  // Every path a node writes must live under its own root; one that escaped would be
+  // the same bug in a different disguise.
+  for (const key of ['runtime', 'run', 'log', 'status', 'cli']) {
+    check(second[key].startsWith('~/.dsh-fleet-b/'), `${key} lives under the node's own root`, second[key])
+  }
+  // The Session log lives in the shared DSH home on purpose: two roots on one machine
+  // are two brains, not two machines, and each Session record names its own cwd.
+  check(second.home === first.home, 'both roots share the machine\'s DSH home', first.home)
+}
+
+// ---- the packing build, which the version cannot express -------------------
+// A cached artefact is the whole point of the release route, and it also means a tree
+// can be the right *version* and the wrong *bytes*: republish the same release with a
+// different strip rule and every node that already has it never reinstalls. Measured:
+// a strip rule that removed `doc/` also removed `yaml/dist/doc/directives.js`, every
+// node from that artefact failed at startup with MODULE_NOT_FOUND, and the gate said
+// "current" because the version matched.
+{
+  const good = inspectRuntime({ version: '0.2.2-rc.3', build: String(RUNTIME_BUILD), wantedVersion: '0.2.2-rc.3' })
+  check(good.usable, 'a tree on the right version and the right build is usable', good.reason)
+  const repacked = inspectRuntime({ version: '0.2.2-rc.3', build: '1', wantedVersion: '0.2.2-rc.3' })
+  check(!repacked.usable, 'a tree packed by an older build is not')
+  check(repacked.reason.includes('build 1'), 'and says which build made it', repacked.reason)
+  const unstamped = inspectRuntime({ version: '0.2.2-rc.3', build: undefined, wantedVersion: '0.2.2-rc.3' })
+  check(!unstamped.usable, 'a tree with no stamp at all is not usable')
+  check(!inspectRuntime({ version: '0.1.0', build: String(RUNTIME_BUILD), wantedVersion: '0.2.2-rc.3' }).usable,
+    'a tree of another version is not usable either')
+  check(!inspectRuntime({ version: undefined, build: undefined, wantedVersion: '0.2.2-rc.3' }).usable,
+    'no tree at all is not usable')
+
+  // The gate has to act on that: same version, wrong pack, still a reinstall.
+  const decision = decideGate({
+    hostVersion: '0.2.2-rc.3',
+    hostBrain: '0.3.0',
+    nodeVersion: '0.2.2-rc.3',
+    nodeBrain: '0.3.0',
+    nodeRuntime: repacked.reason,
+  })
+  check(decision.action === GATE.INSTALL, 'so the gate reinstalls a wrongly packed tree',
+    decision.action)
+  check(decision.reason === 'node-runtime-repack', 'with a reason that names the cause', decision.reason)
+  check(decideGate({
+    hostVersion: '0.2.2-rc.3', hostBrain: '0.3.0', nodeVersion: '0.2.2-rc.3', nodeBrain: '0.3.0',
+  }).action === GATE.CURRENT, 'and a usable tree still needs nothing')
+
+  // The install script must leave the stamp behind, or every connect reinstalls.
+  const script = installScript({
+    version: '0.2.2-rc.3',
+    runtime: '/root/.dsh-fleet/runtime',
+    cli: '/root/.dsh-fleet/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    urls: ['https://mirror/x.tar.gz'],
+  })
+  check(script.includes(BUILD_STAMP), 'the install writes the build stamp', BUILD_STAMP)
+  check(script.includes(`'${String(RUNTIME_BUILD)}'`), 'with the build this plugin packs')
 }
 
 if (failures.length > 0) {

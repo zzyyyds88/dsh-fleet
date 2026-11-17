@@ -81,9 +81,17 @@ function installedVersion() {
 /**
  * Files a running node never reads.
  *
- * Type declarations, source maps, docs and per-package test trees are roughly 16% of an
- * install and none of it is loaded by `node lib/bin.js`. `LICENSE` files are kept: they
- * are the licence conditions of the packages being redistributed.
+ * Type declarations, source maps, package docs and per-package test trees are roughly a
+ * third of an install and none of it is loaded by `node lib/bin.js`. `LICENSE` files are
+ * kept: they are the licence conditions of the packages being redistributed.
+ *
+ * **No pattern here may match a directory whose name merely looks like documentation.**
+ * `/(^|\/)docs?\//` was in this list and broke the node outright: `yaml` ships
+ * `dist/doc/directives.js`, which `dist/compose/composer.js` requires, so stripping
+ * `doc/` removed a module the runtime loads during boot. A `doc`-shaped directory inside
+ * a package's build output is code, not documentation, and nothing distinguishes the two
+ * from the path alone — so the rule is gone rather than narrowed. Measured cost of
+ * keeping those trees: under 2 MB.
  */
 const STRIPPED = Object.freeze([
   /\.d\.ts$/u,
@@ -93,7 +101,6 @@ const STRIPPED = Object.freeze([
   /(^|\/)CHANGELOG(\.[^/]*)?$/iu,
   /(^|\/)\.github\//u,
   /(^|\/)(test|tests|__tests__)\//u,
-  /(^|\/)docs?\//iu,
   /(^|\/)\.md$/iu,
 ])
 

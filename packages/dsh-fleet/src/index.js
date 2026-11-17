@@ -211,12 +211,13 @@ export function apply(ctx, config = {}) {
             runtime.facts = await runtime.host.probe()
             // Same gate as a connect: a reinstall is a forced provisioning, not a
             // way to bypass the version check.
-            const installed = await runtime.host.installedVersion()
+            const installed = await runtime.host.inspectRuntime()
             const decision = decideGate({
               hostVersion: version,
               hostBrain: brainVersion,
-              nodeVersion: installed,
+              nodeVersion: installed.version,
               nodeBrain: runtime.provision?.brainVersion,
+              nodeRuntime: installed.usable ? undefined : installed.reason,
             })
             runtime.gate = decision
             if (decision.action === 'ahead' || decision.action === 'unknown') {

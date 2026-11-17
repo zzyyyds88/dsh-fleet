@@ -13,21 +13,71 @@
  */
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { parseSwitches, renderSyncBlock, resolveSwitches, rowsToDisable } from '../core/plugin-sync.js'
+import {
+  parsePatchRowIds,
+  parseSwitches,
+  renderSyncBlock,
+  resolveSwitches,
+  rowsToDisable,
+} from '../core/plugin-sync.js'
+import { BRAIN_FILES } from './brain-bundle.generated.js'
 
 /** Rows that are the node's own composition: never switchable. */
 const PROTECTED = Object.freeze(['web-runtime', 'brain-runtime'])
+
+/** Upstream bundles a node loads, whose rows are therefore always present. */
+const UPSTREAM_BUNDLES = Object.freeze(['dsh-base'])
+
+/**
+ * The row ids a node's composition contains, out of the **installed** release.
+ *
+ * A node composes two bundles: `@deepseek-ai/dsh-base` (upstream) and
+ * `@local/dsh-fleet-brain` (this plugin's patch). Both contribute rows, and a row of
+ * either must never be disabled — the brain is a *subtraction* from `dsh-web-app`, not
+ * from `dsh-base`, so every service `dsh-base` provides is still there and other kept
+ * rows inject it.
+ *
+ * Reading `dsh-base` from `DSH_INSTALL_DIR` rather than embedding a copy is deliberate:
+ * the composition has to describe the release this desktop actually runs, and a list
+ * compiled into the plugin would be wrong the first time upstream adds a row.
+ *
+ * @returns {string[]} row ids from both bundles, deduplicated.
+ */
+function requiredRows() {
+  const ids = [...parsePatchRowIds(BRAIN_FILES['cordis.patch.yml'] ?? '')]
+  const installDir = process.env.DSH_INSTALL_DIR
+  if (typeof installDir === 'string' && installDir.length > 0) {
+    // `DSH_INSTALL_DIR` is `<app>/dsh/node_modules/@deepseek-ai/dsh`, so one level up is
+    // the `@deepseek-ai` directory this release's own bundles sit in.
+    const scopeDir = join(installDir, '..')
+    for (const bundle of UPSTREAM_BUNDLES) {
+      let text
+      try {
+        text = readFileSync(join(scopeDir, bundle, 'cordis.patch.yml'), 'utf8')
+      } catch {
+        // A bundle this plugin cannot read is reported, not guessed at: it means the
+        // install layout changed, and silently locking fewer rows would take a node
+        // down later with an error that names no switch.
+        continue
+      }
+      for (const id of parsePatchRowIds(text)) if (!ids.includes(id)) ids.push(id)
+    }
+  }
+  return ids
+}
 
 export class SyncSwitches {
   /**
    * @param {object} options
    * @param {string} options.home - `$DSH_HOME`.
    * @param {() => object | undefined} options.configEditor - the local config editor.
+   * @param {readonly string[]} [options.required] - row ids the node composition contains.
    * @param {(message: string) => void} [options.log]
    */
   constructor(options) {
     this.path = join(options.home, 'fleet', 'plugins.json')
     this.configEditor = options.configEditor
+    this.required = options.required ?? requiredRows()
     this.log = options.log ?? (() => {})
     /** @type {Record<string, { sync: boolean }>} */
     this.overrides = this.#read()
@@ -68,12 +118,12 @@ export class SyncSwitches {
 
   /** Every row with its effective switch and where that answer came from. */
   list() {
-    const resolved = resolveSwitches(this.rows(), this.overrides)
+    const resolved = resolveSwitches(this.rows(), this.overrides, this.required)
     return resolved.map(row => ({
       ...row,
       // The node's own composition is shown but not switchable: turning it off would
-      // leave a node that starts and does nothing.
-      locked: PROTECTED.includes(row.id),
+      // leave a node that starts and does nothing, or does not start at all.
+      locked: row.locked === true || PROTECTED.includes(row.id),
     }))
   }
 
@@ -91,12 +141,13 @@ export class SyncSwitches {
     if (!rows.some(row => row.id === rowId)) {
       throw Object.assign(new Error(`no plugin row ${rowId} on this desktop`), { code: 'row-not-found' })
     }
-    if (PROTECTED.includes(rowId)) {
-      throw Object.assign(new Error(`${rowId} is what makes a node a node; it cannot be switched off`), {
-        code: 'row-protected',
-      })
+    if (PROTECTED.includes(rowId) || this.required.includes(rowId)) {
+      throw Object.assign(
+        new Error(`${rowId} is what makes a node a node; it cannot be switched off`),
+        { code: 'row-protected' },
+      )
     }
-    const verdict = resolveSwitches([rows.find(row => row.id === rowId)], {})
+    const verdict = resolveSwitches([rows.find(row => row.id === rowId)], {}, this.required)
       .find(row => row.id === rowId)
     if (verdict !== undefined && verdict.sync === sync) delete this.overrides[rowId]
     else this.overrides[rowId] = { sync }
@@ -107,7 +158,7 @@ export class SyncSwitches {
   /** The rows a node must not load, in composition order. */
   disabledRows() {
     const keep = PROTECTED.filter(id => id !== 'web-runtime' && id !== 'brain-runtime')
-    return rowsToDisable(resolveSwitches(this.rows(), this.overrides), keep)
+    return rowsToDisable(resolveSwitches(this.rows(), this.overrides, this.required), keep)
   }
 
   /**
@@ -117,6 +168,6 @@ export class SyncSwitches {
    * so flipping a switch reconfigures a running node without a restart.
    */
   render() {
-    return renderSyncBlock(resolveSwitches(this.rows(), this.overrides), [])
+    return renderSyncBlock(resolveSwitches(this.rows(), this.overrides, this.required), [])
   }
 }

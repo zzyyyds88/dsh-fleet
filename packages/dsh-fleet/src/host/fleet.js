@@ -11,9 +11,9 @@
  */
 import { NodeRegistry } from '../core/registry.js'
 import { SecretStore, authFromSecret } from '../core/secrets.js'
-import { decideGate, requiresProvisioning } from '../core/version.js'
+import { GATE, decideGate } from '../core/version.js'
 import { SshConnection } from '../ssh/connection.js'
-import { RemoteHost } from '../remote/daemon.js'
+import { RemoteHost, remoteLayout } from '../remote/daemon.js'
 import { BRAIN_FILES, BRAIN_PACKAGE } from './brain-bundle.generated.js'
 import { Provisioner } from './provision.js'
 import { RemoteGateway } from './remote-gateway.js'
@@ -65,6 +65,10 @@ export class NodeRuntime {
     this.host = new RemoteHost({
       connection: this.connection,
       version: this.version,
+      // Its own paths: two node records can name the same machine under different
+      // roots, and a shared layout would make the second node reuse the first one's
+      // runtime, resident host and status file.
+      layout: remoteLayout(record.remoteRoot),
       log: message => this.log(`[${record.name}] ${message}`),
     })
     this.gateway = new RemoteGateway({
@@ -92,6 +96,7 @@ export class NodeRuntime {
     this.connection.target.port = this.record.port
     this.connection.target.username = this.record.username
     this.connection.target.label = this.record.name
+    this.host.layout = remoteLayout(this.record.remoteRoot)
     this.gateway.reset()
     if (this.connection.ready) this.connection.invalidate()
   }
@@ -268,18 +273,25 @@ export class Fleet {
         // The gate decides; the installer only carries it out. Doing the comparison
         // here rather than inside `install` keeps the reason available to the settings
         // page, which is what the user reads when a connect refuses to proceed.
-        const installed = await runtime.host.installedVersion()
+        const installed = await runtime.host.inspectRuntime()
         const gate = decideGate({
           hostVersion: this.version,
           hostBrain: this.brainVersion,
-          nodeVersion: installed,
+          nodeVersion: installed.version,
           nodeBrain: runtime.provision?.brainVersion,
+          // A tree on the right version but packed by a different build is still wrong:
+          // the version says which release it is, the stamp says who packed it.
+          nodeRuntime: installed.usable ? undefined : installed.reason,
         })
         runtime.gate = gate
-        if (gate.action === 'ahead' || gate.action === 'unknown') {
+        if (gate.action === GATE.AHEAD || gate.action === GATE.UNKNOWN) {
           throw new Error(gate.message)
         }
-        if (requiresProvisioning(gate.action)) {
+        // `install` is the only action that touches the runtime. `refresh` means the
+        // runtime is right but this plugin's own brain bundle is behind, and that is
+        // rewritten unconditionally in the provision phase below — reinstalling 169 MB
+        // to change a few hundred KB of bundle would be the wrong 8 seconds.
+        if (gate.action === GATE.INSTALL) {
           const installedRuntime = await runtime.host.install(runtime.facts, { mirror: this.mirror })
           runtime.log?.(
             `resident DSH ${installedRuntime.version} installed (${installedRuntime.via})`,

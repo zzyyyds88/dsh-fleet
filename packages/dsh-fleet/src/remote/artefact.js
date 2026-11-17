@@ -44,6 +44,30 @@ export const DEFAULT_REPOSITORY = 'zzyyyds88/dsh-fleet'
 export const RELEASE_BASE = 'releases/download'
 
 /**
+ * The packaging rules that produced an artefact.
+ *
+ * A version comparison says nothing about the *contents* of a tree: this plugin packs a
+ * runtime itself, so the same `0.2.2-rc.3` can be published twice with different files
+ * in it. When the packing changes — a strip rule added or removed — a node that already
+ * has that version would never be reinstalled, and it would keep a tree this build
+ * cannot run.
+ *
+ * Measured, not hypothesised: a strip rule that removed `doc/` also removed
+ * `yaml/dist/doc/directives.js`, and every node installed from that artefact failed at
+ * startup with `MODULE_NOT_FOUND`. The version was identical, so the gate said "current"
+ * and nothing repaired it.
+ *
+ * **Bump this whenever `STRIPPED` in `scripts/publish-runtime.mjs` changes, or when the
+ * archive layout changes.** It is written into the installed tree and compared on
+ * connect; a node whose stamp is missing or older is reinstalled even though its version
+ * matches.
+ */
+export const RUNTIME_BUILD = 2
+
+/** The stamp file, relative to the runtime directory. */
+export const BUILD_STAMP = '.fleet-artefact.json'
+
+/**
  * `uname -s` / `uname -m` names → the platform tag used in a Release asset name.
  *
  * Only the pairs this plugin can actually provision are listed. An unknown pair is not
@@ -159,9 +183,10 @@ function shellPath(path) {
  * @param {string} options.runtime - the runtime directory, `~/.dsh-fleet/runtime`.
  * @param {string} options.cli - the CLI path inside that directory.
  * @param {string[]} options.urls - candidate download URLs.
+ * @param {number} [options.build] - the packaging build, stamped into the tree.
  * @returns {string}
  */
-export function installScript({ version, runtime, cli, urls }) {
+export function installScript({ version, runtime, cli, urls, build = RUNTIME_BUILD }) {
   const checksumUrls = urls.map(url => `${url}.sha256`)
   const quote = list => list.map(url => `'${url}'`).join(' ')
   return `
@@ -222,6 +247,7 @@ rm -rf "$previous"
 if [ -d "$runtime" ]; then mv "$runtime" "$previous"; fi
 mv "$staging" "$runtime"
 rm -f "$archive" "$archive.sha256"
+printf '%s\n' '${build}' > "$runtime/${BUILD_STAMP}"
 node "${shellPath(cli)}" --version
 `.trim()
 }
@@ -237,6 +263,51 @@ export function installedVersionScript(runtime) {
   const manifest = shellPath(`${runtime}/node_modules/@deepseek-ai/dsh/package.json`)
   return `node -e 'const m=require(process.argv[1]);process.stdout.write(String(m.version))'`
     + ` "${manifest}" 2>/dev/null || echo`
+}
+
+/**
+ * Read the packaging build of an installed tree, or empty when it has no stamp.
+ *
+ * A tree installed before stamps existed has none, which must read as "older than
+ * anything this build publishes" rather than as "current": that is what repairs a node
+ * left on a tree packed by an earlier, broken rule set.
+ * @param {string} runtime
+ */
+export function installedBuildScript(runtime) {
+  return `cat "${shellPath(runtime)}/${BUILD_STAMP}" 2>/dev/null || echo`
+}
+
+/**
+ * Whether an installed tree can be trusted for this release.
+ *
+ * Both halves matter and neither implies the other: the version says *which release* the
+ * tree is, and the stamp says *who packed it*. A node can be on the right version and
+ * still be broken, which is exactly what a changed strip rule produces.
+ *
+ * @param {object} input
+ * @param {string | undefined} input.version - the version the tree reports.
+ * @param {string | undefined} input.build - the stamp the tree carries.
+ * @param {string} input.wantedVersion
+ * @returns {{ usable: boolean, reason: string }}
+ */
+export function inspectRuntime({ version, build, wantedVersion }) {
+  if (version !== wantedVersion) {
+    return { usable: false, reason: version === undefined ? 'no runtime installed' : `runtime is ${version}` }
+  }
+  if (build === undefined || build.trim() === '') {
+    return { usable: false, reason: 'this runtime predates build stamps' }
+  }
+  const installed = Number.parseInt(build.trim(), 10)
+  if (!Number.isFinite(installed)) {
+    return { usable: false, reason: `unreadable build stamp ${build.trim()}` }
+  }
+  if (installed !== RUNTIME_BUILD) {
+    return {
+      usable: false,
+      reason: `runtime was packed by build ${String(installed)}, this plugin packs build ${String(RUNTIME_BUILD)}`,
+    }
+  }
+  return { usable: true, reason: 'in step' }
 }
 
 /**

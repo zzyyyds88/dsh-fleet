@@ -98,6 +98,8 @@ export const GATE = Object.freeze({
  * @param {string} input.hostBrain - this plugin's own version (what it would install).
  * @param {string | undefined} input.nodeVersion - the release installed on the node, if any.
  * @param {string | undefined} input.nodeBrain - the brain build found on the node, if any.
+ * @param {string | undefined} [input.nodeRuntime] - why the installed tree is not usable
+ *   as-is, when it is on the right version but was packed differently.
  * @returns {{ action: string, reason: string, message: string }}
  */
 export function decideGate(input) {
@@ -122,6 +124,16 @@ export function decideGate(input) {
     }
   }
   if (compareVersions(node, host) === 0) {
+    // Same release, but packed differently from what this plugin would install. The
+    // version says *which release* the tree is; it says nothing about who packed it, and
+    // a changed strip rule produces a tree this build cannot run at the same version.
+    if (typeof input.nodeRuntime === 'string' && input.nodeRuntime.length > 0) {
+      return {
+        action: GATE.INSTALL,
+        reason: 'node-runtime-repack',
+        message: `reinstalling this node's DSH: ${input.nodeRuntime}`,
+      }
+    }
     // The runtime matches. A missing brain build is the same as an old one.
     if (nodeBrain === undefined) {
       return {

@@ -393,6 +393,74 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 ---
 
+## 六之四、桌面与节点的版本对齐
+
+### 两个版本，两种比法
+
+节点是**独立安装**的 DSH，桌面插件也是独立发版的，所以有两个版本会各自漂移，而且它们的
+容忍度不同：
+
+| 漂移 | 断什么 | 判定 |
+|---|---|---|
+| DSH 运行时版本 | 节点的 Remote 描述符集就是路由 decorator 派发的目标；Session 日志格式、Gateway 线协议也跟着变 | 必须**完全相等** |
+| 大脑构建版本（本插件的包版本） | 节点组合的哪些行存在 | 允许节点**落后**，不允许**超前** |
+
+节点领先时拒绝连接，而不是"大概能跑"：那说明另一台更新的桌面已经配过这台机器，本机无法
+预知它写了哪些行。判定与文案在 `src/core/version.js` 的 `decideGate`，它只回答"该做什么、
+为什么"，安装由 `RemoteHost.install` 执行 —— 这样设置页能原样显示原因。
+
+### 版本号说不清的事：打包规则
+
+版本相等不代表树相等。运行时是本插件自己打的包，同一个 `0.2.2-rc.3` 可以用不同的裁剪规则
+打两次。实测教训：一条 `/(^|\/)docs?\//` 的裁剪规则把 `yaml/dist/doc/directives.js` 也删了，
+因为它在 `dist/` 下、名字像文档，其实是 `dist/compose/composer.js` 要 require 的代码。所有
+从那个制品装出来的节点启动即 `MODULE_NOT_FOUND`，而版本闸门说"已是最新"，没有任何东西会来
+修它。
+
+所以安装时在树里写 `.fleet-artefact.json`（`RUNTIME_BUILD` 常量），连接时连同版本一起读；
+stamp 不符或缺席就**重装**。改 `STRIPPED` 或改归档布局必须同时 bump `RUNTIME_BUILD`。
+
+### 制品从哪来：Release + 加速
+
+节点不再 `npm install`：桌面用 `scripts/publish-runtime.mjs` 把自己跑的版本打出来发到 GitHub
+Release，节点下载 `dsh-<version>-<platform>.tar.gz` + `.sha256`。
+
+**制品必须按平台分**。DSH 不是纯 JS：`node-pty`、`sharp`、`sherpa-onnx` 带原生二进制，安装树
+里就写着平台（`sherpa-onnx-win-x64`、`@img/sharp-linux-x64`）。把 Windows 的树解到 Linux 节点
+上，节点能起来，但终端和图片工具会在第一次使用时炸 —— 比它替代的慢安装更糟，因为失败得更晚、
+离原因更远。所以脚本用 npm 的 `--os/--cpu/--libc` **为目标平台解析**，插件按**节点的** `uname`
+取，取不到就回退 npm（npm 自己会正确解析原生包）。
+
+安装脚本的几个硬约束（`src/remote/artefact.js`）：`set -eu`；`~/…` 要换成 `$HOME` 才能带引号
+（否则会真的建一个叫 `~` 的目录）；下载器 `curl`/`wget` 二选一；校验和在下载时失败而不是首次
+使用时失败；解压到 `runtime.incoming` 后整体 rename，失败回滚到 `runtime.previous`；退出码
+3 表示"这个平台没有制品"，只有它才回退 npm。
+
+### 每节点一份路径
+
+两个节点记录可以指向同一台机器的不同 `remoteRoot` —— 这是测试第二个节点最方便的方式，也是真
+实用法（主大脑旁边放一个实验性的）。所以 `REMOTE_LAYOUT` 从常量改成 `remoteLayout(root)`，
+profile 名也按 root 派生（`~/.dsh-fleet` 仍是 `fleet`，`~/.dsh-fleet-b` 是 `fleet-b`）。用
+常量时第二个节点会静默复用第一个的 runtime、常驻进程和状态文件，"连了两个节点"其实是一个节点
+数了两遍 —— 实测过。Session 日志仍共用 `~/.dsh`：同一台机器上的两个 root 是两副大脑，不是
+两台机器。
+
+## 六之五、每插件同步开关
+
+节点跑同一套 DSH，所以它默认会加载同一批插件，但其中几十个是窗口类。开关决定哪些真的发过去。
+
+- **默认值按"这行是什么"推，不按名字列表**：`@deepseek-ai/dsh-client-ui-*` / `dsh-client-*` /
+  `dsh-web*` 等默认关，其余默认开。上游新增 UI 行不需要有人改列表，新增工具也不会被漏掉。
+- **两个来源会覆盖默认值，而且都是锁定态**：节点组合本身包含的行（从**已安装的** `dsh-base`
+  patch 与生成的大脑 patch 里解析出来），以及 `STRUCTURAL_ROWS`（`web-startup`、`webserver`、
+  `web`、`brain-runtime`）。实测：把 `connection`/`web-startup` 之类当"浏览器行"关掉，节点报
+  `1 required plugin did not activate`、六个插件在等服务、根本没有 HTTP 服务；把 `web` 关掉则是
+  每个 web 工具回"waiting for web"。
+- **关掉写成 `- id: X` + `disabled: true`**，进节点 profile patch（常驻 host 会热重载），而不是
+  改 bundle 列表：bundle 是发布物里生成好的，per-node 改它就等于每台节点一份组合。
+- 状态存 `$DSH_HOME/fleet/plugins.json`；把开关拨回默认值**删掉那条记录**而不是存同值，这样升级
+  改了默认值还能到达从没碰过它的用户。
+
 ## 七、测试
 
 | 脚本 | 验证什么 | 依赖 |
@@ -412,6 +480,13 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 | `dsh-fleet-brain/scripts/sync-from-upstream.mjs` | 组合可重新生成（幂等；生成后与已提交版本一致即说明没有手改生成物） | 已安装的 DSH release |
 | `client-bundle.mjs` | 桌面端真的 serve 了这份客户端代码；三个槽位注册且能渲染 | 运行中的 Host |
 | `event-relay.mjs` | 在**节点上直接建**的 Session 能到达浏览器：`api-session/*` 列表事件与 `session/control` 投影帧都带着包裹后的身份到达；baseline 里有远程投影块；没有任何裸的节点 Session id 泄漏 | 运行中的 Host + 已连接节点 |
+| `session-acceptance.mjs` | **像用户一样**：在远程工作区真实建 Session、真实下一条要让 agent 用 write/bash/grep 干活的指令、读回 `session/follow` 核对三条工具调用与结果、`turn/end` 是 `completed`、助手说 DONE；再用**独立 SSH 连接**读节点上的产物字节 | 运行中的 Host + 已连接节点 |
+| `terminal-acceptance.mjs` | 远程会话里的真 PTY：`environment`/`shells`/`create` 走路由后的 agent lookup、attach 首帧 snapshot、写入 `echo` 命令、读到输出与节点 ack、`close` 后从花名册消失 | 同上 |
+| `multi-node-acceptance.mjs` | 同时连两台（同一机器两个 `remoteRoot`）：侧栏两边的工区都在且 id 唯一、各自建的 Session 落到各自节点、合并列表里是两行、移除一台不影响另一台 | 同上 |
+| `artefact-acceptance.mjs` | 在真节点上跑真安装脚本：下载、校验 sha256、解压、替换、`--version`、二次安装、回滚；断言原生包是 `linux-x64` 而非 `win-x64` | 节点 + 已发布的 Release 制品 |
+| `browser-acceptance.mjs` | 真 Chrome + CDP：渲染后的侧栏文本里**真的有**远程工区；插件自己的入口可达；截图留证。API 测试看不见"baseline 把远程行冲掉"这类问题 | 运行中的 Host + 带 `--remote-debugging-port` 的 Chrome |
+| `version-unit.mjs` | 版本闸门的每个分支（含 rc 排序）、制品 URL、安装脚本内容、每节点 layout 派生、开关语义与锁定行 | 无 |
+| `waterfall-unit.mjs` | 审批/提问中继：允许的 waterfall 才发到浏览器、拒绝与超时各自结算、节点断开时卡片被取消、问题按自己的名字转发 | 无 |
 
 升级 DSH 之后该按什么顺序重跑、每个测试守的是哪条上游契约，见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](../packages/dsh-fleet/docs/UPGRADE.zh.md)。
 

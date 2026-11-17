@@ -24,7 +24,14 @@
  */
 import { createHash } from 'node:crypto'
 import { SSH_FAILURE, toSshError } from '../ssh/connection.js'
-import { artefactUrls, installScript, platformTag, rollbackScript } from './artefact.js'
+import {
+  BUILD_STAMP,
+  artefactUrls,
+  inspectRuntime,
+  installScript,
+  platformTag,
+  rollbackScript,
+} from './artefact.js'
 
 /** The Node major version the resident host needs. */
 export const MINIMUM_NODE_MAJOR = 22
@@ -51,28 +58,78 @@ const WEB_PROFILE_BUNDLES = Object.freeze(['@deepseek-ai/dsh-base', '@deepseek-a
  */
 export const NODE_PROFILE = 'fleet'
 
-/** Files this plugin owns on a remote machine, relative to the node's root. */
-export const REMOTE_LAYOUT = Object.freeze({
-  root: '~/.dsh-fleet',
-  runtime: '~/.dsh-fleet/runtime',
-  run: '~/.dsh-fleet/run',
-  log: '~/.dsh-fleet/run/host.log',
-  status: '~/.dsh-fleet/run/status.json',
-  /** The overlay earlier builds wrote and passed as `--patch`. Kept only so a
-   * reconnect can remove it; the profile patch below is the live carrier. */
-  legacyPatch: '~/.dsh-fleet/run/brain.patch.yml',
-  packageJson: '~/.dsh-fleet/runtime/package.json',
-  cli: '~/.dsh-fleet/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js',
-  /** The node's DSH home and the profile this plugin owns. */
-  home: '~/.dsh',
-  profile: `~/.dsh/profiles/${NODE_PROFILE}`,
-  /** The profile's own patch: the watched file, so config changes need no restart. */
-  profilePatch: `~/.dsh/profiles/${NODE_PROFILE}/cordis.patch.yml`,
-  /** Where the Loader resolves a bundle's row names from for that profile. */
-  profileModules: `~/.dsh/profiles/${NODE_PROFILE}/node_modules`,
-  /** The profile earlier builds mutated. Reverted on connect, never deleted. */
-  legacyProfile: '~/.dsh/profiles/web',
-})
+/** The root a node gets when its record names none. */
+export const DEFAULT_REMOTE_ROOT = '~/.dsh-fleet'
+
+/**
+ * Files this plugin owns on one remote machine.
+ *
+ * This is a function of the node's own root rather than one global constant, because
+ * two nodes can be the same machine reached under different roots — the ordinary way to
+ * test a second node, and a real setup for somebody who wants a scratch brain beside
+ * their main one. With a constant, the second node silently reused the first one's
+ * runtime, resident host and status file, so "two connected nodes" was really one node
+ * counted twice.
+ *
+ * The **profile name** is derived from the root for the same reason: a profile's
+ * `cordis.patch.yml` is the file the resident host hot-reloads, so two nodes sharing
+ * one profile would overwrite each other's model roster. `~/.dsh-fleet` keeps the
+ * historical name `fleet`, so existing nodes are untouched.
+ *
+ * The node's DSH *home* stays shared on purpose: it holds the Session log, and two
+ * roots on one machine are two views of one Harness rather than two machines.
+ *
+ * @param {string} [root] - the node's own directory, e.g. `~/.dsh-fleet`.
+ */
+export function remoteLayout(root = DEFAULT_REMOTE_ROOT) {
+  const base = root.replace(/\/+$/u, '')
+  const profile = profileNameFor(base)
+  return Object.freeze({
+    root: base,
+    runtime: `${base}/runtime`,
+    run: `${base}/run`,
+    log: `${base}/run/host.log`,
+    status: `${base}/run/status.json`,
+    /** The overlay earlier builds wrote and passed as `--patch`. Kept only so a
+     * reconnect can remove it; the profile patch below is the live carrier. */
+    legacyPatch: `${base}/run/brain.patch.yml`,
+    packageJson: `${base}/runtime/package.json`,
+    cli: `${base}/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js`,
+    /** The node's DSH home and the profile this plugin owns. */
+    home: '~/.dsh',
+    profile: `~/.dsh/profiles/${profile}`,
+    /** The profile's own patch: the watched file, so config changes need no restart. */
+    profilePatch: `~/.dsh/profiles/${profile}/cordis.patch.yml`,
+    /** Where the Loader resolves a bundle's row names from for that profile. */
+    profileModules: `~/.dsh/profiles/${profile}/node_modules`,
+    /** The profile earlier builds mutated. Reverted on connect, never deleted. */
+    legacyProfile: '~/.dsh/profiles/web',
+    /** The profile name, which the resident host is started with. */
+    profileName: profile,
+  })
+}
+
+/**
+ * A profile name for one root.
+ *
+ * `~/.dsh-fleet` keeps `fleet` so a node provisioned by an earlier build keeps working.
+ * Anything else is `fleet-<last path segment>`, which is stable across reconnects and
+ * distinct per root: `~/.dsh-fleet-b` becomes `fleet-fleet-b`… no — the segment is
+ * stripped of its own `dsh-` prefix first, so that same root reads `fleet-b`.
+ * @param {string} root
+ */
+function profileNameFor(root) {
+  if (root === DEFAULT_REMOTE_ROOT || root === '~/.dsh-fleet/') return NODE_PROFILE
+  // The last segment is what a person would call this root ("fleet-b"), and it is the
+  // only part that distinguishes one root from another in the common `~/.<name>` shape.
+  const segment = root.split('/').filter(Boolean).at(-1) ?? ''
+  const cleaned = segment.replace(/^\./u, '').replace(/^dsh-fleet-?/u, '').replace(/[^A-Za-z0-9-]/gu, '')
+  // A root that reduces to nothing (say `~/`) would collide with the default profile.
+  return cleaned === '' ? NODE_PROFILE : `${NODE_PROFILE}-${cleaned}`
+}
+
+/** The default node's layout, for callers that only have one node. */
+export const REMOTE_LAYOUT = remoteLayout()
 
 const PROBE_COMMAND = `
 set -u
@@ -137,6 +194,10 @@ export class RemoteHost {
   constructor(options) {
     this.connection = options.connection
     this.version = options.version
+    // One node's own paths. Two records can name the same machine under different
+    // roots, and with a shared constant the second one silently reused the first one's
+    // runtime, resident host and status file.
+    this.layout = options.layout ?? REMOTE_LAYOUT
     this.log = options.log ?? (() => {})
     /** @type {{ port: number, token: string, pid: number, version: string } | undefined} */
     this.serving = undefined
@@ -154,7 +215,7 @@ export class RemoteHost {
   /** Read the recorded host status, or `undefined` when there is no host. */
   async status() {
     const result = await this.connection.exec({
-      argv: ['sh', '-c', `cat ${REMOTE_LAYOUT.status} 2>/dev/null || echo '{}'`],
+      argv: ['sh', '-c', `cat ${this.layout.status} 2>/dev/null || echo '{}'`],
       timeoutMs: 20_000,
     })
     const text = result.stdout.trim()
@@ -222,8 +283,8 @@ export class RemoteHost {
     if (urls.length > 0 && canDownload) {
       const script = installScript({
         version: this.version,
-        runtime: REMOTE_LAYOUT.runtime,
-        cli: REMOTE_LAYOUT.cli,
+        runtime: this.layout.runtime,
+        cli: this.layout.cli,
         urls,
       })
       const attempt = await this.connection.exec({
@@ -240,7 +301,7 @@ export class RemoteHost {
         // keeps the release it had, then report rather than silently falling through
         // to npm (which would download the same broken release again).
         await this.connection.exec({
-          argv: ['sh', '-c', rollbackScript(REMOTE_LAYOUT.runtime)],
+          argv: ['sh', '-c', rollbackScript(this.layout.runtime)],
           timeoutMs: 120_000,
         }).catch(() => undefined)
         throw toSshError(new Error(`installing the resident host failed: ${detail.slice(-600)}`))
@@ -255,13 +316,13 @@ export class RemoteHost {
     }
     const script = `
 set -eu
-mkdir -p ${REMOTE_LAYOUT.runtime} ${REMOTE_LAYOUT.run}
-cd ${REMOTE_LAYOUT.runtime}
+mkdir -p ${this.layout.runtime} ${this.layout.run}
+cd ${this.layout.runtime}
 if [ ! -f package.json ]; then
   printf '{"name":"dsh-fleet-runtime","private":true}\\n' > package.json
 fi
 npm install --no-audit --no-fund --loglevel=error "@deepseek-ai/dsh@${this.version}" >&2
-node ${REMOTE_LAYOUT.cli} --version
+node ${this.layout.cli} --version
 `.trim()
     const result = await this.connection.exec({ argv: ['sh', '-c', script], timeoutMs: 15 * 60_000, maxBytes: 1024 * 1024 })
     if (result.code !== 0) {
@@ -273,11 +334,32 @@ node ${REMOTE_LAYOUT.cli} --version
   /** Read the installed resident version, or `undefined` when absent. */
   async installedVersion() {
     const result = await this.connection.exec({
-      argv: ['sh', '-c', `node ${REMOTE_LAYOUT.cli} --version 2>/dev/null || echo`],
+      argv: ['sh', '-c', `node ${this.layout.cli} --version 2>/dev/null || echo`],
       timeoutMs: 30_000,
     })
     const text = result.stdout.trim().split('\n').at(-1) ?? ''
     return /^\d+\.\d+\.\d+/u.test(text) ? text : undefined
+  }
+
+  /**
+   * What this node's installed tree is, and whether it can be trusted as-is.
+   *
+   * Both halves come from one round trip because they are always read together: the
+   * version says which release the tree is, and the build stamp says who packed it. A
+   * node on the right version but a different pack is a node this build cannot run, and
+   * only the stamp can tell.
+   * @returns {Promise<{ version: string | undefined, build: string | undefined, usable: boolean, reason: string }>}
+   */
+  async inspectRuntime() {
+    const result = await this.connection.exec({
+      argv: ['sh', '-c', `node ${this.layout.cli} --version 2>/dev/null || echo; `
+        + `cat ${this.layout.runtime}/${BUILD_STAMP} 2>/dev/null || echo`],
+      timeoutMs: 30_000,
+    })
+    const [versionLine = '', buildLine = ''] = result.stdout.trim().split('\n')
+    const version = /^\d+\.\d+\.\d+/u.test(versionLine.trim()) ? versionLine.trim() : undefined
+    const build = buildLine.trim() === '' ? undefined : buildLine.trim()
+    return { version, build, ...inspectRuntime({ version, build, wantedVersion: this.version }) }
   }
 
   /**
@@ -299,8 +381,8 @@ node ${REMOTE_LAYOUT.cli} --version
     const encoded = Buffer.from(text, 'utf8').toString('base64')
     const script = `
 set -eu
-mkdir -p ${REMOTE_LAYOUT.profile}
-target=${REMOTE_LAYOUT.profilePatch}
+mkdir -p ${this.layout.profile}
+target=${this.layout.profilePatch}
 tmp="$target.new"
 printf '%s' '${encoded}' | base64 -d > "$tmp"
 if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
@@ -312,7 +394,7 @@ else
 fi
 # An overlay from an earlier build is dead weight: the profile patch replaces it and
 # the launch line no longer passes --patch.
-rm -f ${REMOTE_LAYOUT.legacyPatch}
+rm -f ${this.layout.legacyPatch}
 `.trim()
     const result = await this.connection.exec({ argv: ['sh', '-c', script], timeoutMs: 60_000 })
     if (result.code !== 0) {
@@ -341,7 +423,7 @@ rm -f ${REMOTE_LAYOUT.legacyPatch}
    * @returns {Promise<{ changed: boolean, files: number }>}
    */
   async writeBrainBundle(files, packageName) {
-    const target = `${REMOTE_LAYOUT.profileModules}/${packageName}`
+    const target = `${this.layout.profileModules}/${packageName}`
     // A digest over path+content decides `changed` without shipping the tree twice.
     const digest = createHash('sha256')
     for (const path of Object.keys(files).sort()) {
@@ -406,7 +488,7 @@ echo written
    * @returns {Promise<{ changed: boolean, revertedPrevious: boolean }>}
    */
   async writeProfileBundles(bundles) {
-    const manifestPath = `${REMOTE_LAYOUT.profile}/package.json`
+    const manifestPath = `${this.layout.profile}/package.json`
     const read = await this.connection.exec({
       argv: ['sh', '-c', `cat ${manifestPath} 2>/dev/null || echo '{}'`],
       timeoutMs: 15_000,
@@ -427,7 +509,7 @@ echo written
     if (!same) {
       const next = {
         ...manifest,
-        name: manifest.name ?? `dsh-profile-${NODE_PROFILE}`,
+        name: manifest.name ?? `dsh-profile-${this.layout.profileName}`,
         private: true,
         dependencies: manifest.dependencies ?? {},
         dsh: {
@@ -437,7 +519,7 @@ echo written
       }
       const encoded = Buffer.from(`${JSON.stringify(next, null, 2)}\n`, 'utf8').toString('base64')
       const write = await this.connection.exec({
-        argv: ['sh', '-c', `mkdir -p ${REMOTE_LAYOUT.profile} && printf '%s' '${encoded}' | base64 -d > ${manifestPath}`],
+        argv: ['sh', '-c', `mkdir -p ${this.layout.profile} && printf '%s' '${encoded}' | base64 -d > ${manifestPath}`],
         timeoutMs: 30_000,
       })
       if (write.code !== 0) {
@@ -449,7 +531,7 @@ echo written
     // Ensure the patch exists before the first launch: the host reads it as a layer,
     // and an absent file would simply mean "no configuration yet".
     const ensure = await this.connection.exec({
-      argv: ['sh', '-c', `mkdir -p ${REMOTE_LAYOUT.profile} && [ -f ${REMOTE_LAYOUT.profilePatch} ] || printf '# owned by @local/dsh-fleet\\n[]\\n' > ${REMOTE_LAYOUT.profilePatch}`],
+      argv: ['sh', '-c', `mkdir -p ${this.layout.profile} && [ -f ${this.layout.profilePatch} ] || printf '# owned by @local/dsh-fleet\\n[]\\n' > ${this.layout.profilePatch}`],
       timeoutMs: 15_000,
     })
     if (ensure.code !== 0) {
@@ -474,7 +556,7 @@ echo written
    * @returns {Promise<boolean>} whether anything was reverted.
    */
   async #revertPreviousProfile(ours) {
-    const manifestPath = `${REMOTE_LAYOUT.legacyProfile}/package.json`
+    const manifestPath = `${this.layout.legacyProfile}/package.json`
     const read = await this.connection.exec({
       argv: ['sh', '-c', `cat ${manifestPath} 2>/dev/null || echo ''`],
       timeoutMs: 15_000,
@@ -527,7 +609,7 @@ echo written
   async ensureServing(options = {}) {
     const existing = await this.status()
     const launchedByThisShape = existing !== undefined
-      && existing.profile === NODE_PROFILE
+      && existing.profile === this.layout.profileName
       && existing.overlay !== true
       && existing.version === this.version
     if (existing !== undefined && !options.force && !options.bundleChanged
@@ -539,17 +621,17 @@ echo written
     if (existing !== undefined) await this.stop()
     const script = `
 set -eu
-mkdir -p ${REMOTE_LAYOUT.run}
-rm -f ${REMOTE_LAYOUT.log}
-: > ${REMOTE_LAYOUT.log}
-(cd ${REMOTE_LAYOUT.runtime} && setsid nohup node ${REMOTE_LAYOUT.cli} --profile ${NODE_PROFILE} --host 127.0.0.1 --port 0 --no-open >> ${REMOTE_LAYOUT.log} 2>&1 & echo $! > ${REMOTE_LAYOUT.run}/pid)
+mkdir -p ${this.layout.run}
+rm -f ${this.layout.log}
+: > ${this.layout.log}
+(cd ${this.layout.runtime} && setsid nohup node ${this.layout.cli} --profile ${this.layout.profileName} --host 127.0.0.1 --port 0 --no-open >> ${this.layout.log} 2>&1 & echo $! > ${this.layout.run}/pid)
 i=0
 while [ "$i" -lt 120 ]; do
-  if grep -q 'dsh web: http' ${REMOTE_LAYOUT.log} 2>/dev/null; then break; fi
+  if grep -q 'dsh web: http' ${this.layout.log} 2>/dev/null; then break; fi
   sleep 0.5
   i=$((i + 1))
 done
-cat ${REMOTE_LAYOUT.log}
+cat ${this.layout.log}
 `.trim()
     const result = await this.connection.exec({ argv: ['sh', '-c', script], timeoutMs: 5 * 60_000, maxBytes: 256 * 1024 })
     const parsed = parseWebUrl(result.stdout)
@@ -558,7 +640,7 @@ cat ${REMOTE_LAYOUT.log}
       throw toSshError(new Error(`the resident host did not report a URL. Its log tail:\n${tail}`))
     }
     const pidResult = await this.connection.exec({
-      argv: ['sh', '-c', `cat ${REMOTE_LAYOUT.run}/pid 2>/dev/null || echo 0`],
+      argv: ['sh', '-c', `cat ${this.layout.run}/pid 2>/dev/null || echo 0`],
       timeoutMs: 15_000,
     })
     const pid = Number.parseInt(pidResult.stdout.trim(), 10) || 0
@@ -574,7 +656,7 @@ cat ${REMOTE_LAYOUT.log}
       overlay: false,
     }
     await this.connection.exec({
-      argv: ['sh', '-c', `printf '%s' '${JSON.stringify(serving).replaceAll("'", `'\\''`)}' > ${REMOTE_LAYOUT.status}`],
+      argv: ['sh', '-c', `printf '%s' '${JSON.stringify(serving).replaceAll("'", `'\\''`)}' > ${this.layout.status}`],
       timeoutMs: 15_000,
     })
     this.log(`resident host ready on ${String(parsed.port)} (pid ${String(pid)})`)
@@ -586,7 +668,7 @@ cat ${REMOTE_LAYOUT.log}
   async stop() {
     const existing = await this.status()
     const script = existing === undefined
-      ? `pkill -f 'dsh-fleet/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js' 2>/dev/null || true; rm -f ${REMOTE_LAYOUT.status}`
+      ? `pkill -f 'dsh-fleet/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js' 2>/dev/null || true; rm -f ${this.layout.status}`
       : `
 kill ${String(existing.pid)} 2>/dev/null || true
 i=0
@@ -596,7 +678,7 @@ while [ "$i" -lt 20 ]; do
   i=$((i + 1))
 done
 kill -9 ${String(existing.pid)} 2>/dev/null || true
-rm -f ${REMOTE_LAYOUT.status}
+rm -f ${this.layout.status}
 `.trim()
     await this.connection.exec({ argv: ['sh', '-c', script], timeoutMs: 60_000 })
     this.serving = undefined
