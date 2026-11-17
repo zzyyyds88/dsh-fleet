@@ -128,35 +128,35 @@ export function credentialRefsOf(rows) {
  * Comments are deliberate: this file lands on somebody's server, and the next
  * person to look at it should not have to guess whether it is safe to edit.
  *
- * **This file carries only what the composition cannot know**: the model roster, the
- * permission preset, and — when the user has made per-plugin decisions — the rows that
- * must not load. The plugin set itself lives in the profile bundle list
- * (`packages/dsh-fleet-brain`), so a `disabled: true` entry here names a row that the
- * bundle list *does* contain but this desktop decided not to send.
+ * **This file carries only what the composition cannot know**: the model roster and the
+ * permission preset. The plugin set is not here at all — it lives in the node's profile
+ * bundle list, written by `remote/daemon.js` from the per-plugin switches. One concern,
+ * one writer: a `disabled: true` row here would be a second way to say "this plugin is
+ * not on the node", and two answers to one question is how a node ends up composing
+ * something nobody chose.
  *
  * @param {object} plan
  * @param {Array<{ id: string, config: Record<string, unknown> }>} plan.rows
  * @param {string} plan.version - the DSH version this overlay was written for.
- * @param {string} [plan.syncBlock] - already-rendered per-plugin disable block, if any.
  * @returns {string}
  */
-export function renderBrainPatch({ rows, version, syncBlock = '' }) {
+export function renderBrainPatch({ rows, version }) {
   const lines = [
     '# Managed by @local/dsh-fleet. Rewritten on every connect — edits are lost.',
     `# Written for DSH ${version}. A version change rewrites this file.`,
     '#',
     '# This profile exists so the desktop app can use this machine as a remote',
     '# brain. The plugin set lives in the profile bundle list',
-    '# (@deepseek-ai/dsh-base + @local/dsh-fleet-brain); this file carries the',
-    '# model roster and permission preset copied from the Host, so a prompt works',
-    '# with no setup on the node.',
+    '# (@deepseek-ai/dsh-base, any plugins you switched on, + @local/dsh-fleet-brain);',
+    '# this file carries the model roster and permission preset copied from the Host,',
+    '# so a prompt works with no setup on the node.',
   ]
   for (const row of rows) {
     lines.push('', `- id: ${row.id}`)
     lines.push('  config:')
     for (const line of renderYamlFields(row.config, 4)) lines.push(line)
   }
-  return `${lines.join('\n')}\n${syncBlock}`
+  return `${lines.join('\n')}\n`
 }
 
 /**
@@ -241,16 +241,12 @@ export class Provisioner {
    * @param {() => object | undefined} options.configEditor - the local config editor, once composed.
    * @param {object | undefined} options.credentials - this Host's credential service.
    * @param {string} options.version - the DSH version both sides run.
-   * @param {() => string} [options.syncBlock] - per-plugin disable block for the node patch.
    * @param {(message: string) => void} [options.log]
    */
   constructor(options) {
     this.configEditor = options.configEditor
     this.credentials = options.credentials
     this.version = options.version
-    // Read lazily rather than captured: the switches can change while this Host runs,
-    // and a config sync must send the current answer, not the one from connect time.
-    this.syncBlock = options.syncBlock ?? (() => '')
     this.log = options.log ?? (() => {})
   }
 
@@ -268,7 +264,7 @@ export class Provisioner {
       rows,
       refs: credentialRefsOf(rows),
       version: this.version,
-      text: renderBrainPatch({ rows, version: this.version, syncBlock: this.syncBlock() }),
+      text: renderBrainPatch({ rows, version: this.version }),
     }
   }
 

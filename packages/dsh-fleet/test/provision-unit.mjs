@@ -17,7 +17,6 @@
  * Usage: node test/provision-unit.mjs
  */
 import { copyableRows, credentialRefsOf, renderBrainPatch } from '../src/host/provision.js'
-import { renderSyncBlock } from '../src/core/plugin-sync.js'
 import * as compiledModule from '../src/host/provision.js'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
@@ -159,27 +158,13 @@ check(text.includes('0.2.2-rc.3'), 'and which version it targets')
 check(!/disabled: true/u.test(text),
   'with no per-plugin switches set, nothing is disabled')
 
-// With switches set, the disable block is appended and carries the reason — this file
-// lands on somebody's server, so it has to explain itself.
-// With switches set, the disable block is appended and carries the reason — this file
-// lands on somebody's server, so it has to explain itself. Only rows the node
-// composition contains appear: everything else it never loads, so naming it would be
-// a patch entry about nothing.
-const withSwitches = renderBrainPatch({
-  ...plan,
-  syncBlock: renderSyncBlock([
-    { id: 'bash', name: '@deepseek-ai/dsh-tool-bash', sync: false, source: 'explicit', reason: 'set by hand' },
-  ], ['bash']),
-})
-check(withSwitches.includes('- id: bash') && withSwitches.includes('  disabled: true'),
-  'a switched-off composed row is disabled in the node patch')
-check(withSwitches.includes('turned off by hand'), 'and a hand-made decision is marked as such')
-check(withSwitches.indexOf('- id: bash') > withSwitches.indexOf('config:'),
-  'the disable block comes after the config rows, so it reads as a separate concern')
-check(!renderBrainPatch({ ...plan, syncBlock: renderSyncBlock([
-  { id: 'ui-sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar', sync: false, source: 'default', reason: 'x' },
-], []) }).includes('ui-sidebar'),
-  'and a row the node does not compose is never named')
+// The plugin set is NOT in this file any more. It lives in the node's profile bundle
+// list, and a `disabled: true` row here was the old second way to say the same thing —
+// two answers to "which plugins does this node load" is how a node ends up composing
+// something nobody chose. The check guards against that second path coming back.
+check(!('syncBlock' in plan), 'the overlay takes no per-plugin block')
+check(!/disabled:/u.test(renderBrainPatch({ ...plan, syncBlock: '- id: bash' })),
+  'and a leftover per-plugin block is not written into the node patch')
 
 if (YAML === undefined) {
   log('note: no YAML parser available; skipping the round-trip checks')

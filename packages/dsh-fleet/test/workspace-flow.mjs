@@ -175,11 +175,15 @@ const response = await fetch(`${base}/fleet/api/workspaces`, {
   body: JSON.stringify({ nodeId, path: secondPath }),
 })
 const body = await response.json()
+// The reply is `{ok, workspace, created}` — the same shape `workspace/create` answers
+// with on a local Host, so a caller does not have to know which side made the workspace.
+const added = body.workspace
 check(response.ok && body.ok === true, 'the fleet API adds a remote workspace by path',
-  body.error ?? body.workspace?.workspace?.path)
+  body.error ?? added?.path)
 if (body.ok === true) {
-  check(String(body.workspace.workspace.workspaceId).startsWith('fleet_'),
-    'the added workspace comes back with a routed identity', body.workspace.workspace.workspaceId)
+  check(String(added?.workspaceId).startsWith('fleet_'),
+    'the added workspace comes back with a routed identity', added?.workspaceId)
+  check(added?.path === secondPath, 'and keeps the path that was asked for', added?.path)
 }
 
 // ---- 8. and it merges into the sidebar baseline ------------------------

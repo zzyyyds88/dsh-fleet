@@ -135,11 +135,20 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 两路都是 **Host 级、每连接一条**，不是按 Session 路由，所以处理方式不是转发而是**并流**：
 
 - `session/control` 由 `RemoteControl` 持有每个节点一条，投影块合成一份 baseline（远程块的身份用本地包裹形式），每个本地消费者各拿一条合并流。**合并后的流只发一帧 baseline**：上游客户端把任何 baseline 都当"这就是全部"，先推远程再推本地会把远程块擦掉 —— 那处 bug 只在读第二帧时暴露，看起来像"远程投影从来没生效"。节点集合变化时用最后一份本地块重折一次再发，等价于上游重连。
+- 远程块**不是**节点 baseline 的转发，而是本机自己攒的一份。节点那边 `session/control` 的 baseline 取的是它**内存里活着的** Session（`ctx.sessions.list()`），远程会话在节点上不常驻，重启一次就空了 —— 实测：插件开关重启节点后，节点自己的 baseline 是 `{}`，转发它就等于"远程投影消失"。所以 `RemoteControl` 在首帧看到某个 Session 时建块、按 `changes` 逐键合并、`asOfSeq` 跟着 `seq` 前进，与上游客户端应用 `projection` 帧的规则一致。这样晚连上的客户端（刷新页面、第二个窗口）拿到的 baseline 里有这些会话，而它无法像本地行那样用 `session/list` 修 —— 远程行在列表里是快照，不是一个投影块。
 - `$events` 由 `RemoteEvents` 每个节点开一条，把闭合白名单里的五个事件用 `Router.toLocal` 包一遍后在本机 `ctx.emit`。上游的 `api-remotes` 本来就会把这些事件转发给每个已连接客户端，所以**浏览器侧一行没改**，远程事件就走本地事件同一条管道。
 
 白名单是闭合的：重发一个本机也会发的事件是安全的（客户端按身份合并），但重发一个需要本机 `Agent` 才能解释的事件不是。`test/event-relay.mjs` 用的判据是"在节点上直接建的 Session" —— 本机没发过那个调用，浏览器听到的一切只可能来自中继。
 
-同一 `$events` 流上还有 `approval/request`、`user-questions/request` 两个 waterfall。它们被 `next` 答掉（节点的默认行为），因为本机没有对应的 Agent 可询问；**不应答的 waterfall 会一直挂着**，那会把远程回合卡死。这是当前真实功能上限：远程会话里的审批不会弹到本地界面。
+同一 `$events` 流上还有 `approval/request`、`user-questions/request` 两个 waterfall，它们是**要弹卡的**，不是用 `next` 答掉。`RemoteWaterfalls` 把帧里的 `agentId` 包成本地身份后塞进上游 Gateway 的 `pendingRemoteEvents`，等浏览器通过 `$events/result` 答复，再把答案原样转给节点（`{kind:'result', value}` 或 `{kind:'next'}`）。没有浏览器在听时立刻答 `next`，十分钟没人答也答 `next` —— 两种情况都退化成"节点的默认值"，绝不把远程回合吊死。判据见 §七 的 `approval-acceptance.mjs`。
+
+**两路流都必须能自己活回来。** 常驻 host 一重启（插件开关就会重启它），网关的载体连同所有逻辑流一起断，而 `RemoteEvents` / `RemoteControl` 里的节点条目还留在 Map 里 —— 只判断"这个节点在不在 Map 里"就永远不会重开。实测症状：一次插件开关之后，节点上新开的 Session 不再产生任何事件，侧栏的投影块消失，审批卡在本机点了通过而节点从没收到答案，`tool-parity` 等了一次"已经跑完的回合"整整 7 分钟。
+
+**更难判的是那个载体看着还活着。** 宿主进程没了，这条 socket 的 `writable` 仍是 true：写进去的帧没人读，于是 `session/follow` 打开成功、一帧都收不到 —— 比报错更糟，因为它长得像"节点没有输出"。所以恢复分三层，缺一层都会留下一个静默的空流：
+
+1. `gateway.reset()` 由**重启它的人**调用（`syncConfig` 在 `ensureServing({force:true})` 之后），作废载体和所有逻辑流，并用代号（generation）让旧 socket 迟到的 `close` 不再清掉新的载体；
+2. 每条流的 `onEnd` 调用 `gateway.revive()`：延迟 1 秒重开，最多 8 次。1 秒不是随便取的 —— 同时刻重连打到的是正在关停的 host，必然失败；
+3. `openStream` 在写失败时丢掉载体重试一次，`carrierClient` 在 socket 已 `destroyed` 或不可写时重开；升级被 401 拒绝时重新换取 cookie（重启后的宿主发的是新 cookie）。
 
 ---
 
@@ -170,6 +179,8 @@ packages/dsh-fleet/
       remote-gateway.js cookie 铸造、unary call（401 自动重试一次）、逻辑流
       multipart.js      Gateway 的 multipart 应答解码（字节附件还原）
       provision.js      模型行复制、凭据下发、配置渲染
+      browse.js         选工作区时的目录浏览：本机 readdir / 节点 find，同一返回形状
+      sync-switches.js  每插件开关：读本机 profile manifest、记住选择、算节点 bundle 列表
       brain-bundle.generated.js  节点组合（生成物，来自 dsh-fleet-brain）
       routing.js        身份编解码、AsyncQueue、ChangeSignal、own-property 覆写
       router.js         toRemote / toLocal / toLocalWorkspace / call / 流
@@ -179,7 +190,7 @@ packages/dsh-fleet/
       decorators.js     五个命名空间的路由装饰器（session / workspace / workspaceFiles / job / terminal）+ 合并后的 control 流
       lookups.js        workspaceFileScope lookup 覆写
       fleet.js          节点运行时状态机
-    client/client.js    设置页 + 侧栏面板 + 主区页面
+    client/client.js    设置页 + 侧栏面板 + 主区页面 + 加工作区的目录选择对话框
   locale/{en,zh}.json
   icon.svg  docs/UPGRADE.zh.md  README.md
   test/                  见下
@@ -447,47 +458,62 @@ profile 名也按 root 派生（`~/.dsh-fleet` 仍是 `fleet`，`~/.dsh-fleet-b`
 
 ## 六之五、每插件同步开关
 
-节点跑同一套 DSH，所以它默认会加载同一批插件。开关决定哪些真的发过去。
+开关的单位是**插件（bundle）**，不是内部行。第一版把本机组合里的每一行都列成一行开关，实测 **207 行**：
+那描述的是组合，不是选择 —— 没人「安装」`tool-result-pruner`，人装的是一个插件。现在一行一个
+bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，`@deepseek-ai/*`、
+`@local/dsh-fleet`、`@local/dsh-fleet-brain` 排除（前两类是产品本身，后一个正是「节点成为大脑」）。
 
-### 默认值来自 bundle 列表，不是名字形状
+### 默认关闭，因为节点是另一台机器
 
-一个大脑组合的是 `dsh-base` + `@local/dsh-fleet-brain`，而大脑是从 `dsh-web-app` **减**出来的：
-所以 `dsh-web-app` 的一百多行「默认就在、节点上一行都没有」。反过来，工作区里也留着几行名字像
-浏览器、其实是 headless 的（`connection` 是 Remote mux、`file-upload` 是 session-controller
-注入的附件能力、`locale`/`shortcuts`/`resources` 同理）。
+`dsh-base` 是节点的底座，大脑 bundle 是它的减法，二者不是选项。其余插件默认 **不发**：一个插件带来
+自己的依赖树和副作用，仅仅因为本机装了就让每台节点都收到，等于没有决定。开关打开的含义是「它也
+在那台机器上运行」，这一条要求真正能落地：
 
-因此默认值取**节点的实际组合**（从已安装的 `dsh-base` patch 与生成的大脑 patch 解析出来）：
+1. 在节点上 `npm install <name>@<本机 manifest 里的 spec>`（沿用本机的版本区间，两边同一个 release）；
+2. 再写节点的 `dsh.profile.bundles`，顺序是 **base → 你打开的插件 → 大脑 bundle**（bundle 按列表
+   顺序组合，大脑 patch 必须压在上游之上）；
+3. bundle 列表变化是模块代码变化，常驻 host 必须重启，`syncConfig` 里就地重启并 `gateway.reset()`（旧 socket 看着可写，实则是尸体，不 reset 的话后续所有流都是空的）。
 
-| 情况 | 默认 | 能否开关 |
-|---|---|---|
-| 行在节点组合里，且不是结构行 | 开 | 能 |
-| 行不在节点组合里 | 关 | 不能（显示为「节点不加载这一行」） |
-| 结构行 | 开 | 不能 |
+### 两个踩过的坑
 
-只看名字会得出错误答案：第一版按名字判断，把 `connection`/`web-startup` 当浏览器行，节点直接
-报 `1 required plugin did not activate`、六个插件在等服务、根本没有 HTTP 服务。名字规则现在只作为
-**提示**保留 —— 一行名字像窗口却被节点组合着，正是关掉前需要被提醒的情况。
+**顺序**：`npm install` 会剪掉 profile `dependencies` 里没有的包，而大脑 bundle 是**拷进去**的
+（不是 npm 装的），所以它当时算「多余」。实测：打开一个插件后 `node_modules/@local/dsh-fleet-brain`
+被删，节点报 `cannot resolve profile bundle "@local/dsh-fleet-brain"`，常驻 host 起不来。因此
+`writeBrainBundle` 必须排在 npm **之后**，connect 与 sync 两条路径都一样。
 
-### 结构行是实测出来的，不是推出来的
+**报告**：`npm install` 对一个列表是原子的，失败时无法安全地指认某一个包，所以失败就报「这一批都
+没确认装上 + npm 最后四行」，不编造单包诊断。`POST /fleet/api/plugins/:bundle` 同步执行完再返回
+每个节点做了什么；任何节点没接受就带上 `warning`，页面把节点原文显示出来 —— 一个显示「已保存」
+而节点什么都没组合的复选框，正是这个界面要防的 bug。
 
-`STRUCTURAL_ROWS` 收敛的是两类独立失败：
+### 状态存哪
 
-- 提供 `webStartup` / `webServer` / `web` / `fileUploads` 的行被关 → 节点起不来，报告里**一个
-  字都没提开关**；
-- 控制器或传输被关 → 节点活着、HTTP 能通，但 `session/list` 之类根本不存在，桌面看到的是
-  「已连接但不能列会话」。
+存**profile 目录**里的 `fleet-plugins.json`，不是 `$DSH_HOME/fleet/plugins.json`：同一个 home 下
+`desktop` 与 `fleettest` 的插件集不同，存在 home 里会让一个 profile 的选择决定另一个 profile 的节点。
+把开关拨回默认值**删掉那条记录**而不是存同值，这样升级改了默认值还能到达从没碰过它的用户。
 
-其余行（`office-kit`、`workflow-ptc`、`tool-web`、模型适配器）都是真选择，关掉就是更小的节点。
+### 节点的 profile patch 只管配置
 
-### 关掉怎么写
+`renderBrainPatch` 只写模型清单与权限预设。插件集不在里面 —— 一个 concern 一个写入者，否则
+`disabled: true` 会成为「这个插件不在节点上」的第二种说法，两个答案就是节点组合出没人选过的东西的
+来源。旧的 207 行开关正是这么写的（`- id: X` + `disabled: true` 进节点 patch，只写节点组合里真有
+的行；曾让一台节点的 patch 堆了 59 条什么也没决定的条目），这条路径已删除。
 
-写成 `- id: X` + `disabled: true` 进**节点 profile patch**（常驻 host 会热重载），且**只写节点
-组合里真有的行** —— 给一行节点从不加载的行写 disabled，是一条什么也没决定的记录，曾让一台节点
-的 patch 里堆了 59 条这样的条目。bundle 列表不改：它是发布物里生成好的，per-node 改它等于每台
-节点一份组合。
+## 六之六、加工作区：先选机器，再选目录
 
-状态存 `$DSH_HOME/fleet/plugins.json`；把开关拨回默认值**删掉那条记录**而不是存同值，这样升级
-改了默认值还能到达从没碰过它的用户。
+目标体验是「操作远程大脑和操作本地大脑一样，只有设置工作区这一步不同」，所以加工作区的流程是
+**先选哪台机器，再在那台机器上浏览目录**，本地与远程共用同一个对话框。
+
+壳（shell）自己的目录选择器浏览的是**本机**，永远选不到节点上的 `/root/project`。插件占用壳声明的
+三个 `*.directoryFlow` 插槽（`sidebar.workspaces` / `conversation.hero.workspace` /
+`workspace.picker`），用自己的对话框替换它：三个入口一次全覆盖，不用改壳里的任何一个调用点。
+`props.onPicked(path)` 之后仍然是壳去建工作区，所以本地路径走原路，远程路径由 Host 半边的
+`workspace/create` 装饰器按「绝对 POSIX 路径」路由到能看见它的节点。
+
+浏览走 `GET /fleet/api/browse?node=&path=`：不带 `node` 读本机（`readdir`），带 `node` 读那台机器
+（复用插件已有的 SSH 连接跑 `find -maxdepth 1`）。两边返回同一形状，页面只有一条渲染路径 —— 这
+才是「和本地一样」的具体含义。不经过节点的 Harness，因为浏览目录是文件系统问题，而且那样会要求
+节点先起来才能选它自己的目录。
 
 ## 七、测试
 
@@ -514,8 +540,10 @@ profile 名也按 root 派生（`~/.dsh-fleet` 仍是 `fleet`，`~/.dsh-fleet-b`
 | `artefact-acceptance.mjs` | 在真节点上跑真安装脚本：下载、校验 sha256、解压、替换、`--version`、二次安装、回滚；断言原生包是 `linux-x64` 而非 `win-x64` | 节点 + 已发布的 Release 制品 |
 | `approval-acceptance.mjs` | **审批与提问真的走完一整圈**：节点 `approval/asked` → 本机 `$events` 上的 `waterfall` 帧（agentId 已包裹）→ 用 `$events/result` 答复 → 节点 `approval/decided` 记下所选值 → 文件真的写出；第二次改成拒绝，文件不存在；`ask_user_question` 用批量 `{answers:[{id,selected}]}` 往返 | 运行中的 Host + 已连接节点（节点需 `approval: ask`） |
 | `browser-acceptance.mjs` | 真 Chrome + CDP：渲染后的侧栏文本里**真的有**远程工区；插件自己的入口可达；截图留证。API 测试看不见"baseline 把远程行冲掉"这类问题 | 运行中的 Host + 带 `--remote-debugging-port` 的 Chrome |
-| `version-unit.mjs` | 版本闸门的每个分支（含 rc 排序）、制品 URL、安装脚本内容、每节点 layout 派生、开关语义与锁定行 | 无 |
+| `version-unit.mjs` | 版本闸门的每个分支（含 rc 排序）、制品 URL、安装脚本内容、每节点 layout 派生、插件开关语义（哪些 bundle 算第三方、默认关闭、节点列表顺序、状态文件容错） | 无 |
 | `waterfall-unit.mjs` | 审批/提问中继：允许的 waterfall 才发到浏览器、拒绝与超时各自结算、节点断开时卡片被取消、问题按自己的名字转发 | 无 |
+| `workspace-browse.mjs` | 加工作区对话框背后的两个接口：本机与节点用同一形状回答、节点列的是节点的盘（`/` 没有上级、隐藏目录不列、不存在的目录报 shell 的原因）、选中的节点目录变成带包裹身份的工区 | 运行中的 Host + 已连接节点 |
+| `plugin-switch.mjs` | 单个插件的开关真的落到节点：包被安装或复制上去、节点自己的 bundle 列表里排在脑 bundle **之前**、常驻 host 重启后仍答得出、远程工区数量不变；关回去同样干净，异常退出也恢复开关 | 同上 |
 
 ### 一条命令跑完
 

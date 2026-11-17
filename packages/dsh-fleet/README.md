@@ -63,7 +63,7 @@ The plugin touches **no upstream Loader row** and imports **nothing from inside
 |---|---|
 | own property on the live Service | `sessionController`, `workspaceController`, `workspaceFiles`, `jobController`, `terminalController` each get a routed method *on the instance*. The Gateway discovers endpoints from the class prototype's `@Remote` descriptor and dispatches with `Reflect.get(view, name)`, so the override wins and the declared surface does not change. |
 | `typert.lookups.configure('workspaceFileScope', …)` | A `fleet_…` Session id is not a local Session, so the Host's own lookup answers `not-found` before the decorator could run. The override delegates every local id to the upstream provider verbatim and synthesises the scope object for a wrapped id. |
-| `webServer.register('/fleet/api')` | Node management plus `POST /fleet/api/workspaces`, because the local directory picker browses *this* machine and can never select `/root/project` on a node. |
+| `webServer.register('/fleet/api')` | Node management, `POST /fleet/api/workspaces`, `GET /fleet/api/browse` and the per-plugin switches. The local directory picker browses *this* machine and can never select `/root/project` on a node, so the plugin occupies the shell's `*.directoryFlow` slots and asks "which machine" first. |
 
 ### The node is a brain, not a second desktop
 
@@ -131,9 +131,33 @@ every event the client renders.
 2. *Connect*. The plugin probes the machine, installs the resident host if the
    version differs, starts it, and verifies the session channel before reporting
    success.
-3. Expand the connected node and enter an absolute path on it (e.g. `/root/project`)
-   → *Add workspace*. It appears in the sidebar's workspace list immediately,
-   alongside your local ones.
+3. **Add a workspace** — the plus button next to *Workspaces* (or a new Session).
+   The dialog asks **which machine** first, then shows that machine's folders:
+   *This machine* browses locally, a node browses over the SSH connection the plugin
+   already holds. Pick a folder → *Add workspace*. It appears in the sidebar's
+   workspace list immediately, alongside your local ones.
+
+That is the same gesture for a remote folder as for a local one; the only extra
+decision is which machine the folder is on.
+
+### Which plugins run on a node
+
+A node is a separate machine, so it composes only what you send it. **Settings ›
+Remote nodes › Plugin sync** lists the plugins *you* installed here — one row per
+bundle, with its version and what it contributes — and each switch decides whether a
+node gets it. Everything starts off: a plugin arrives with its own dependencies and
+side effects, and sending it just because it is installed here would mean every plugin
+silently lands on every node.
+
+Switching one on really installs it there, and the reply reports what each node did:
+
+- a **published** plugin is installed by the node's own npm at this desktop's version
+  spec, so both sides run the same release;
+- a **local** plugin (`link:` in this profile, i.e. one you wrote) has no registry
+  entry, so its files are copied into the node's profile instead;
+- the node's bundle list becomes `dsh-base` → your plugins → the brain bundle, in that
+  order, and its resident host restarts. The node must still answer afterwards — the
+  test checks that, not just the switch.
 
 Nothing else changes: local sessions, local workspaces and local tools behave
 exactly as before.
@@ -170,9 +194,11 @@ exactly as before.
 | `node test/dispatch-seam.mjs` | The Gateway's view of a Service resolves an own property defined on the instance. Run under the local Electron Node. |
 | `node test/host-routing.mjs <base> <token>` | Every routed endpoint through the local `/api`, plus the ones that must stay local — including a **binary** read (what a remote image preview depends on) and the job roster (whose node-side `job/not-found` is the only way to tell routing from a silent local answer). |
 | `node test/workspace-flow.mjs <base> <token>` | The end-to-end gesture: add a remote workspace, create a Session in it, prompt it, watch the node's `bash` output arrive, and confirm the file it wrote exists on the node. |
+| `node test/workspace-browse.mjs <base> <token>` | Choosing a workspace folder the way the dialog does: this machine and a node answer in the same shape, the node listing is really the node's (`/` is not this machine's home, hidden folders are hidden, a missing folder reports the shell's reason), and a picked node folder becomes a workspace with the node wrapped into its id. |
+| `node test/plugin-switch.mjs <base> <token>` | A per-plugin switch really lands on the node: the package is installed or copied there, the node names it in its own bundle list **before** the brain bundle, the resident host restarts, and the node still lists the same remote workspaces. Switching it back off leaves the same node working, and the switch is restored on every exit path. |
 | `node test/tool-parity.mjs <base> <token>` | The check the mirror-based approach could not pass: the agent's own `read` / `write` / `edit` / `grep` / `glob` run against the node's real paths, with no path failure and no Windows path anywhere in the transcript. |
 | `node test/tool-git-image.mjs <base> <token>` | `git` on a real repository, `read_image` on a real PNG, and `grep` over real files — the three tools that returned `code=127` or `ENOENT` when the tools ran locally against a mirror. |
-| `node test/client-bundle.mjs <base> <token>` | The shell serves this plugin's client module, and its three slots register and render. |
+| `node test/client-bundle.mjs <base> <token>` | The shell serves this plugin's client module; its three own slots plus the three folder-picker slots register and render. |
 | `node test/event-relay.mjs <base> <token>` | A Session created **on the node** reaches the browser: its `api-session/*` list events and its `session/control` projections both arrive under the wrapped identity. This is what makes a remote row's title, spinner and new-Session insertion happen live instead of on the next full list pull. |
 
 The last six need a running Host; `host-routing`, `workspace-flow`, `tool-parity`,

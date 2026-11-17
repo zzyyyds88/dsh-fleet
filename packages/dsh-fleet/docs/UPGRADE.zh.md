@@ -115,6 +115,9 @@ node test/event-relay.mjs     <base> <token>
 | 模型行的 id/包名 + `configEditor.configuration()` 的返回形状 | `dsh-config-editor`、`dsh-llm-*` | 下发到节点的配置缺字段 | `provision-unit.mjs` |
 | profile 的 `cordis.patch.yml` 会被 `dsh-hmr` 热重载 | `dsh-hmr`（只 watch profile patch 与 home patch） | 改配置要重启节点宿主 | 实测（见 adr-0001） |
 | 客户端插件槽位名（`settings.section` / `sidebar.panellist` / `main`） | `dsh-client-ui-*` | 设置页或侧栏面板不出现 | `client-bundle.mjs` |
+| 目录选择器的三个插槽（`sidebar.workspaces.directoryFlow` / `conversation.hero.workspace.directoryFlow` / `workspace.picker.directoryFlow`）与它的 `{open, onPicked, onCancel}` 约定 | `dsh-client-ui-workspace` + `dsh-client-ui-directory-picker-*` | 加工作区弹回原生选择框，或对话框弹不出来 | `client-bundle.mjs`（槽位注册）+ 手工验收 §7b |
+| 单实例插槽（`kind: single`）取 `entriesOfSlot(key)[0]`，按 `priority` 升序 | `dsh-client-ui-renderer` / `dsh-web-frontend` | 自家占用者排在壳自带的那一个后面，永远不生效 | 手工验收 §7b（对话框标题必须是「选择工作区文件夹」） |
+| profile 的 `dsh.profile.bundles` 顺序即组合顺序，`npm install` 会剪掉 `dependencies` 里没有的包 | `dsh-app-boot` / `dsh-client-modules` | 插件开关把大脑 bundle 剪掉，节点起不来 | `plugin-switch.mjs` |
 
 **查上游契约的办法**（不用读 TypeScript 源码）：
 

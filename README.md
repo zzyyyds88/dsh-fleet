@@ -72,7 +72,7 @@ DSH 的桌面端很好用，但它的**工具全部跑在本机**。当你需要
 │         │    └─ 插件在**服务实例上**覆写若干方法：       │
 │         │       session/list、workspace/follow、…       │
 │         │       → 本地行 + 每台节点自己的行             │
-│         └─ /fleet/api   ← 节点管理 + 按路径加远程工作区  │
+│         └─ /fleet/api   ← 节点管理 + 选机器/选目录 + 插件开关  │
 └─────────────────────────────────────────────────────────┘
                     │  SSH :22（唯一入口，节点不开放端口）
                     ▼
@@ -113,7 +113,7 @@ DSH 的桌面端很好用，但它的**工具全部跑在本机**。当你需要
 |---|---|
 | 实例上的 own property | Gateway 从**类原型**读 `@Remote` 描述符，但 dispatch 用 `Reflect.get(view, name)` —— 实例属性优先。所以在实例上覆写方法，端点表不变、实现换掉。 |
 | `typert.lookups.configure('workspaceFileScope', …)` | `fleet_…` 不是本地 Session，Host 自己的 lookup 会先返回 not-found。覆写后本地 id 原样委派上游，包装 id 合成 scope。 |
-| `webServer.register('/fleet/api')` | 本地的目录选择器浏览的是**本机**，永远选不到节点的 `/root/project`。所以加一个"按路径加远程工作区"的入口。 |
+| `webServer.register('/fleet/api')` | 本地的目录选择器浏览的是**本机**，永远选不到节点的 `/root/project`。所以插件占用壳的 `*.directoryFlow` 插槽，换成一个"先选机器、再选目录"的对话框。 |
 
 这三条是**实现细节，不是公开契约**。所以有 `test/dispatch-seam.mjs`：
 DSH 升级后它先炸，而不是等你某天发现所有远端会话都点不开。

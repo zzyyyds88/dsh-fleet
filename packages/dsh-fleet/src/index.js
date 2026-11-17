@@ -31,7 +31,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apiError, describeFailure, readJsonBody, sendJson } from './core/http-error.js'
 import { decideGate } from './core/version.js'
-import { Fleet } from './host/fleet.js'
+import { Fleet, BRAIN_BUNDLES } from './host/fleet.js'
+import { isPosixAbsolute, listLocal, listRemote } from './host/browse.js'
 import { RemoteControl } from './host/remote-control.js'
 import { RemoteEvents } from './host/remote-events.js'
 import { RemoteWaterfalls } from './host/remote-waterfall.js'
@@ -108,7 +109,6 @@ export function apply(ctx, config = {}) {
   const version = localDshVersion()
   const brainVersion = localBrainVersion()
   /** @type {SyncSwitches | undefined} — composed once `configEditor` exists. */
-  /** @type {SyncSwitches | undefined} — composed once `configEditor` exists. */
   let switches
   const fleet = new Fleet({
     credentials: ctx.credentials,
@@ -116,9 +116,10 @@ export function apply(ctx, config = {}) {
     brainVersion,
     mirror: config.mirror,
     configEditor: () => configEditor,
-    // Read on every render: a switch flipped in the settings surface has to reach a
-    // running node on the next sync, not on the next connect.
-    syncBlock: () => switches?.render() ?? '',
+    // Read on every connect and every sync: a switch flipped in the settings surface has
+    // to reach a running node now, not on the next connect.
+    nodeBundles: () => switches?.nodeBundles() ?? BRAIN_BUNDLES,
+    pluginSpecs: () => switches,
     log,
   })
   const workspaces = new RemoteWorkspaces(fleet)
@@ -242,15 +243,15 @@ export function apply(ctx, config = {}) {
         if (req.method === 'POST') {
           // Register a directory on a node as a workspace.
           //
-          // The local directory picker browses THIS machine, so it can never select
-          // `/root/project` on a node. This endpoint is how a remote workspace gets
-          // added: the caller names the node and a path that exists over there, and
-          // the node registers it in its own registry.
+          // A local folder does not come through here at all: the picker's own flow hands
+          // the path to the shell, which creates the local workspace itself. This endpoint
+          // exists for the one case the shell cannot do — the path lives on another
+          // machine, and only that machine's Host can register it.
           const body = await readJsonBody(req)
           const nodeId = typeof body.nodeId === 'string' ? body.nodeId : undefined
           const path = typeof body.path === 'string' ? body.path.trim() : ''
           if (nodeId === undefined) throw apiError('node-required', 'name the node this directory lives on', 400)
-          if (!path.startsWith('/')) {
+          if (!isPosixAbsolute(path)) {
             throw apiError('path-invalid', 'a remote workspace path must be absolute, e.g. /root/project', 400)
           }
           const runtime = fleet.get(nodeId)
@@ -258,10 +259,45 @@ export function apply(ctx, config = {}) {
           if (!runtime.routable) throw apiError('node-offline', `${runtime.record.name} is not connected`, 409)
           const value = await router.call(nodeId, 'workspace/create', { request: { path } })
           await workspaces.sync()
-          sendJson(res, 200, { ok: true, workspace: router.toLocalWorkspace(value, nodeId) })
+          // Same shape as the `workspace/create` decorator returns, because the surface
+          // reads one shape: `{workspace, created}`. Wrapping the whole reply rather than
+          // its `.workspace` left the identity one level too deep, and a caller asking for
+          // `workspace.workspaceId` got `undefined` from a request that had succeeded.
+          sendJson(res, 200, { ok: true, ...router.toLocalWorkspace(value, nodeId) })
           return
         }
         throw apiError('method-not-allowed', 'use GET or POST on the workspace collection', 405)
+      }
+
+      // ---- Browsing folders to make a workspace from --------------------------
+      // One endpoint for both sides, because the picker offers both: with no `nodeId` it
+      // lists this machine, with one it lists that node over the SSH connection this
+      // plugin already holds. The answer has the same shape either way, so the surface
+      // has one rendering path — that is what makes a remote folder feel like a local one.
+      if (head === 'browse' && id === undefined) {
+        if (req.method !== 'GET') throw apiError('method-not-allowed', 'use GET to browse folders', 405)
+        const nodeId = url.searchParams.get('node') ?? undefined
+        const path = url.searchParams.get('path') ?? ''
+        if (nodeId === undefined || nodeId.length === 0) {
+          let listing
+          try {
+            listing = await listLocal(path)
+          } catch (error) {
+            throw apiError('browse-failed', error instanceof Error ? error.message : String(error), 400)
+          }
+          sendJson(res, 200, { ok: true, nodeId: undefined, ...listing })
+          return
+        }
+        const runtime = fleet.get(nodeId)
+        if (runtime === undefined) throw apiError('node-not-found', `no node ${nodeId}`, 404)
+        let listing
+        try {
+          listing = await listRemote(runtime.connection, path)
+        } catch (error) {
+          throw apiError('browse-failed', error instanceof Error ? error.message : String(error), 400)
+        }
+        sendJson(res, 200, { ok: true, nodeId, ...listing })
+        return
       }
 
       if (head === 'workspaces' && id !== undefined && req.method === 'POST' && action === 'rename') {
@@ -283,10 +319,10 @@ export function apply(ctx, config = {}) {
       }
 
       // ---- Per-plugin sync switches -------------------------------------------
-      // One row per plugin this desktop composes, with two independent facts: the
-      // effective switch (what a node would load) and where that answer came from.
-      // The settings surface needs both — "off because it drives a window" is not
-      // something to undo, "off because I said so" is.
+      // One row per plugin **this desktop installed**, with two independent facts: the
+      // effective switch (what a node loads) and where that answer came from. The unit is
+      // the bundle, not the internal service row — a person installs plugins, and 207
+      // toggles describing the composition is not a decision anyone can make.
       if (head === 'plugins' && id === undefined) {
         if (req.method === 'GET') {
           if (switches === undefined) {
@@ -307,11 +343,33 @@ export function apply(ctx, config = {}) {
         if (typeof body.sync !== 'boolean') {
           throw apiError('sync-required', 'a `sync` boolean is required', 400)
         }
-        const row = switches.set(id, body.sync)
-        // A switch that only takes effect on reconnect would look broken; push it to
-        // every connected node now. The node's profile patch is hot-reloaded.
-        void fleet.syncConfig('plugin switches changed').catch(() => undefined)
-        sendJson(res, 200, { ok: true, row })
+        const bundle = decodeURIComponent(id)
+        const row = switches.set(bundle, body.sync)
+        // Answer with what each node actually did, not with "accepted": switching a plugin
+        // on installs a package over SSH, which can fail on the node's own registry, and a
+        // checkbox that reports success while the node composes nothing is the exact bug
+        // this surface exists to prevent.
+        let applied
+        try {
+          applied = await fleet.syncConfig('plugin switches changed')
+        } catch (error) {
+          throw apiError('sync-failed', error instanceof Error ? error.message : String(error), 502)
+        }
+        const failures = applied.filter(report => report.error !== undefined || (report.plugins?.failed.length ?? 0) > 0)
+        sendJson(res, 200, {
+          ok: true,
+          row,
+          nodes: applied.map(report => ({
+            id: report.id,
+            name: report.name,
+            ...(report.error === undefined ? {} : { error: report.error }),
+            ...(report.plugins === undefined ? {} : { plugins: report.plugins }),
+            ...(report.bundles === undefined ? {} : { bundles: report.bundles }),
+          })),
+          ...(failures.length === 0 ? {} : {
+            warning: `${String(failures.length)} node(s) did not take the change`,
+          }),
+        })
         return
       }
 
@@ -366,12 +424,15 @@ export function apply(ctx, config = {}) {
   let configEditor
   ctx.inject(['configEditor'], scope => {
     configEditor = scope.get('configEditor')
-    // The switch list describes what this desktop composes, so it can only be built
-    // once the editor exists. Until then `syncBlock` renders empty, which is exactly
-    // the "no per-plugin decisions yet" state.
+    // The switch list describes what this desktop installed, so it can only be built once
+    // the profile is known. Until then a node composes `BRAIN_BUNDLES`, which is the
+    // "nothing extra was chosen" answer.
     switches = new SyncSwitches({
       home: process.env.DSH_HOME ?? join(homedir(), '.dsh'),
-      configEditor: () => configEditor,
+      // Read through the live profile context rather than `DSH_HOME` alone: `--profile`
+      // is how this Host was launched, and `$DSH_HOME/profiles/<name>` would need the
+      // name duplicated here.
+      profileDir: () => ctx.get('profileContext')?.dir,
       log,
     })
   })

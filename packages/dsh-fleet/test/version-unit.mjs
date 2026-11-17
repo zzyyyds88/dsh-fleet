@@ -29,13 +29,12 @@ import {
 } from '../src/remote/artefact.js'
 import { remoteLayout } from '../src/remote/daemon.js'
 import {
-  classifyRow,
-  isStructuralRow,
-  parsePatchRowIds,
+  installedPlugins,
+  isLocalSpec,
+  isThirdParty,
+  nodeBundles,
   parseSwitches,
-  renderSyncBlock,
-  resolveSwitches,
-  rowsToDisable,
+  resolvePlugins,
 } from '../src/core/plugin-sync.js'
 
 const log = message => process.stdout.write(`[version-unit] ${message}\n`)
@@ -166,134 +165,104 @@ const check = (ok, label, detail) => {
 }
 
 // ---- per-plugin switches ---------------------------------------------------
+// ---- which of your plugins a node loads ------------------------------------
+// The unit of a switch is a **bundle**, not a row. The row list this used to test had
+// 207 entries — one per internal service — and only a handful of them were decisions a
+// person could make. A node composes a bundle list, so one switch per installed bundle is
+// the model that can actually be carried out.
 {
-  check(classifyRow('@deepseek-ai/dsh-client-ui-sidebar').browserOnly,
-    'a client-ui row is browser-only')
-  check(classifyRow('@deepseek-ai/dsh-web').browserOnly, 'the web shell is browser-only')
-  check(classifyRow('@deepseek-ai/dsh-directory-picker').browserOnly,
-    'a native dialog is browser-only even though its name does not say so')
-  check(classifyRow('@deepseek-ai/dsh-tool-bash').browserOnly === false,
-    'a tool is host-plane')
-  check(classifyRow('@deepseek-ai/dsh-llm-deepseek-api-key').browserOnly === false,
-    'a model adapter is host-plane')
-  check(classifyRow(undefined).browserOnly, 'a row with no name is not loadable anywhere')
-
-  const rows = [
-    { id: 'sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar' },
-    { id: 'bash', name: '@deepseek-ai/dsh-tool-bash' },
-    { id: 'llm', name: '@deepseek-ai/dsh-llm-deepseek-api-key' },
-    { id: 'picker', name: '@deepseek-ai/dsh-directory-picker' },
-  ]
-  // The set a real brain composes: dsh-base's rows plus the brain bundle's. The UI
-  // rows come from dsh-web-app, which a node does not compose at all.
-  const composed = ['bash', 'llm']
-
-  const defaults = resolveSwitches(rows, {}, composed)
-  check(defaults.find(row => row.id === 'bash')?.sync === true, 'a composed tool defaults to synced')
-  // The bundle list is the default, not a name-shape guess: a node keeps
-  // `connection`/`locale`/`resources` and drops every `dsh-client-ui-*` row, and the
-  // page has to start out saying exactly that.
-  check(defaults.find(row => row.id === 'bash')?.sync === true, 'a composed row defaults to on')
-  check(defaults.find(row => row.id === 'sidebar')?.sync === false,
-    'a row the node does not compose defaults to unsynced')
-  check(defaults.find(row => row.id === 'sidebar')?.present === false,
-    'and is marked absent, so the UI does not offer a switch for it')
-  check(defaults.every(row => row.source === 'default'), 'with no overrides, every answer is a default')
-  check(defaults.find(row => row.id === 'llm')?.reason.includes('host-plane'),
-    'a composed row explains itself by what it is', defaults.find(row => row.id === 'llm')?.reason)
-  check(defaults.find(row => row.id === 'sidebar')?.reason.includes('does not load'),
-    'an absent row says the node does not load it', defaults.find(row => row.id === 'sidebar')?.reason)
-
-  const explicit = resolveSwitches(rows, {
-    bash: { sync: false },
-    sidebar: { sync: true },
-    picker: { sync: true },
-    ghost: { sync: false },
-  }, composed)
-  check(explicit.find(row => row.id === 'bash')?.sync === false,
-    'an explicit off beats the default on')
-  check(explicit.find(row => row.id === 'bash')?.source === 'explicit', 'and says it was set by hand')
-  check(explicit.find(row => row.id === 'ghost') === undefined,
-    'a switch for a row that is not composed is ignored')
-  // A switch on a row the node does not load is remembered but locked: the intent is
-  // kept for when the node does compose it, and the checkbox cannot lie meanwhile.
-  const absentOn = explicit.find(row => row.id === 'sidebar')
-  check(absentOn?.sync === true && absentOn.locked === true,
-    'a switch on an absent row stays locked rather than pretending to apply')
-
-  // Only rows the node composition contains can be disabled: everything else is not in
-  // its bundle list, so naming it would be a patch entry about a row that never loads.
-  // Measured: one node's patch carried 59 such entries, all of them from dsh-web-app.
-  const disabled = rowsToDisable(explicit, composed)
-  check(disabled.includes('bash'), 'a hand-disabled composed tool is in the disable list')
-  check(!disabled.includes('sidebar'), 'an absent row never is, even when switched on')
-  check(!rowsToDisable(explicit, []).includes('bash'),
-    'and with an empty composition nothing is disabled at all')
-  check(!disabled.includes('web-runtime') && !disabled.includes('brain-runtime'),
-    'the node composition itself is never disabled')
-
-  const rendered = renderSyncBlock(explicit, composed)
-  check(rendered.includes('- id: bash') && rendered.includes('disabled: true'),
-    'the rendered block disables the switched-off row')
-  check(rendered.includes('turned off by hand'), 'and marks the hand-made decision')
-  check(!rendered.includes('- id: llm'), 'an enabled row does not appear at all')
-
-  // The rows a node cannot start without are locked whatever the composition says.
-  const structural = resolveSwitches(
-    [{ id: 'web', name: '@deepseek-ai/dsh-web' }, { id: 'webserver', name: '@deepseek-ai/dsh-host-webserver' }],
-    { web: { sync: false }, webserver: { sync: false } },
-    ['web', 'webserver'],
-  )
-  check(structural.every(row => row.sync && row.locked),
-    'a row a node cannot start without is locked, even after an explicit off')
-  check(structural.some(row => row.reason.includes('cannot start')),
-    'and the reason says why', structural[0]?.reason)
-  check(rowsToDisable(structural, ['web', 'webserver']).length === 0,
-    'so nothing structural ever reaches the disable block')
-  check(isStructuralRow('web') && isStructuralRow('web-startup') && isStructuralRow('brain-runtime'),
-    'the structural set covers the rows measured to be fatal')
-  check(!isStructuralRow('office-kit') && !isStructuralRow('workflow-ptc')
-    && !isStructuralRow('tool-web') && !isStructuralRow('plan-mode'),
-    'and leaves genuinely optional rows switchable')
-  // The Remote API itself is structural: with a controller or the transport off, the
-  // node still answers HTTP but `session/list` is simply absent — a connected node that
-  // cannot list a Session.
-  for (const id of ['connection', 'api-remotes', 'file-upload', 'session-controller',
-    'terminal-controller', 'workspace-controller', 'workspace-files']) {
-    check(isStructuralRow(id), `${id} is structural, because losing it removes the Remote API`)
+  const manifest = {
+    dependencies: {
+      '@deepseek-ai/dsh-base': '0.2.2-rc.3',
+      '@local/dsh-fleet-brain': '0.1.0',
+      'dsh-pet': '^0.4.9',
+      '@artenx/dshb': '^1.2.0',
+      'left-pad': '^1.0.0',
+    },
+    dsh: {
+      profile: {
+        bundles: [
+          '@deepseek-ai/dsh-base',
+          '@deepseek-ai/dsh-web-app',
+          'dsh-pet',
+          '@local/dsh-fleet-brain',
+          '@artenx/dshb',
+        ],
+      },
+    },
   }
 
-  // A required-by-name row is not in the brain patch; parsing is how the plugin learns
-  // the set without a hand-written list that would go stale on the next upstream sync.
-  const ids = parsePatchRowIds([
-    '- id: one',
-    '  config:',
-    '    path: x',
-    '- insert:',
-    "    - id: two",
-    "      name: '@deepseek-ai/x'",
-    '- id: three',
-  ].join('\n'))
-  check(JSON.stringify(ids) === JSON.stringify(['one', 'two', 'three']),
-    'patch row ids are read in file order', JSON.stringify(ids))
-  check(parsePatchRowIds('').length === 0, 'an empty patch has no rows')
-  check(parsePatchRowIds(undefined).length === 0, 'a missing patch has no rows')
-  check(parsePatchRowIds('- id: one\n- id: one').length === 1, 'a repeated id is listed once')
-  const parsed = parseSwitches({ bash: { sync: false }, llm: true, junk: { sync: 'yes' } })
-  check(parsed.bash?.sync === false, 'a stored switch round-trips')
-  check(parsed.llm?.sync === true, 'a bare boolean is accepted as a shorthand')
+  check(isThirdParty('dsh-pet'), 'a bare npm package is a plugin you installed')
+  check(isThirdParty('@artenx/dshb'), 'so is a scoped third party')
+  check(!isThirdParty('@deepseek-ai/dsh-base'), 'an upstream bundle is not a choice')
+  check(!isThirdParty('@deepseek-ai/dsh-web-app'), 'a node is a subtraction from dsh-web-app')
+  check(!isThirdParty('@local/dsh-fleet-brain'), 'the brain bundle is how a node becomes one')
+  check(!isThirdParty('@local/dsh-fleet'), 'and this desktop half is not something to send')
+  check(!isThirdParty(''), 'an empty name is not a plugin')
+
+  // Loaded bundles first, then installed-but-not-loaded: a person reads "what a node
+  // gets" at the top, and a package that is downloaded but not loaded here keeps its row
+  // instead of vanishing from the page.
+  const plugins = installedPlugins(manifest, name => (name === 'dsh-pet' ? ['dsh-pet'] : []))
+  check(plugins.map(plugin => plugin.bundle).join(',') === 'dsh-pet,@artenx/dshb,left-pad',
+    'installed plugins are listed, upstream and the brain excluded', plugins.map(p => p.bundle).join(','))
+  check(plugins[0].loaded === true, 'a bundle in the profile list is marked as loaded here')
+  check(plugins[0].spec === '^0.4.9', 'its install spec comes from the manifest, not from a guess')
+  check(JSON.stringify(plugins[0].rows) === '["dsh-pet"]',
+    'and the rows it contributes are read from its own patch', JSON.stringify(plugins[0].rows))
+  check(plugins[2].loaded === false, 'a dependency that is not in the bundle list is not loaded here')
+  check(plugins[2].rows.length === 0, 'and contributes no rows, because it was never read')
+
+  // The default is **off**: a node is a different machine, and a plugin arrives with its
+  // own dependency tree and side effects. Sending it because it happens to be installed
+  // here is how every new plugin silently lands on every node.
+  const defaults = resolvePlugins(plugins, {})
+  check(defaults.every(row => row.sync === false), 'nothing is sent by default')
+  check(defaults.every(row => row.source === 'default'), 'with no overrides, every answer is a default')
+  check(defaults[0].reason.includes('installed here'), 'a loaded plugin explains why it is a candidate',
+    defaults[0].reason)
+  check(defaults[2].reason.includes('not loaded'), 'an unloaded one says so', defaults[2].reason)
+
+  const chosen = resolvePlugins(plugins, { 'dsh-pet': { sync: true }, 'left-pad': { sync: true } })
+  check(chosen.find(row => row.bundle === 'dsh-pet')?.sync === true, 'an explicit on is honoured')
+  check(chosen.find(row => row.bundle === 'dsh-pet')?.source === 'explicit',
+    'and says the person decided it')
+  check(chosen.find(row => row.bundle === '@artenx/dshb')?.sync === false,
+    'a plugin nobody touched stays off')
+
+  // The node's bundle list keeps the brain last: bundles compose in order and the brain
+  // patch has to land over upstream's. The chosen plugins sit between them, so a plugin
+  // extends the brain rather than replace it.
+  const list = nodeBundles(['@deepseek-ai/dsh-base', '@local/dsh-fleet-brain'], chosen)
+  check(JSON.stringify(list) === JSON.stringify([
+    '@deepseek-ai/dsh-base', 'dsh-pet', 'left-pad', '@local/dsh-fleet-brain',
+  ]), 'the node list is base, then your plugins, then the brain', JSON.stringify(list))
+  check(nodeBundles(['@deepseek-ai/dsh-base', '@local/dsh-fleet-brain'], defaults).length === 2,
+    'with nothing chosen a node is exactly the brain')
+
+  // A corrupt switches file means "no opinions yet", never "send everything".
+  const parsed = parseSwitches({
+    'dsh-pet': { sync: true },
+    '@artenx/dshb': { sync: false },
+    junk: { sync: 'yes' },
+  })
+  check(parsed['dsh-pet']?.sync === true, 'a stored switch round-trips')
   check(parsed.junk === undefined, 'a non-boolean is dropped rather than guessed')
   check(Object.keys(parseSwitches(undefined)).length === 0, 'a missing file parses to no overrides')
   check(Object.keys(parseSwitches([1, 2])).length === 0, 'a wrongly shaped file is ignored')
 
-  // A row with no entry must never be written as "disabled": that is the difference
-  // between a compact settings file and one that freezes today's defaults forever.
-  const none = resolveSwitches(rows, {})
-  check(rowsToDisable(none, composed).every(id => id === 'sidebar' || id === 'picker'),
-    'only the browser rows are disabled when nothing was set by hand',
-    rowsToDisable(none, composed).join(','))
-  check(rowsToDisable(none, []).length === 0,
-    'and with an empty composition nothing is disabled at all')
+  // How a plugin travels depends on this one answer, and getting it wrong is a silent
+  // 404 on somebody's server: a local bundle has no registry entry, so `npm install` there
+  // cannot work and the files have to be copied instead.
+  check(isLocalSpec('link:C:/Users/x/.dsh/local-bundles/rhino-mode'), 'a link: dependency is a local bundle')
+  check(isLocalSpec(undefined), 'a bundle with no recorded spec is local, not "publish latest"')
+  check(!isLocalSpec('^1.2.0'), 'a caret range is published')
+  check(!isLocalSpec('0.3.17'), 'an exact version is published')
+  check(!isLocalSpec('latest'), 'a dist-tag is published')
+  check(isLocalSpec('file:../plugin'), 'a file: dependency is local')
+  check(isLocalSpec('./plugin'), 'a relative path is local')
+  check(isLocalSpec('D:\\ProjectHub\\DSHpl\\packages\\dsh-fleet'), 'a Windows path is local')
+  check(isLocalSpec('/opt/plugins/x'), 'an absolute POSIX path is local')
 }
 
 // ---- one node's own filesystem layout, derived from its root ---------------

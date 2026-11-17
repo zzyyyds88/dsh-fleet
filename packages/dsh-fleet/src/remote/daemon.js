@@ -472,6 +472,136 @@ echo written
   }
 
   /**
+   * Write one bundle's files into the node's profile, byte for byte.
+   *
+   * This is how a **locally built** plugin travels. A plugin installed from npm is
+   * installed by npm; one the user wrote lives as a directory on this machine
+   * (`dependencies: { "@local/x": "link:…" }`) and has no registry entry at all — so
+   * `npm install @local/x` fails with a 404, which is exactly what a node reported before
+   * this existed. Copying the tree is the only way such a bundle reaches a node.
+   *
+   * Base64 per file rather than a heredoc: the payload can contain anything, and a plugin
+   * source file is not the place to discover that a `$` in a string was eaten by a shell.
+   *
+   * @param {Record<string, string>} files - relative path → base64 of the raw bytes.
+   * @param {string} packageName
+   * @returns {Promise<{ changed: boolean, files: number }>}
+   */
+  async writePluginBundle(files, packageName) {
+    const target = `${this.layout.profileModules}/${packageName}`
+    const digest = createHash('sha256')
+    for (const path of Object.keys(files).sort()) digest.update(path).update('\0').update(files[path]).update('\0')
+    const wanted = digest.digest('hex')
+    const stamp = `${target}/.fleet-digest`
+    const payload = Object.entries(files).map(([path, data]) => `${path}\t${data}`).join('\n')
+    const script = `
+set -eu
+target=${target}
+stamp=${stamp}
+if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "${wanted}" ]; then
+  echo unchanged
+  exit 0
+fi
+rm -rf "$target"
+mkdir -p "$target"
+cd "$target"
+while IFS='\t' read -r rel data; do
+  mkdir -p "$(dirname "$rel")"
+  printf '%s' "$data" | base64 -d > "$rel"
+done <<'FLEET_PLUGIN_FILES_EOF'
+${payload}
+FLEET_PLUGIN_FILES_EOF
+printf '%s' "${wanted}" > "$stamp"
+echo written
+`.trim()
+    const result = await this.connection.exec({
+      argv: ['sh', '-c', script],
+      timeoutMs: 180_000,
+      maxBytes: 256 * 1024,
+    })
+    if (result.code !== 0) {
+      throw toSshError(new Error(
+        `writing ${packageName} onto the node failed: ${(result.stderr || result.stdout).trim().slice(-400)}`,
+      ))
+    }
+    return { changed: result.stdout.includes('written'), files: Object.keys(files).length }
+  }
+
+  /**
+   * Install the third-party bundles a node has been told to load.
+   *
+   * The switch means "this plugin also runs there", and a name in `dsh.profile.bundles`
+   * only composes if the package is actually resolvable from the profile — so the switch is
+   * carried out by installing the package into the node's profile, exactly the way the
+   * desktop installed it (`spec` is the desktop's own dependency spec, e.g. `^0.3.8` or a
+   * version pin). Skipping this step is what would make a switch look applied while the
+   * node silently composes nothing: DSH warns and drops a bundle it cannot resolve.
+   *
+   * The node has its own npm and registry configuration (AGENTS.md §13), so this uses
+   * whatever the node is set up with rather than overriding it from here.
+   *
+   * @param {readonly string[]} bundles - third-party bundle names to install.
+   * @param {(name: string) => string | undefined} specOf - the spec to install each at.
+   * @returns {Promise<{ installed: string[], failed: Array<{ bundle: string, reason: string }> }>}
+   */
+  async installPlugins(bundles, specOf) {
+    if (bundles.length === 0) return { installed: [], failed: [] }
+    const lines = bundles.map(bundle => {
+      const spec = specOf(bundle)
+      // A name alone resolves to `latest`, which is what an unpinned dependency means.
+      return { bundle, target: spec === undefined || spec.length === 0 ? bundle : `${bundle}@${spec}` }
+    })
+    // One `npm install` for the whole list: it resolves the tree once, and a single
+    // network round of failures is easier to report than several partial ones.
+    const script = `
+set -u
+mkdir -p ${this.layout.profile}
+cd ${this.layout.profile}
+if [ ! -f package.json ]; then
+  printf '{"name":"dsh-profile-${this.layout.profileName}","private":true,"dependencies":{}}\\\\n' > package.json
+fi
+npm install --no-audit --no-fund --loglevel=error ${lines.map(line => `"${line.target}"`).join(' ')} 2>&1
+echo "FLEET_NPM_EXIT=$?"
+`.trim()
+    const result = await this.connection.exec({
+      argv: ['sh', '-c', script],
+      // A big plugin pulls its own dependency tree; the artefact install gets 15 minutes
+      // for a comparable amount of work, so this gets the same budget.
+      timeoutMs: 10 * 60_000,
+      maxBytes: 256 * 1024,
+    })
+    const output = `${result.stdout}\n${result.stderr}`.trim()
+    // `npm install` is all-or-nothing for the list, so a failure does not name one package
+    // that can be safely dropped: reporting per package would be a guess dressed up as a
+    // diagnosis. The honest answer is "none of these are confirmed installed, here is what
+    // npm said", and the caller retries or surfaces it.
+    const ok = result.code === 0 && /FLEET_NPM_EXIT=0/u.test(output)
+    if (ok) return { installed: lines.map(line => line.bundle), failed: [] }
+    const reason = output.split('\n').slice(-4).join(' | ') || `npm exited ${String(result.code)}`
+    return {
+      installed: [],
+      failed: lines.map(line => ({ bundle: line.bundle, reason })),
+    }
+  }
+
+  /**
+   * Remove a bundle from the node's package list.
+   *
+   * Only the resolution is dropped; the directory stays until npm prunes it, because a
+   * half-deleted package is worse than an unused one and the bundle list is what decides
+   * composition anyway.
+   * @param {readonly string[]} bundles
+   */
+  async uninstallPlugins(bundles) {
+    if (bundles.length === 0) return
+    await this.connection.exec({
+      argv: ['sh', '-c', `cd ${this.layout.profile} && npm uninstall --no-audit --no-fund --loglevel=error ${bundles.map(name => `"${name}"`).join(' ')} 2>&1 || true`],
+      timeoutMs: 5 * 60_000,
+      maxBytes: 128 * 1024,
+    })
+  }
+
+  /**
    * Point the plugin's own profile at `bundles`, writing its manifest only when it
    * differs, and make sure a patch file exists for the host to hot-reload.
    *

@@ -77,15 +77,23 @@ window.__ModuleLoader__.load({
           },
           missingSecret: '还没有保存密码或私钥。',
           plugins: '插件同步',
-          pluginsHint: '远程节点跑同一套 DSH，所以它默认会加载同一批插件。这里逐个决定哪些真的发过去：窗口类插件在节点上没有意义，关掉可以减少它的启动负担。改动会立即下发到已连接的节点。',
-          pluginSync: '同步到远程节点',
-          pluginLocked: '节点自身的组合，不可关闭',
-          pluginAbsent: '节点不加载这一行，无需开关',
-          pluginDefaultOff: '默认关闭：需要浏览器窗口',
-          pluginDefaultOn: '默认开启',
-          pluginSetOff: '已手动关闭',
-          pluginSetOn: '已手动开启',
+          pluginsHint: '这里列出的是你自己装到这个桌面端的插件。打开一个开关，远程节点就会安装并加载它；关掉就只在这台机器上运行。改动立即下发到已连接的节点，节点会在需要时重启常驻进程。',
+          pluginLoaded: '本机已加载',
+          pluginInstalledOnly: '本机已安装，但不在这台机器的组合里',
+          pluginRows: rows => `${rows} 行`,
+          pluginApplied: '已下发',
+          pluginNodeFailed: '节点未接受',
+          pluginNoNodes: '还没有连接任何节点；开关会记住，连接时生效',
+          pluginsNone: '这台机器上没有装第三方插件。装了之后会出现在这里，逐个决定要不要发到节点。',
           pluginFailed: '插件列表还没准备好',
+          pickFolder: '选择工作区文件夹',
+          machine: '在哪台机器上',
+          thisMachine: '本机',
+          up: '上一级',
+          go: '打开',
+          loading: '正在读取…',
+          noFolders: '这个目录下没有子文件夹。',
+          truncated: '只显示前 500 个文件夹；可以直接在上面输入完整路径。',
         }
       : {
           title: 'Remote nodes',
@@ -136,20 +144,42 @@ window.__ModuleLoader__.load({
           },
           missingSecret: 'No password or private key is stored yet.',
           plugins: 'Plugin sync',
-          pluginsHint: 'A node runs the same DSH, so it would load the same plugins. Decide per plugin what actually goes there: a window-driven plugin has nothing to do on a node, and leaving it out keeps the node lean. A change reaches connected nodes immediately.',
-          pluginSync: 'Send to remote nodes',
-          pluginLocked: 'part of the node composition; cannot be switched off',
-          pluginAbsent: 'the node does not load this row at all',
-          pluginDefaultOff: 'off by default: needs a browser window',
-          pluginDefaultOn: 'on by default',
-          pluginSetOff: 'turned off by hand',
-          pluginSetOn: 'turned on by hand',
+          pluginsHint: 'These are the plugins you installed into this desktop. Switch one on and a remote node installs and loads it; switch it off and it stays on this machine only. A change reaches connected nodes immediately and the node restarts its resident host when it has to.',
+          pluginLoaded: 'loaded here',
+          pluginInstalledOnly: 'installed here, not in this machine’s composition',
+          pluginRows: rows => `${rows} row(s)`,
+          pluginApplied: 'sent',
+          pluginNodeFailed: 'the node did not take it',
+          pluginNoNodes: 'No node is connected; the switch is remembered and applies on connect',
+          pluginsNone: 'No third-party plugin is installed on this machine. Once one is, it appears here and you decide per plugin whether a node gets it.',
           pluginFailed: 'The plugin list is not composed yet',
+          pickFolder: 'Choose a workspace folder',
+          machine: 'On which machine',
+          thisMachine: 'This machine',
+          up: 'Up',
+          go: 'Open',
+          loading: 'Reading…',
+          noFolders: 'No subfolders here.',
+          truncated: 'Showing the first 500 folders; type a full path above to go anywhere.',
         }
 
     /** Token-driven styles so light and dark both work. */
     const styles = {
-      page: { padding: '24px 28px', maxWidth: 880, display: 'flex', flexDirection: 'column', gap: 24 },
+      /**
+       * The page is its own scroll viewport.
+       *
+       * The shell renders a `main` slot inside `mainPanel` → `centerCol`, and `centerCol`
+       * is `overflow: hidden`. A body taller than the frame is therefore **clipped with no
+       * scrollbar anywhere**: measured on a real page, `mainPanel` was 1026 px tall with a
+       * 10658 px `scrollHeight`, and neither it nor any ancestor scrolled. So the page
+       * takes the frame's height and scrolls itself, which is the only place this plugin
+       * can decide it — the shell's layout is not ours to change.
+       */
+      page: {
+        padding: '24px 28px', maxWidth: 880, boxSizing: 'border-box',
+        height: '100%', minHeight: 0, overflowY: 'auto', overflowX: 'hidden',
+        display: 'flex', flexDirection: 'column', gap: 24,
+      },
       h1: { fontSize: 20, fontWeight: 600, margin: 0, color: 'var(--dsw-alias-label-primary)' },
       subtitle: { margin: '6px 0 0', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' },
       groupHeader: { display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 },
@@ -247,6 +277,187 @@ window.__ModuleLoader__.load({
       const at = order.indexOf(phase ?? '')
       return h('div', { style: styles.phases },
         order.map((id, index) => h('div', { key: id, style: styles.phase(index === at) }, T.phases[id] ?? id)))
+    }
+
+    /**
+     * The folder picker the shell asks for when a workspace is added.
+     *
+     * The shell's own picker browses **this** machine, so it can never name `/root/project`
+     * on a node. This replaces that dialog with one that first asks *which machine* and
+     * then browses that machine's folders — which is the whole point: adding a folder on a
+     * node has to feel like adding a folder here.
+     *
+     * It fills the same slot the shipped pickers fill, so the gesture is unchanged: the
+     * plus button next to Workspaces, or a new Session, opens it. Picking a path is the
+     * only thing this does; creating the workspace is the shell's job, which is why the
+     * answer is `onPicked(path)` and not an API call. A remote path is routed to its node
+     * by the Host half, so one callback covers both cases.
+     */
+    function WorkspaceFolderFlow(props) {
+      const open = props.open === true
+      const [nodes, setNodes] = useState([])
+      const [nodeId, setNodeId] = useState('')
+      const [listing, setListing] = useState(undefined)
+      const [error, setError] = useState(undefined)
+      const [loading, setLoading] = useState(false)
+      const [typed, setTyped] = useState('')
+
+      // Load the machine list when the dialog opens, not on mount: this component stays
+      // mounted for the whole Session, and polling a node list that nobody is looking at
+      // would be a request every two seconds for nothing.
+      useEffect(() => {
+        if (!open) return
+        let cancelled = false
+        void (async () => {
+          try {
+            const body = await api('/nodes')
+            if (cancelled) return
+            setNodes((body.nodes ?? []).filter(node => node.id !== undefined))
+          } catch {
+            // A node list that cannot be read must not block picking a local folder.
+          }
+        })()
+        return () => { cancelled = true }
+      }, [open])
+
+      const browse = useCallback(async (target, dir) => {
+        setLoading(true)
+        setError(undefined)
+        try {
+          const query = new URLSearchParams()
+          if (target !== '') query.set('node', target)
+          if (dir !== '') query.set('path', dir)
+          const body = await api(`/browse?${query.toString()}`)
+          setListing(body)
+          setTyped('')
+        } catch (failure) {
+          setError(failure.message)
+        } finally {
+          setLoading(false)
+        }
+      }, [])
+
+      // Opening the dialog lands on the chosen machine's home directory: that is where a
+      // person's projects are on either side, and asking them to type a path first would
+      // make the remote case feel different from the local one again.
+      useEffect(() => {
+        if (!open) return
+        setListing(undefined)
+        setError(undefined)
+        void browse(nodeId, '')
+      }, [open, nodeId, browse])
+
+      if (!open) return null
+
+      const current = listing?.path ?? ''
+      const pick = async () => {
+        if (current.length === 0) return
+        setError(undefined)
+        try {
+          // The shell creates the workspace and reports its own failure; this dialog's job
+          // ends at naming a directory.
+          props.onPicked?.(current)
+        } catch (failure) {
+          setError(failure instanceof Error ? failure.message : String(failure))
+        }
+      }
+
+      const goTyped = event => {
+        event.preventDefault()
+        if (typed.trim().length === 0) return
+        void browse(nodeId, typed.trim())
+      }
+
+      const nodeOptions = [{ id: '', label: T.thisMachine }, ...nodes.map(node => ({
+        id: node.id,
+        label: `${node.name} · ${node.host}`,
+      }))]
+
+      const overlay = {
+        position: 'fixed', inset: 0, zIndex: 60, display: 'flex',
+        alignItems: 'center', justifyContent: 'center',
+        background: 'color-mix(in srgb, var(--dsw-alias-bg-base) 62%, transparent)',
+      }
+      const dialog = {
+        width: 'min(560px, calc(100vw - 32px))', maxHeight: 'min(560px, calc(100vh - 64px))',
+        display: 'flex', flexDirection: 'column', gap: 12, padding: 18,
+        background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
+        border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 12,
+        boxShadow: 'var(--dsw-shadow-lg, 0 18px 48px rgba(0,0,0,0.28))',
+      }
+      const rowStyle = {
+        display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', width: '100%',
+        boxSizing: 'border-box', textAlign: 'left', cursor: 'pointer',
+        appearance: 'none', background: 'transparent', border: 'none', borderRadius: 6,
+        color: 'var(--dsw-alias-label-primary)', fontSize: 13,
+      }
+
+      return h('div', { style: overlay, role: 'dialog', 'aria-label': T.pickFolder },
+        h('div', { style: dialog },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
+            h('h2', { style: { margin: 0, fontSize: 15, fontWeight: 600 } }, T.pickFolder),
+            h('button', {
+              type: 'button',
+              style: { ...styles.link, marginLeft: 'auto' },
+              onClick: () => props.onCancel?.(),
+            }, T.cancel)),
+
+          // Machine first, folder second: that is the one extra decision a remote
+          // workspace needs, and it is why the local picker could not do this job.
+          h('label', { style: styles.field },
+            h('span', { style: styles.label }, T.machine),
+            h('select', {
+              style: { ...styles.input, cursor: 'pointer' },
+              value: nodeId,
+              disabled: loading,
+              onChange: event => setNodeId(event.target.value),
+            }, nodeOptions.map(option => h('option', { key: option.id, value: option.id }, option.label)))),
+
+          h('form', { style: { display: 'flex', gap: 8 }, onSubmit: goTyped },
+            h('button', {
+              type: 'button',
+              style: { ...styles.button, flex: '0 0 auto' },
+              disabled: listing?.parent === undefined || loading,
+              onClick: () => { if (listing?.parent !== undefined) void browse(nodeId, listing.parent) },
+            }, T.up),
+            h('input', {
+              style: { ...styles.input, flex: '1 1 auto', fontFamily: 'var(--dsw-alias-font-code, ui-monospace, monospace)', fontSize: 12 },
+              placeholder: current.length === 0 ? T.pathPlaceholder : current,
+              value: typed,
+              onChange: event => setTyped(event.target.value),
+            }),
+            h('button', { type: 'submit', style: { ...styles.button, flex: '0 0 auto' }, disabled: loading }, T.go)),
+
+          h('div', {
+            style: {
+              flex: '1 1 auto', minHeight: 120, maxHeight: 260, overflowY: 'auto',
+              border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8, padding: 4,
+            },
+          },
+          loading
+            ? h('div', { style: styles.empty }, T.loading)
+            : (listing?.entries ?? []).length === 0
+              ? h('div', { style: styles.empty }, T.noFolders)
+              : (listing?.entries ?? []).map(entry => h('button', {
+                  key: entry.path,
+                  type: 'button',
+                  style: rowStyle,
+                  onDoubleClick: () => void browse(nodeId, entry.path),
+                  onClick: () => void browse(nodeId, entry.path),
+                }, h('span', { 'aria-hidden': true, style: { opacity: 0.6 } }, '📁'), entry.name))),
+
+          listing?.truncated === true ? h('p', { style: styles.groupHint }, T.truncated) : null,
+          error !== undefined ? h('div', { style: { ...styles.errorBar, margin: 0 } }, error) : null,
+
+          h('div', { style: { ...styles.actions, marginTop: 'auto' } },
+            h('button', { type: 'button', style: styles.button, onClick: () => props.onCancel?.() }, T.cancel),
+            h('button', {
+              type: 'button',
+              style: { ...styles.buttonPrimary, ...(current.length === 0 ? styles.buttonDisabled : {}) },
+              disabled: current.length === 0,
+              onClick: () => { void pick() },
+            }, T.addWorkspace))),
+      )
     }
 
     /** Add one directory on a node as a workspace. */
@@ -541,17 +752,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Per-plugin "send to nodes" switches.
+     * Per-plugin "send to nodes" switches — one row per plugin you installed.
      *
-     * Two facts per row, and the UI shows both because they answer different
-     * questions: the switch is what a node would load, and the note says *why* it is
-     * where it is. A row that is off because it drives a browser window is not a
-     * decision the user made, so it must not look like one — otherwise every fresh
-     * install looks like it is hiding sixty mistakes.
+     * The row is a **bundle**, because that is the unit both sides understand: this
+     * desktop's profile lists bundles, and a node composes a bundle list. An earlier
+     * version listed every internal row this desktop composes (207 of them), which
+     * described the composition instead of offering a decision — no one installs
+     * `tool-result-pruner`, they install a plugin.
+     *
+     * Two facts per row: the switch (what a node loads) and where it is on this machine
+     * (loaded, or merely downloaded). The second is what makes "off" honest rather than
+     * looking like a mistake.
      */
     function PluginSyncSection() {
       const [rows, setRows] = useState(undefined)
       const [error, setError] = useState(undefined)
+      const [note, setNote] = useState(undefined)
       const [busy, setBusy] = useState(undefined)
 
       const load = useCallback(async () => {
@@ -569,14 +785,30 @@ window.__ModuleLoader__.load({
       }, [load])
 
       const toggle = async row => {
-        setBusy(row.id)
+        setBusy(row.bundle)
+        setNote(undefined)
         try {
-          const body = await api(`/plugins/${encodeURIComponent(row.id)}`, {
+          const body = await api(`/plugins/${encodeURIComponent(row.bundle)}`, {
             method: 'POST',
             body: JSON.stringify({ sync: !row.sync }),
           })
-          setRows(current => (current ?? []).map(entry => (entry.id === row.id ? body.row : entry)))
+          setRows(current => (current ?? []).map(entry => (entry.bundle === row.bundle ? body.row : entry)))
           setError(undefined)
+          // The node's answer is the outcome, not the click: switching a plugin on installs
+          // a package over SSH, and that can fail on the node's own registry. Reporting
+          // "saved" while the node composes nothing is the bug this surface prevents.
+          const reached = body.nodes ?? []
+          const failed = reached.filter(report => report.error !== undefined
+            || (report.plugins?.failed?.length ?? 0) > 0)
+          if (failed.length > 0) {
+            setError(failed.map(report => `${report.name}: ${report.error
+              ?? report.plugins.failed.map(failure => `${failure.bundle} — ${failure.reason}`).join('; ')}`)
+              .join('\n'))
+          } else if (reached.length === 0) {
+            setNote(T.pluginNoNodes)
+          } else {
+            setNote(`${T.pluginApplied}: ${reached.map(report => report.name).join(', ')}`)
+          }
         } catch (failure) {
           setError(failure.message)
         } finally {
@@ -584,36 +816,32 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const note = row => {
-        if (row.locked) return T.pluginLocked
-        // A brain loads dsh-base + its own bundle, so every dsh-web-app UI row is simply
-        // absent there. Shown, because "this desktop runs it, the node does not" is the
-        // honest answer, but not switchable: there is nothing on the node to switch.
-        if (row.present === false) return T.pluginAbsent
-        if (row.source === 'explicit') return row.sync ? T.pluginSetOn : T.pluginSetOff
-        return row.sync ? T.pluginDefaultOn : T.pluginDefaultOff
+      const detail = row => {
+        const parts = []
+        if (row.spec.length > 0) parts.push(row.spec)
+        if (row.rows.length > 0) parts.push(T.pluginRows(row.rows.length))
+        parts.push(row.loaded ? T.pluginLoaded : T.pluginInstalledOnly)
+        return parts.join(' · ')
       }
 
       const rowNode = (row, index) => h('div', {
-        key: row.id,
+        key: row.bundle,
         style: { ...styles.workspaceRow, ...(index === 0 ? styles.rowFirst : {}) },
       },
       h('label', {
-        style: {
-          display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto',
-          minWidth: 0, cursor: row.locked ? 'default' : 'pointer',
-        },
+        style: { display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto', minWidth: 0, cursor: 'pointer' },
       },
       h('input', {
         type: 'checkbox',
         checked: row.sync === true,
-        disabled: row.locked === true || row.present === false || busy === row.id,
+        disabled: busy === row.bundle,
         onChange: () => { void toggle(row) },
       }),
       h('span', { style: styles.grow },
-        h('div', { style: styles.name }, row.id),
-        h('div', { style: styles.meta }, `${row.name} · ${note(row)}`)),
-      ))
+        h('div', { style: styles.name }, row.bundle),
+        // `title` keeps the version and row count readable without wrapping the row.
+        h('div', { style: styles.meta, title: detail(row) }, detail(row)))),
+      busy === row.bundle ? h('span', { style: styles.meta }, '…') : null)
 
       return h('section', null,
         h('div', { style: styles.groupHeader },
@@ -622,9 +850,14 @@ window.__ModuleLoader__.load({
         error !== undefined
           ? h('div', { style: { ...styles.errorBar, margin: '0 0 10px' } }, error)
           : null,
+        note !== undefined
+          ? h('p', { style: { ...styles.groupHint, margin: '0 0 10px' } }, note)
+          : null,
         rows === undefined
           ? h('div', { style: { ...styles.list, ...styles.empty } }, T.pluginFailed)
-          : h('div', { style: styles.list }, rows.map(rowNode)),
+          : rows.length === 0
+            ? h('div', { style: { ...styles.list, ...styles.empty } }, T.pluginsNone)
+            : h('div', { style: styles.list }, rows.map(rowNode)),
       )
     }
 
@@ -760,6 +993,19 @@ window.__ModuleLoader__.load({
             name: 'main',
             key: 'fleet',
           }, PanelPage))
+
+          // Occupying the shell's folder-picker slots is what makes a remote folder
+          // reachable at all: the shipped pickers browse this machine only, so they can
+          // never name a directory on a node. Registering here replaces the dialog for
+          // every entry point at once — the sidebar's plus button, the new-Session flow,
+          // and the workspace picker — without touching any of them.
+          for (const slot of [
+            'sidebar.workspaces.directoryFlow',
+            'conversation.hero.workspace.directoryFlow',
+            'workspace.picker.directoryFlow',
+          ]) {
+            ctx.slots.inject(slot, () => ctx.slots.register({ name: slot }, WorkspaceFolderFlow))
+          }
         }
       },
     }

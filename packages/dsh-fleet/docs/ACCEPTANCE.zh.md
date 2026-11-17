@@ -12,7 +12,7 @@
 node packages/dsh-fleet/test/run-all.mjs
 ```
 
-它会自己启动一个 `--profile fleettest` 的 Host、连上已记录的节点，按三层跑完全部 22 个套件，
+它会自己启动一个 `--profile fleettest` 的 Host、连上已记录的节点，按三层跑完全部 24 个套件，
 每个套件一行结论，失败的附最后几行输出与完整日志路径。**任何一层失败都以非零退出**。
 
 ```powershell
@@ -32,8 +32,10 @@ node packages/dsh-fleet/test/run-all.mjs --host <base> --token <t>   # 复用已
 | Chrome 调试端口 | `DSH_BROWSER_DEBUG_PORT`（默认 9222，需以 `--remote-debugging-port` 启动） | 只有 `browser` 一个套件 SKIP |
 | 节点上的 Release 制品 | 已发布的 `v<版本>` | 只有 `artefact` 一个套件 SKIP（可 `--skip artefact`） |
 
-套件可以自己声明"这台部署跑不了"并退出码 3，runner 会把它记成 SKIP 而不是 PASS —— 目前只有
-`approval` 用它：节点被设成 `danger-full-access` 时根本不会发审批请求，硬跑只会是一串空断言。
+套件可以自己声明"这台部署跑不了"并退出码 3，runner 会把它记成 SKIP 而不是 PASS —— 目前用在三处：
+`approval` 在节点被设成 `danger-full-access` 时根本不会发审批请求，硬跑只会是一串空断言；
+`browser` 在没有 Chrome 调试端口时连不上页面，只会在抓取处抛 `ECONNREFUSED`；
+`plugin-switch` 在本机没装任何第三方插件时没有可切换的对象。
 
 ## 0. 前置
 
@@ -184,15 +186,58 @@ $env:ELECTRON_RUN_AS_NODE = "1"
 
 期望与判据：
 
-1. 每个插件一行，显示开关状态和**来源**（默认开 / 默认关 / 手动开 / 手动关 / 结构行锁定）；
-2. 关掉一个纯工具插件，已连接节点的 profile patch 立刻多出对应的 `- id:` + `disabled: true`；
-3. 节点组合里必须存在的行（`web`、`webserver`、`web-startup`、`brain-runtime`）**不可关**，
-   手动关掉它们会让节点起不来或没有 HTTP 服务（实测）；
-4. 把开关拨回默认值，`$DSH_HOME/fleet/plugins.json` 里那条记录被删掉，而不是存成同值。
+1. 列表的单位是**你自己装的插件**，不是内部行：`@local/dsh-rhino-mode`、`dsh-pet`、
+   `dsh-whale-widget`、`ds-harness-remote`、`@artenx/dshb` 之类，一行一个，行里带版本/范围、
+   它贡献多少行、以及「本机已加载」还是「本机已安装但不在组合里」；
+2. `@deepseek-ai/*` 与大脑 bundle 不出现 —— 它们是产品本身，不是选项；
+3. 默认**全部关闭**：节点是另一台机器，仅仅因为本机装了就把插件发过去，等于没有决定；
+4. 打开一个开关后，那一行必须真的落地，四条都要成立：
+   - 节点 `~/.dsh/profiles/fleet/package.json` 的 `dependencies` 多出这个包，
+     `node_modules/<包>` 真的存在；
+   - `dsh.profile.bundles` 变成 **base → 你打开的插件 → `@local/dsh-fleet-brain`**；
+   - 常驻 host 被重启且 `session/list` 还能答（切换后 `/fleet/api/workspaces` 仍有远程工区）；
+   - 接口返回里带每个节点的原文结果，节点没接受就带 `warning`，页面把节点的话显示出来；
+5. 关掉开关：包从 bundle 列表移除，节点重启，工区照旧；
+6. 把开关拨回默认值，profile 目录里的 `fleet-plugins.json` 那条记录被删掉，而不是存成同值
+   （存 `$DSH_HOME` 会让 `desktop` 与 `fleettest` 互相影响，所以现在的路径是 **profile 内**）；
+7. 页面本身能滚动：整页高于窗口时出现滚动条。实测过 `mainPanel` 1026px 高、内容 10658px，
+   而 `centerCol` 是 `overflow: hidden` —— 页面必须自己持有滚动条，否则最下面那段永远看不到。
 
 ```powershell
-node packages\dsh-fleet\test\version-unit.mjs
+node packages\dsh-fleet\test\version-unit.mjs       # 开关语义（哪些算第三方、默认关、顺序、容错）
+node packages\dsh-fleet\test\run-all.mjs --layer e2e --only plugin-switch  # 真的落到节点并重启
 ```
+
+## 7b. 加工作区：先选机器，再选目录
+
+人工：左侧栏「工作区」旁的点号 → 添加工作区；或在会话里新建会话。
+
+期望与判据：
+
+1. 弹出的是**本项目的**目录对话框（标题「选择工作区文件夹」），不是系统的原生选择框；
+2. 第一个下拉是「在哪台机器上」，选项是「本机」+ 每个节点（名字 · 主机）；
+3. 选「本机」列的是本机目录；选节点列的是**节点上的**目录（`/root` 下的真实名字），
+   上一级/打开/直接输路径都能用，路径栏显示的是节点上的绝对路径；
+4. 选中后点「加入工作区」，侧栏立刻出现这个工区，`/fleet/api/workspaces` 里有
+   `fleet_<nodeId>_…` 行且 `path` 是节点路径；
+5. 进那个工区新建会话，会话 `cwd` 是节点路径 —— 与本地工区的操作完全相同。
+
+失败先看：`GET /fleet/api/browse?node=<id>&path=` 的返回；节点未连接时该接口报
+`this node has no stored password` 之类的 SSH 原文，而不是空列表。
+
+```powershell
+node packages\dsh-fleet\test\workspace-browse.mjs <base> <token>
+```
+
+判据与脚本的对应关系（脚本只是固定手势，标准以本条为准）：
+
+| 判据 | 脚本里对应的断言 |
+|---|---|
+| 1 是本项目的对话框 | `client-bundle.mjs`：三个 `*.directoryFlow` 插槽都注册且渲染 |
+| 2 先选机器 | 下拉第一项 `''`＝本机，其余是节点（`名字 · 主机`） |
+| 3 列的是节点的盘 | `workspace-browse.mjs`：节点那一路的 `nodeId` 就是被选中的节点、`home` 是节点上的 `/root`、`/` 没有上级、隐藏目录不出现、不存在的目录带 shell 原文 |
+| 4 选中即落地 | 同脚本：POST 后返回 `fleet_<nodeId>_…` 身份 + 节点绝对 `path`，且出现在 `workspace/follow` 的合并 baseline 里 |
+| 5 与本地操作相同 | 同脚本：同一目录再选一次是幂等的（同一个 workspaceId），相对路径被 400 拒绝 |
 
 ## 8. 纯逻辑与契约层（每次改代码都要跑）
 
@@ -223,7 +268,7 @@ node packages\dsh-fleet\test\multi-node-acceptance.mjs <base> <token>
 
 ## 判定
 
-- 第 1–7 节全部通过才算「能用」。任何一条失败都要先复现、留证据、写出可证伪的假设，再改。
+- 第 1–7b 节全部通过才算「能用」。任何一条失败都要先复现、留证据、写出可证伪的假设，再改。
 - 退出码 0 只证明那一层；构建通过不代表界面正确，单测通过不代表端到端可用。
 - 跑不了的项必须写明原因与替代证据，不许隐瞒。
 - 每轮验收后把失败项、修复、重跑结果追加到本文档末尾的「验收记录」。
@@ -240,7 +285,7 @@ node packages\dsh-fleet\test\multi-node-acceptance.mjs <base> <token>
 | 4 审批/提问 | 通过 | `waterfall-unit` 7 段全过（允许的才转发、拒绝/超时各自结算、断线取消卡片、问题按自己名字转发）；`approval-acceptance` 在真节点上走完整条链：节点 `approval/asked` → 本机 `waterfall` 帧带着包裹后的 agentId → 答复 `$events/result` → 节点 `approval/decided=allowed-once` → 文件真的写出来；第二次改成拒绝，节点记 `rejected` 且文件不存在；`ask_user_question` 用 `{answers:[{id,selected}]}` 批量答复，节点的工具结果原样回带 `red` |
 | 5 多节点 | 通过 | 同一机器两个 `remoteRoot` 同时 connected；两边工区 id 唯一；各建 Session 前缀各自 nodeId、读回落到正确节点；合并列表两行；移除一台不影响另一台 |
 | 6 版本闸门 | 通过 | `version-unit` 全过；`artefact-acceptance` 在真节点 8 秒装完 832MiB、原生包 `sherpa-onnx-linux-x64`/`sharp-linux-x64`（无 win-x64）、二次安装与回滚均通过；实测一台 3.9GB 的旧树被替换成 832MiB |
-| 7 插件开关 | 通过 | 207 行中，节点组合里真的有的 133 行默认开、其余 74 行标为「节点不加载」且不可开关；把 `plan-mode` 关掉后节点 patch 出现对应 disabled 条目、拨回默认即消失；14 个结构行（HTTP 服务 + Remote API 控制器/传输）不可关闭 —— 实测关掉要么 `1 required plugin did not activate`，要么节点活着但 `session/list` 不存在 |
+| 7 插件开关 | **已被取代** | 当时的设计是"把节点组合里 133 行逐行做成开关"；实际用不了 —— 用户要的是"我自己装的第三方插件可选"，不是看内部行。现设计见下一节的记录与 §7 判据：单位是 bundle，默认全关 |
 | 8 纯逻辑 | 通过 | routing-unit / multipart-unit / provision-unit / waterfall-unit / version-unit / dispatch-seam / upstream-smoke / descriptor-smoke |
 | 9 端到端 | 通过 | workspace-flow / host-routing / tool-parity / tool-git-image / client-bundle / event-relay / gateway-smoke / session / terminal / multi-node / artefact / browser / approval |
 
@@ -268,3 +313,51 @@ runner 自己的三条硬约束（都实测过会踩）：
   "the layer that proves a user can work was not exercised"。
 - **SKIP 必须带原因。** 缺节点凭据、缺 Chrome 端口、节点无 Release 制品、节点被设成
   `danger-full-access` 不会发审批请求 —— 四种都报告原因，不写成通过。
+
+### 2026-11-17 · 一条命令跑完 24 个套件
+
+`node test/run-all.mjs` 在 `fleettest` + 真节点（`probe-93`，linux-x64）上跑出
+**24 passed, 0 failed, 0 skipped in 247.5s**：
+
+| 层 | 套件 |
+|---|---|
+| offline（6） | routing / multipart / provision / waterfall / version / composition |
+| contract（3） | descriptor / dispatch / upstream（都走 Electron 的 Node 读 `app.asar`） |
+| e2e（15） | gateway / host-routing / workspace-flow / workspace-browse / plugin-switch / tool-parity / tool-git-image / client-bundle / event-relay / session / terminal / multi-node / artefact / approval / browser |
+
+本轮新增的两个套件（§7 与 §7b 的判据各有一份）：
+
+- `workspace-browse.mjs`：本机与节点用同一形状回答、节点列的是节点的盘（`/` 没有上级、
+  隐藏目录不列、不存在的目录带 shell 原文）、选中的节点目录变成带包裹身份的工区、同一
+  目录再选一次幂等、相对路径 400。
+- `plugin-switch.mjs`：单个开关真的落到节点（包被安装或复制、bundle 列表排在脑 bundle
+  之前、包真的存在），**并且重启之后浏览器那一路流还活着** —— 这条是补上的，理由见下。
+
+本轮修掉的问题（都是"页面看着正常、实际已经不工作"，只有真实会话能抓到）：
+
+1. **插件开关把大脑 bundle 剪掉了。** `npm install` 会剪掉 profile `dependencies` 里没有的
+   包，而脑 bundle 是复制进去的、不在 `dependencies` 里。实测症状：节点报
+   `cannot resolve profile bundle "@local/dsh-fleet-brain"`，宿主起不来。改成两家都写：先
+   `npm install`（发布型插件），再写脑 bundle，最后写 bundle 列表。同一处还有第二半 ——
+   本地 `link:` 插件根本没有 registry 条目，`npm install @local/x` 在节点上必然 404，所以
+   它走"逐文件复制到 profile"，且必须在 npm **之后**，否则会被下一次安装剪掉。
+2. **重启之后本机以为节点还有事件流。** 常驻 host 一重启（插件开关必然重启它），网关的
+   载体和所有逻辑流一起断，但 `RemoteEvents` / `RemoteControl` / `RemoteWorkspaces` 里的
+   节点条目还在 Map 里；`sync()` 只判断"这个节点在不在 Map 里"，于是永远不重开。更隐蔽的
+   是那条死 socket **仍然可写**：`session/follow` 打开成功、一帧都收不到，比报错更像"节点
+   没输出"。实测症状：`tool-parity` 等一个已经跑完的回合等了 7 分钟（`0 frames`）、
+   `event-relay` 收不到任何 `api-session/*`、审批卡在本机点了通过而节点从没收到答案。
+   修法是三层：重启方调 `gateway.reset()`（作废载体与逻辑流，并用代号让旧 socket 迟到的
+   `close` 不再清掉新载体）；每条流 `onEnd`/失败时调 `gateway.revive()`（延迟 1 秒、最多 8
+   次）；升级被 401 拒绝时重新换 cookie（重启后的宿主发新 cookie）。
+3. **审批答复在重启后被丢弃。** `NodeWaterfalls.closed` 一旦置位就再没复位，重开的流虽然
+   通过 `ready(clientId)` 送来了新的 generation，`relay()` 里的 `if (this.closed) return` 仍然
+   把答复吞掉 —— 表现为"本机接受了答复、节点没记录"。`ready()` 现在会清掉 `closed`。
+4. **远程投影块只活到节点重启。** 节点 `session/control` 的 baseline 取的是它**内存里活着的**
+   Session；远程会话在节点上不常驻，重启后 baseline 就是 `{}`，转发它等于"远程投影消失"。
+   `RemoteControl` 改成自己攒一份：首帧见到某个 Session 就建块、按 `changes` 逐键合并、
+   `asOfSeq` 跟着 `seq` 走。`event-relay` 判据也随之改成"**之后**连上的客户端能在
+   baseline 里看到这个会话"，而不是"开流那一帧里必须有它" —— 后者取决于拍快照的瞬间节点
+   内存里有什么，与中继正确性无关。
+5. **没有 Chrome 时 `browser` 套件抛 `ECONNREFUSED`。** 它本该是 SKIP（退出码 3 + 原因），
+   现在连不上调试端口就报 SKIP 并给出启动命令，而不是把一次成功的全量验收变成红。

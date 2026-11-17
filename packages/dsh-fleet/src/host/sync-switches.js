@@ -1,67 +1,61 @@
 /**
- * Per-plugin "send this to nodes" switches, persisted beside the node registry.
+ * Which of your installed plugins a node should load, and the switches that decide it.
  *
- * The decision *what* a switch means lives in `src/core/plugin-sync.js`; this is the
- * part that owns a file and the list of rows those switches apply to.
- *
- * Rows come from the Host's own `configEditor.configuration()`, the same source
- * `Provisioner` reads for the model roster. That is deliberate: the switch list has to
- * describe what this desktop actually composes, and a hard-coded list would be wrong
- * after the first upgrade.
+ * The decision *what* a switch means lives in `src/core/plugin-sync.js`; this owns the
+ * facts about this desktop (its profile manifest and its installed packages) and the file
+ * that remembers the answers.
  *
  * @module @local/dsh-fleet/host/sync-switches
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
-  parsePatchRowIds,
+  installedPlugins,
+  isLocalSpec,
   parseSwitches,
-  renderSyncBlock,
-  resolveSwitches,
-  rowsToDisable,
+  resolvePlugins,
+  nodeBundles,
 } from '../core/plugin-sync.js'
-import { BRAIN_FILES } from './brain-bundle.generated.js'
-
-/** Rows that are the node's own composition: never switchable. */
-const PROTECTED = Object.freeze(['web-runtime', 'brain-runtime'])
-
-/** Upstream bundles a node loads, whose rows are therefore always present. */
-const UPSTREAM_BUNDLES = Object.freeze(['dsh-base'])
 
 /**
- * The row ids a node's composition contains, out of the **installed** release.
+ * The bundles a node composes by construction, in compose order.
  *
- * A node composes two bundles: `@deepseek-ai/dsh-base` (upstream) and
- * `@local/dsh-fleet-brain` (this plugin's patch). Both contribute rows, and a row of
- * either must never be disabled — the brain is a *subtraction* from `dsh-web-app`, not
- * from `dsh-base`, so every service `dsh-base` provides is still there and other kept
- * rows inject it.
- *
- * Reading `dsh-base` from `DSH_INSTALL_DIR` rather than embedding a copy is deliberate:
- * the composition has to describe the release this desktop actually runs, and a list
- * compiled into the plugin would be wrong the first time upstream adds a row.
- *
- * @returns {string[]} row ids from both bundles, deduplicated.
+ * Exported because the connect path builds the node's profile from the switches **and**
+ * from this list, and the two have to agree about which entry is the brain.
  */
-function requiredRows() {
-  const ids = [...parsePatchRowIds(BRAIN_FILES['cordis.patch.yml'] ?? '')]
-  const installDir = process.env.DSH_INSTALL_DIR
-  if (typeof installDir === 'string' && installDir.length > 0) {
-    // `DSH_INSTALL_DIR` is `<app>/dsh/node_modules/@deepseek-ai/dsh`, so one level up is
-    // the `@deepseek-ai` directory this release's own bundles sit in.
-    const scopeDir = join(installDir, '..')
-    for (const bundle of UPSTREAM_BUNDLES) {
-      let text
-      try {
-        text = readFileSync(join(scopeDir, bundle, 'cordis.patch.yml'), 'utf8')
-      } catch {
-        // A bundle this plugin cannot read is reported, not guessed at: it means the
-        // install layout changed, and silently locking fewer rows would take a node
-        // down later with an error that names no switch.
-        continue
-      }
-      for (const id of parsePatchRowIds(text)) if (!ids.includes(id)) ids.push(id)
-    }
+export const NODE_BASE_BUNDLES = Object.freeze(['@deepseek-ai/dsh-base', '@local/dsh-fleet-brain'])
+
+/**
+ * The row ids one installed bundle contributes.
+ *
+ * Used to show a person what a switch actually brings, and to refuse a switch that would
+ * contribute nothing. Reads the bundle's own `cordis.patch.yml` through its manifest's
+ * `dsh.bundle.patch`, so it needs no list of package names.
+ *
+ * @param {string} nodeModules - where this profile's packages are installed.
+ * @param {string} name
+ * @returns {string[]}
+ */
+function rowsOfBundle(nodeModules, name) {
+  const dir = join(nodeModules, name)
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+  } catch {
+    return []
+  }
+  const relative = manifest?.dsh?.bundle?.patch
+  if (typeof relative !== 'string') return []
+  let text
+  try {
+    text = readFileSync(join(dir, relative), 'utf8')
+  } catch {
+    return []
+  }
+  const ids = []
+  for (const line of text.split('\n')) {
+    const match = /^\s*-\s*id:\s*(\S+)\s*$/u.exec(line)
+    if (match !== null && !ids.includes(match[1])) ids.push(match[1])
   }
   return ids
 }
@@ -69,26 +63,39 @@ function requiredRows() {
 export class SyncSwitches {
   /**
    * @param {object} options
-   * @param {string} options.home - `$DSH_HOME`.
-   * @param {() => object | undefined} options.configEditor - the local config editor.
-   * @param {readonly string[]} [options.required] - row ids the node composition contains.
+   * @param {string} options.home - `$DSH_HOME`, used when the profile is not known yet.
+   * @param {() => string | undefined} options.profileDir - this desktop's profile
+   *   directory, where its manifest and installed packages live.
    * @param {(message: string) => void} [options.log]
    */
   constructor(options) {
-    this.path = join(options.home, 'fleet', 'plugins.json')
-    this.configEditor = options.configEditor
-    this.required = options.required ?? requiredRows()
+    this.home = options.home
+    this.profileDir = options.profileDir
     this.log = options.log ?? (() => {})
     /** @type {Record<string, { sync: boolean }>} */
     this.overrides = this.#read()
+  }
+
+  /**
+   * Where the decisions live.
+   *
+   * Inside the profile, not `$DSH_HOME`: the switches describe *this* composition, and two
+   * profiles under one home (`desktop`, `fleettest`) have different plugin sets. Storing it
+   * under the home would make one profile's choice govern the other's nodes.
+   */
+  get path() {
+    const dir = this.profileDir()
+    return typeof dir === 'string' && dir.length > 0
+      ? join(dir, 'fleet-plugins.json')
+      : join(this.home, 'fleet', 'plugins.json')
   }
 
   #read() {
     try {
       return parseSwitches(JSON.parse(readFileSync(this.path, 'utf8')))
     } catch {
-      // A missing or unreadable file means "no opinions yet", which is exactly the
-      // state a fresh install is in. It is not an error to report.
+      // A missing or unreadable file means "no opinions yet", which is exactly the state
+      // a fresh install is in. It is not an error to report.
       return {}
     }
   }
@@ -102,74 +109,135 @@ export class SyncSwitches {
     }
   }
 
-  /** Every row this desktop composes, whether or not it can be switched. */
-  rows() {
-    const editor = this.configEditor()
-    if (editor === undefined || typeof editor.configuration !== 'function') return []
-    const out = []
-    for (const row of editor.configuration()) {
-      const id = row.entry?.options?.id
-      const name = row.entry?.options?.name
-      if (typeof id !== 'string' || typeof name !== 'string') continue
-      out.push({ id, name })
-    }
-    return out
+  /** This desktop's profile directory, if the Host knows it yet. */
+  #dir() {
+    const dir = this.profileDir()
+    return typeof dir === 'string' && dir.length > 0 && existsSync(dir) ? dir : undefined
   }
 
-  /** Every row with its effective switch and where that answer came from. */
+  /** The manifest that says what this desktop installed and loads. */
+  manifest() {
+    const dir = this.#dir()
+    if (dir === undefined) return undefined
+    try {
+      return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The third-party plugins this desktop installed, in profile order. */
+  plugins() {
+    const dir = this.#dir()
+    if (dir === undefined) return []
+    const nodeModules = join(dir, 'node_modules')
+    return installedPlugins(this.manifest(), name => rowsOfBundle(nodeModules, name))
+  }
+
+  /** Every plugin with its effective switch and where that answer came from. */
   list() {
-    const resolved = resolveSwitches(this.rows(), this.overrides, this.required)
-    return resolved.map(row => ({
-      ...row,
-      // The node's own composition is shown but not switchable: turning it off would
-      // leave a node that starts and does nothing, or does not start at all.
-      locked: row.locked === true || PROTECTED.includes(row.id),
-    }))
+    return resolvePlugins(this.plugins(), this.overrides)
   }
 
   /**
    * Record one decision.
    *
-   * Setting a switch back to its default removes the override instead of storing the
-   * same value twice — that keeps the file meaning "what I changed", so an upgrade
-   * that flips a default still reaches the user who never touched it.
-   * @param {string} rowId
+   * Setting a switch back to its default removes the override instead of storing the same
+   * value twice — that keeps the file meaning "what I changed", so an upgrade that flips a
+   * default still reaches the user who never touched it.
+   * @param {string} bundle
    * @param {boolean} sync
    */
-  set(rowId, sync) {
-    const rows = this.rows()
-    if (!rows.some(row => row.id === rowId)) {
-      throw Object.assign(new Error(`no plugin row ${rowId} on this desktop`), { code: 'row-not-found' })
-    }
-    if (PROTECTED.includes(rowId)) {
+  set(bundle, sync) {
+    if (!this.plugins().some(plugin => plugin.bundle === bundle)) {
       throw Object.assign(
-        new Error(`${rowId} is what makes a node a node; it cannot be switched off`),
-        { code: 'row-protected' },
+        new Error(`${bundle} is not a plugin this desktop installed`),
+        { code: 'plugin-not-found' },
       )
     }
-    const verdict = resolveSwitches([rows.find(row => row.id === rowId)], {}, this.required)
-      .find(row => row.id === rowId)
-    if (verdict !== undefined && verdict.sync === sync) delete this.overrides[rowId]
-    else this.overrides[rowId] = { sync }
+    if (sync === false) delete this.overrides[bundle]
+    else this.overrides[bundle] = { sync }
     this.#write()
-    return this.list().find(row => row.id === rowId)
+    return this.list().find(row => row.bundle === bundle)
   }
 
-  /** The rows a node must not load, in composition order. */
-  disabledRows() {
-    const keep = PROTECTED.filter(id => id !== 'web-runtime' && id !== 'brain-runtime')
-    return rowsToDisable(resolveSwitches(this.rows(), this.overrides, this.required), this.required, keep)
+  /** The node's full bundle list: this desktop's choice plus the brain by construction. */
+  nodeBundles(base = NODE_BASE_BUNDLES) {
+    return nodeBundles(base, this.list())
   }
 
   /**
-   * The patch block that removes those rows on the node.
+   * The install spec for one plugin, as this desktop's manifest recorded it.
    *
-   * Rendered into the node's own profile patch, which the resident host hot-reloads —
-   * so flipping a switch reconfigures a running node without a restart. Only rows the
-   * composition contains are listed: everything else a node never loads, so naming it
-   * would be a decision about nothing.
+   * Reusing the desktop's own spec is what keeps both sides on the same release: a
+   * `^0.3.8` here means a node gets a compatible 0.3.x rather than whatever `latest` is
+   * by the time the switch is flipped.
+   * @param {string} bundle
+   * @returns {string | undefined}
    */
-  render() {
-    return renderSyncBlock(resolveSwitches(this.rows(), this.overrides, this.required), this.required, [])
+  specOf(bundle) {
+    const dependencies = this.manifest()?.dependencies
+    const spec = dependencies === null || typeof dependencies !== 'object' ? undefined : dependencies[bundle]
+    return typeof spec === 'string' && spec.length > 0 ? spec : undefined
+  }
+
+  /**
+   * Whether this plugin is a directory on this machine rather than something npm has.
+   *
+   * The rule lives in `core/plugin-sync.js` with the other decisions about what a switch
+   * means; this only supplies the spec. Getting it wrong is expensive in a specific way:
+   * a local bundle treated as published makes the node run `npm install @local/x`, which
+   * is a guaranteed 404.
+   * @param {string} bundle
+   * @returns {boolean}
+   */
+  isLocal(bundle) {
+    return isLocalSpec(this.specOf(bundle))
+  }
+
+  /**
+   * Every file of a locally built plugin, as relative path → base64.
+   *
+   * `node_modules` is skipped: a local bundle's own dependencies are the node's problem
+   * (they install from the registry there), and shipping them would mean sending a tree
+   * that npm would immediately re-resolve anyway.
+   * @param {string} bundle
+   * @returns {Record<string, string>}
+   */
+  localFiles(bundle) {
+    const dir = this.#dir()
+    if (dir === undefined) return {}
+    const root = join(dir, 'node_modules', bundle)
+    /** @type {Record<string, string>} */
+    const files = {}
+    const walk = (current, prefix) => {
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === '.git') continue
+        const absolute = join(current, entry.name)
+        const relative = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`
+        if (entry.isDirectory()) { walk(absolute, relative); continue }
+        if (!entry.isFile()) continue
+        files[relative] = readFileSync(absolute).toString('base64')
+      }
+    }
+    try {
+      walk(root, '')
+    } catch (error) {
+      this.log(`fleet: could not read ${bundle} from ${root}: ${error.message}`)
+      return {}
+    }
+    return files
+  }
+
+  /**
+   * The plugins a node should be given, and the ones its switch asks to remove.
+   * @returns {{ install: Array<{ bundle: string, spec?: string }>, enabled: string[] }}
+   */
+  wanted() {
+    const rows = this.list().filter(row => row.sync === true)
+    return {
+      install: rows.map(row => (row.spec.length > 0 ? { bundle: row.bundle, spec: row.spec } : { bundle: row.bundle })),
+      enabled: rows.map(row => row.bundle),
+    }
   }
 }

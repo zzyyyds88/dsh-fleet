@@ -143,6 +143,9 @@ export class Fleet {
    * @param {object} options.credentials - `ctx.credentials`
    * @param {string} options.version - the DSH version this profile runs.
    * @param {() => object | undefined} [options.configEditor] - the live config editor, for provisioning.
+   * @param {() => readonly string[]} [options.nodeBundles] - the bundle list a node composes,
+   *   read at connect and sync time so a plugin switched on reaches a node without a restart.
+   * @param {() => { specOf: (bundle: string) => string | undefined, isLocal: (bundle: string) => boolean, localFiles: (bundle: string) => Record<string, string> } | undefined} [options.pluginSpecs] - where a plugin comes from and how it travels.
    * @param {(message: string) => void} [options.log]
    */
   constructor(options) {
@@ -152,8 +155,16 @@ export class Fleet {
     this.brainVersion = options.brainVersion ?? '0.0.0'
     /** GitHub accelerator for artefact downloads; empty means "go direct". */
     this.mirror = options.mirror
-    /** Rendered per-plugin disable block; empty when nothing is switched off. */
-    this.syncBlock = options.syncBlock ?? (() => '')
+    /**
+     * The bundle list a node composes.
+     *
+     * Read through a callback rather than captured: the third-party plugins a person
+     * switched on live outside this object, and a node that has been connected since
+     * before the switch must receive it on the next sync rather than on the next connect.
+     */
+    this.nodeBundles = options.nodeBundles ?? (() => BRAIN_BUNDLES)
+    /** Source of install specs for the switched-on plugins. */
+    this.pluginSpecs = options.pluginSpecs ?? (() => undefined)
     this.configEditor = options.configEditor ?? (() => undefined)
     this.credentials = options.credentials
     this.registry = new NodeRegistry()
@@ -297,15 +308,41 @@ export class Fleet {
             `resident DSH ${installedRuntime.version} installed (${installedRuntime.via})`,
           )
         }
-        // Customise the node BEFORE starting it: install the brain bundle where the
-        // Loader resolves bundles from, point the profile at it, and write the model
-        // overlay. All three have to be on disk for the host to load them, and a node
-        // that came up with the wrong composition would look healthy and then either
-        // serve a browser surface it has no use for or load no tools at all.
+        // Customise the node BEFORE starting it: install the plugins the user chose,
+        // restore the brain bundle, point the profile at the list, and write the model
+        // overlay. All of it has to be on disk for the host to load it, and a node that
+        // came up with the wrong composition would look healthy and then either serve a
+        // browser surface it has no use for or load no tools at all.
         runtime.phase = 'provision'
         this.#publish()
+        const wanted = [...this.nodeBundles()]
+        const extras = wanted.filter(name => name !== BRAIN_PACKAGE && name !== '@deepseek-ai/dsh-base')
+        // A bundle only composes when the Loader can resolve it from the profile, so the
+        // switched-on plugins have to exist on the node before the list names them. Doing
+        // it here (not in the settings handler) keeps "the node is connected" and "the node
+        // composes what the page says" the same fact.
+        /** @type {Array<{ bundle: string, reason: string }>} */
+        const unmet = []
+        if (extras.length > 0) {
+          const install = await this.#installPlugins(runtime, extras)
+          runtime.provision ??= {}
+          runtime.provision.plugins = { wanted: extras, ...install }
+          unmet.push(...install.failed)
+          for (const failure of install.failed) {
+            this.log(`[${runtime.record.name}] ${failure.bundle} was not installed: ${failure.reason}`)
+          }
+        }
+        // **After** npm, not before: `npm install` prunes anything the profile's
+        // `dependencies` does not list, and the brain bundle is copied in rather than
+        // installed, so it counts as extraneous. Measured: installing one plugin deleted
+        // `node_modules/@local/dsh-fleet-brain`, and the node then refused to start with
+        // "cannot resolve profile bundle @local/dsh-fleet-brain".
         const composition = await runtime.host.writeBrainBundle(BRAIN_FILES, BRAIN_PACKAGE)
-        const bundles = await runtime.host.writeProfileBundles(BRAIN_BUNDLES)
+        // Only the bundles that really resolved are named: listing a package the node does
+        // not have would compose nothing and hide the install failure behind a warning the
+        // settings page never shows.
+        const composed = wanted.filter(name => !unmet.some(failure => failure.bundle === name))
+        const bundles = await runtime.host.writeProfileBundles(composed)
         const provisioner = this.#provisionerFor(runtime)
         const plan = provisioner.plan()
         const wrote = await runtime.host.writePatch(plan.text)
@@ -414,6 +451,39 @@ export class Fleet {
       results.push(await this.serial(runtime, async () => {
         const report = { id: runtime.record.id, name: runtime.record.name, rows: 0, changed: false }
         try {
+          // Plugin switches first: the bundle list is written from what is installed, so a
+          // package has to be on the node before the list can name it.
+          const wanted = [...this.nodeBundles()]
+          const extras = wanted.filter(name => name !== BRAIN_PACKAGE && name !== '@deepseek-ai/dsh-base')
+          let composed = wanted
+          if (extras.length > 0) {
+            const install = await this.#installPlugins(runtime, extras)
+            report.plugins = { wanted: extras, ...install }
+            runtime.provision ??= {}
+            runtime.provision.plugins = report.plugins
+            for (const failure of install.failed) {
+              this.log(`[${runtime.record.name}] ${failure.bundle} was not installed: ${failure.reason}`)
+            }
+            composed = wanted.filter(name => !install.failed.some(failure => failure.bundle === name))
+          }
+          // Re-copy the brain bundle after npm: an install prunes the packages the profile
+          // manifest does not depend on, and this one is copied in rather than installed.
+          const composition = await runtime.host.writeBrainBundle(BRAIN_FILES, BRAIN_PACKAGE)
+          const bundles = await runtime.host.writeProfileBundles(composed)
+          // A changed bundle list is module code: the resident host has to be restarted for
+          // it to compose the new set, exactly as at connect time. The restart leaves this
+          // Host holding a socket to a process that no longer exists — and a dead socket is
+          // still *writable*, so it accepts frames nobody reads. Every stream opened on it
+          // then produces nothing at all: measured, `tool-parity` waited 7 minutes for a
+          // turn that had already completed on the node, and `event-relay` saw no
+          // `api-session/*` events. `reset()` invalidates the carrier and every logical
+          // stream; each relay's `onEnd` reopens on the new host (see `gateway.revive`).
+          if (bundles.changed || bundles.revertedPrevious || composition.changed) {
+            report.bundles = { changed: true, restarted: true }
+            runtime.serving = await runtime.host.ensureServing({ force: true })
+            runtime.gateway.reset()
+            this.#publish()
+          }
           const provisioner = this.#provisionerFor(runtime)
           const plan = provisioner.plan()
           report.rows = plan.rows.length
@@ -436,6 +506,66 @@ export class Fleet {
     return results
   }
 
+  /**
+   * Put the switched-on plugins on the node.
+   *
+   * Two kinds of plugin, two ways to arrive, and the distinction is not cosmetic:
+   *
+   * - **Published**: this desktop's manifest carries a version spec, so the node installs
+   *   the same release from its own npm. Reusing the desktop's spec keeps both sides on the
+   *   same release instead of whatever `latest` is by the time the switch is flipped.
+   * - **Local** (`link:`): the plugin is a directory this person wrote, with no registry
+   *   entry at all. `npm install @local/x` there is a guaranteed 404 — measured on a real
+   *   node — so its files are copied instead.
+   *
+   * A copy cannot live in the profile's `dependencies` — there is nothing for npm to name —
+   * so `npm install` sees it as extraneous. That is why published plugins are installed
+   * **first** and copies are written **after**: a later install would prune a copy, and the
+   * node would drop a plugin the switch says is on. Every connect and every sync repeats
+   * the copy for exactly this reason (the write is digest-stamped, so an unchanged tree
+   * costs one `cat`).
+   *
+   * @param {NodeRuntime} runtime
+   * @param {readonly string[]} bundles
+   * @returns {Promise<{ installed: string[], copied: string[], failed: Array<{ bundle: string, reason: string }> }>}
+   */
+  async #installPlugins(runtime, bundles) {
+    const specs = this.pluginSpecs()
+    if (specs === undefined) {
+      return {
+        installed: [], copied: [],
+        failed: bundles.map(bundle => ({ bundle, reason: 'no plugin source is available' })),
+      }
+    }
+    const local = bundles.filter(bundle => specs.isLocal(bundle))
+    const published = bundles.filter(bundle => !specs.isLocal(bundle))
+    const installed = []
+    const failed = []
+    // Published ones FIRST: `npm install` prunes whatever the profile manifest does not
+    // list, and a copied local bundle is not in it. Copying before npm would mean copying
+    // and then deleting, which looks like a working switch until the node restarts.
+    if (published.length > 0) {
+      const result = await runtime.host.installPlugins(published, bundle => specs.specOf(bundle))
+      installed.push(...result.installed)
+      failed.push(...result.failed)
+    }
+    const copied = []
+    for (const bundle of local) {
+      const files = specs.localFiles(bundle)
+      if (Object.keys(files).length === 0) {
+        failed.push({ bundle, reason: `${bundle} is a local plugin but its directory could not be read` })
+        continue
+      }
+      try {
+        await runtime.host.writePluginBundle(files, bundle)
+        copied.push(bundle)
+      } catch (error) {
+        failed.push({ bundle, reason: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return { installed, copied, failed }
+  }
+
   /** A provisioner bound to one node's logging and this Host's live config. */
   #provisionerFor(runtime) {
     return new Provisioner({
@@ -444,9 +574,6 @@ export class Fleet {
       configEditor: this.configEditor,
       credentials: this.credentials,
       version: this.version,
-      // The per-plugin switches are read on every render, so flipping one reaches a
-      // connected node on the next config sync instead of on the next connect.
-      syncBlock: () => this.syncBlock(),
       log: message => this.log(`[${runtime.record.name}] ${message}`),
     })
   }

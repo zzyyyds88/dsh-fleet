@@ -130,11 +130,22 @@ const mod = factory(specifier => {
 check(typeof mod?.apply === 'function', 'the module exports apply()')
 mod.apply(ctx)
 
-check(calls.length === 3, 'apply() registers three slots', String(calls.length))
+// The three slots above are this plugin's own surfaces. The three below are the shell's
+// folder-picker holes: occupying them is what lets the dialog offer a folder on a node,
+// because the shipped pickers browse this machine only.
+const FLOW_SLOTS = [
+  'sidebar.workspaces.directoryFlow',
+  'conversation.hero.workspace.directoryFlow',
+  'workspace.picker.directoryFlow',
+]
+check(calls.length === 3 + FLOW_SLOTS.length, 'apply() registers every slot it claims', String(calls.length))
 const names = calls.map(call => call.name)
 check(names.includes('settings.section'), 'a settings section is registered')
 check(names.includes('sidebar.panellist'), 'a sidebar panel icon is registered')
 check(names.includes('main'), 'a main-column page is registered')
+for (const slot of FLOW_SLOTS) {
+  check(names.includes(slot), `the ${slot} folder picker is replaced`)
+}
 for (const call of calls) {
   check(typeof call.registered.component === 'function',
     `the ${call.name} slot has a renderable component`)
