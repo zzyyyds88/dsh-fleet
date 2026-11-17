@@ -76,6 +76,15 @@ window.__ModuleLoader__.load({
             verify: '正在验证远端会话通道',
           },
           missingSecret: '还没有保存密码或私钥。',
+          plugins: '插件同步',
+          pluginsHint: '远程节点跑同一套 DSH，所以它默认会加载同一批插件。这里逐个决定哪些真的发过去：窗口类插件在节点上没有意义，关掉可以减少它的启动负担。改动会立即下发到已连接的节点。',
+          pluginSync: '同步到远程节点',
+          pluginLocked: '节点自身的组合，不可关闭',
+          pluginDefaultOff: '默认关闭：需要浏览器窗口',
+          pluginDefaultOn: '默认开启',
+          pluginSetOff: '已手动关闭',
+          pluginSetOn: '已手动开启',
+          pluginFailed: '插件列表还没准备好',
         }
       : {
           title: 'Remote nodes',
@@ -125,6 +134,15 @@ window.__ModuleLoader__.load({
             verify: 'Verifying the remote session channel',
           },
           missingSecret: 'No password or private key is stored yet.',
+          plugins: 'Plugin sync',
+          pluginsHint: 'A node runs the same DSH, so it would load the same plugins. Decide per plugin what actually goes there: a window-driven plugin has nothing to do on a node, and leaving it out keeps the node lean. A change reaches connected nodes immediately.',
+          pluginSync: 'Send to remote nodes',
+          pluginLocked: 'part of the node composition; cannot be switched off',
+          pluginDefaultOff: 'off by default: needs a browser window',
+          pluginDefaultOn: 'on by default',
+          pluginSetOff: 'turned off by hand',
+          pluginSetOn: 'turned on by hand',
+          pluginFailed: 'The plugin list is not composed yet',
         }
 
     /** Token-driven styles so light and dark both work. */
@@ -520,6 +538,90 @@ window.__ModuleLoader__.load({
         && workspace.workspaceId.startsWith(prefix))
     }
 
+    /**
+     * Per-plugin "send to nodes" switches.
+     *
+     * Two facts per row, and the UI shows both because they answer different
+     * questions: the switch is what a node would load, and the note says *why* it is
+     * where it is. A row that is off because it drives a browser window is not a
+     * decision the user made, so it must not look like one — otherwise every fresh
+     * install looks like it is hiding sixty mistakes.
+     */
+    function PluginSyncSection() {
+      const [rows, setRows] = useState(undefined)
+      const [error, setError] = useState(undefined)
+      const [busy, setBusy] = useState(undefined)
+
+      const load = useCallback(async () => {
+        try {
+          const body = await api('/plugins')
+          setRows(body.rows ?? [])
+          setError(undefined)
+        } catch (failure) {
+          setError(failure.message)
+        }
+      }, [])
+
+      useEffect(() => {
+        void load()
+      }, [load])
+
+      const toggle = async row => {
+        setBusy(row.id)
+        try {
+          const body = await api(`/plugins/${encodeURIComponent(row.id)}`, {
+            method: 'POST',
+            body: JSON.stringify({ sync: !row.sync }),
+          })
+          setRows(current => (current ?? []).map(entry => (entry.id === row.id ? body.row : entry)))
+          setError(undefined)
+        } catch (failure) {
+          setError(failure.message)
+        } finally {
+          setBusy(undefined)
+        }
+      }
+
+      const note = row => {
+        if (row.locked) return T.pluginLocked
+        if (row.source === 'explicit') return row.sync ? T.pluginSetOn : T.pluginSetOff
+        return row.sync ? T.pluginDefaultOn : T.pluginDefaultOff
+      }
+
+      const rowNode = (row, index) => h('div', {
+        key: row.id,
+        style: { ...styles.workspaceRow, ...(index === 0 ? styles.rowFirst : {}) },
+      },
+      h('label', {
+        style: {
+          display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto',
+          minWidth: 0, cursor: row.locked ? 'default' : 'pointer',
+        },
+      },
+      h('input', {
+        type: 'checkbox',
+        checked: row.sync === true,
+        disabled: row.locked === true || busy === row.id,
+        onChange: () => { void toggle(row) },
+      }),
+      h('span', { style: styles.grow },
+        h('div', { style: styles.name }, row.id),
+        h('div', { style: styles.meta }, `${row.name} · ${note(row)}`)),
+      ))
+
+      return h('section', null,
+        h('div', { style: styles.groupHeader },
+          h('h2', { style: styles.groupTitle }, T.plugins),
+          h('p', { style: styles.groupHint }, T.pluginsHint)),
+        error !== undefined
+          ? h('div', { style: { ...styles.errorBar, margin: '0 0 10px' } }, error)
+          : null,
+        rows === undefined
+          ? h('div', { style: { ...styles.list, ...styles.empty } }, T.pluginFailed)
+          : h('div', { style: styles.list }, rows.map(rowNode)),
+      )
+    }
+
     /** The full node list with its add/edit form. */
     function FleetBody({ compact }) {
       const fleet = useFleet()
@@ -587,6 +689,7 @@ window.__ModuleLoader__.load({
                 h('h2', { style: styles.groupTitle }, T.workspaces),
                 h('p', { style: styles.groupHint }, T.workspacesHint)))
           : null,
+        h(PluginSyncSection),
       )
     }
 

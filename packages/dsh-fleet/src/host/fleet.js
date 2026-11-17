@@ -11,6 +11,7 @@
  */
 import { NodeRegistry } from '../core/registry.js'
 import { SecretStore, authFromSecret } from '../core/secrets.js'
+import { decideGate, requiresProvisioning } from '../core/version.js'
 import { SshConnection } from '../ssh/connection.js'
 import { RemoteHost } from '../remote/daemon.js'
 import { BRAIN_FILES, BRAIN_PACKAGE } from './brain-bundle.generated.js'
@@ -142,6 +143,12 @@ export class Fleet {
   constructor(options) {
     this.log = options.log ?? (() => {})
     this.version = options.version
+    /** The brain build this plugin would install: its own package version. */
+    this.brainVersion = options.brainVersion ?? '0.0.0'
+    /** GitHub accelerator for artefact downloads; empty means "go direct". */
+    this.mirror = options.mirror
+    /** Rendered per-plugin disable block; empty when nothing is switched off. */
+    this.syncBlock = options.syncBlock ?? (() => '')
     this.configEditor = options.configEditor ?? (() => undefined)
     this.credentials = options.credentials
     this.registry = new NodeRegistry()
@@ -258,8 +265,26 @@ export class Fleet {
         }
         runtime.phase = 'install'
         this.#publish()
+        // The gate decides; the installer only carries it out. Doing the comparison
+        // here rather than inside `install` keeps the reason available to the settings
+        // page, which is what the user reads when a connect refuses to proceed.
         const installed = await runtime.host.installedVersion()
-        if (installed !== this.version) await runtime.host.install(runtime.facts)
+        const gate = decideGate({
+          hostVersion: this.version,
+          hostBrain: this.brainVersion,
+          nodeVersion: installed,
+          nodeBrain: runtime.provision?.brainVersion,
+        })
+        runtime.gate = gate
+        if (gate.action === 'ahead' || gate.action === 'unknown') {
+          throw new Error(gate.message)
+        }
+        if (requiresProvisioning(gate.action)) {
+          const installedRuntime = await runtime.host.install(runtime.facts, { mirror: this.mirror })
+          runtime.log?.(
+            `resident DSH ${installedRuntime.version} installed (${installedRuntime.via})`,
+          )
+        }
         // Customise the node BEFORE starting it: install the brain bundle where the
         // Loader resolves bundles from, point the profile at it, and write the model
         // overlay. All three have to be on disk for the host to load them, and a node
@@ -407,6 +432,9 @@ export class Fleet {
       configEditor: this.configEditor,
       credentials: this.credentials,
       version: this.version,
+      // The per-plugin switches are read on every render, so flipping one reaches a
+      // connected node on the next config sync instead of on the next connect.
+      syncBlock: () => this.syncBlock(),
       log: message => this.log(`[${runtime.record.name}] ${message}`),
     })
   }

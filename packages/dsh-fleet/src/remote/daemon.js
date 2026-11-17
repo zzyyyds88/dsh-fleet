@@ -24,6 +24,7 @@
  */
 import { createHash } from 'node:crypto'
 import { SSH_FAILURE, toSshError } from '../ssh/connection.js'
+import { artefactUrls, installScript, platformTag, rollbackScript } from './artefact.js'
 
 /** The Node major version the resident host needs. */
 export const MINIMUM_NODE_MAJOR = 22
@@ -177,18 +178,79 @@ export class RemoteHost {
     return result.stdout.includes('alive')
   }
 
-  /** Install or upgrade the resident DSH under the node's root. */
-  async install(facts) {
-    if ((facts.npmPath ?? '') === '') {
-      throw toSshError(new Error(
-        'this machine has no npm, so the resident DSH cannot be installed. '
-        + 'Install Node.js 22 or newer (which ships npm) and connect again.',
-      ))
-    }
+  /**
+   * Install or upgrade the resident DSH under the node's root.
+   *
+   * Two routes, tried in this order:
+   *
+   * 1. **A published artefact** for exactly this release. The desktop ships a tarball
+   *    it was tested against, so the node ends up on identical bytes without compiling
+   *    or resolving anything. Downloads go through the GitHub accelerator first
+   *    (`https://git.yylx.win/`), which is the difference between "one minute" and
+   *    "cannot reach GitHub at all" on a Chinese LAN.
+   * 2. **npm**, when the artefact is not published (a source checkout, an unreleased
+   *    release candidate). This is the old path, kept because refusing to connect just
+   *    because nobody uploaded a tarball would be worse than a slow install.
+   *
+   * A failed artefact install rolls the previous runtime back, so a node never ends up
+   * with a mixture of two releases.
+   *
+   * The URL is built here rather than by the caller because it needs the **node's**
+   * platform, which only the probe knows. A runtime packed on Windows carries
+   * `sherpa-onnx-win-x64` and a Windows `node-pty`; unpacking it on Linux would give a
+   * node whose terminal fails at first use, so a platform with no artefact falls back
+   * to npm instead of guessing.
+   *
+   * @param {{ npmPath?: string, nodeUsable: boolean, nodeVersion?: string, curlPath?: string, wgetPath?: string, os?: string, arch?: string }} facts
+   * @param {{ mirror?: string }} [options]
+   */
+  async install(facts, options = {}) {
     if (!facts.nodeUsable) {
       throw toSshError(new Error(
         `this machine runs Node ${facts.nodeVersion || '(none)'}, but the resident host needs Node ${String(MINIMUM_NODE_MAJOR)} or newer. `
         + 'Install a newer Node.js and connect again.',
+      ))
+    }
+    const platform = platformTag(facts)
+    const urls = platform === undefined
+      ? []
+      : artefactUrls({ version: this.version, platform, mirror: options.mirror })
+    if (platform === undefined) {
+      this.log(`this machine reports ${String(facts.os)}/${String(facts.arch)}; using npm instead of an artefact`)
+    }
+    const canDownload = (facts.curlPath ?? '') !== '' || (facts.wgetPath ?? '') !== ''
+    if (urls.length > 0 && canDownload) {
+      const script = installScript({
+        version: this.version,
+        runtime: REMOTE_LAYOUT.runtime,
+        cli: REMOTE_LAYOUT.cli,
+        urls,
+      })
+      const attempt = await this.connection.exec({
+        argv: ['sh', '-c', script],
+        timeoutMs: 15 * 60_000,
+        maxBytes: 1024 * 1024,
+      })
+      if (attempt.code === 0) {
+        return { version: attempt.stdout.trim().split('\n').at(-1) ?? this.version, via: 'artefact' }
+      }
+      const detail = (attempt.stderr || attempt.stdout).trim()
+      if (!detail.includes('ARTEFACT_UNAVAILABLE')) {
+        // The download worked but the unpack or verify did not: roll back so the node
+        // keeps the release it had, then report rather than silently falling through
+        // to npm (which would download the same broken release again).
+        await this.connection.exec({
+          argv: ['sh', '-c', rollbackScript(REMOTE_LAYOUT.runtime)],
+          timeoutMs: 120_000,
+        }).catch(() => undefined)
+        throw toSshError(new Error(`installing the resident host failed: ${detail.slice(-600)}`))
+      }
+      this.log(`no published artefact for DSH ${this.version}; falling back to npm`)
+    }
+    if ((facts.npmPath ?? '') === '') {
+      throw toSshError(new Error(
+        'this machine has no npm and no downloader, so the resident DSH cannot be installed. '
+        + 'Install Node.js 22 or newer (which ships npm and curl) and connect again.',
       ))
     }
     const script = `
@@ -205,7 +267,7 @@ node ${REMOTE_LAYOUT.cli} --version
     if (result.code !== 0) {
       throw toSshError(new Error(`installing the resident host failed: ${(result.stderr || result.stdout).trim().slice(-800)}`))
     }
-    return result.stdout.trim().split('\n').at(-1) ?? this.version
+    return { version: result.stdout.trim().split('\n').at(-1) ?? this.version, via: 'npm' }
   }
 
   /** Read the installed resident version, or `undefined` when absent. */

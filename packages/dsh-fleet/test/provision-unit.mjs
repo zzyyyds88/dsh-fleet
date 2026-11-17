@@ -17,6 +17,7 @@
  * Usage: node test/provision-unit.mjs
  */
 import { copyableRows, credentialRefsOf, renderBrainPatch } from '../src/host/provision.js'
+import { renderSyncBlock } from '../src/core/plugin-sync.js'
 import * as compiledModule from '../src/host/provision.js'
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
@@ -156,7 +157,22 @@ const text = renderBrainPatch(plan)
 check(text.includes('Managed by @local/dsh-fleet'), 'the overlay says who owns it')
 check(text.includes('0.2.2-rc.3'), 'and which version it targets')
 check(!/disabled: true/u.test(text),
-  'the overlay disables nothing — the composition already omits those rows')
+  'with no per-plugin switches set, nothing is disabled')
+
+// With switches set, the disable block is appended and carries the reason — this file
+// lands on somebody's server, so it has to explain itself.
+const withSwitches = renderBrainPatch({
+  ...plan,
+  syncBlock: renderSyncBlock([
+    { id: 'sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar', sync: false, source: 'default', reason: 'browser' },
+    { id: 'bash', name: '@deepseek-ai/dsh-tool-bash', sync: false, source: 'explicit', reason: 'set by hand' },
+  ]),
+})
+check(withSwitches.includes('- id: sidebar') && withSwitches.includes('  disabled: true'),
+  'a switched-off row is disabled in the node patch')
+check(withSwitches.includes('turned off by hand'), 'and a hand-made decision is marked as such')
+check(withSwitches.indexOf('- id: sidebar') > withSwitches.indexOf('config:'),
+  'the disable block comes after the config rows, so it reads as a separate concern')
 
 if (YAML === undefined) {
   log('note: no YAML parser available; skipping the round-trip checks')

@@ -26,14 +26,18 @@
  * @module @local/dsh-fleet
  */
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { apiError, describeFailure, readJsonBody, sendJson } from './core/http-error.js'
+import { decideGate } from './core/version.js'
 import { Fleet } from './host/fleet.js'
 import { RemoteControl } from './host/remote-control.js'
 import { RemoteEvents } from './host/remote-events.js'
 import { RemoteWaterfalls } from './host/remote-waterfall.js'
 import { RemoteWorkspaces } from './host/remote-workspaces.js'
 import { Router } from './host/router.js'
+import { SyncSwitches } from './host/sync-switches.js'
 import { overrideAgentLookup, overrideWorkspaceFileScope } from './host/lookups.js'
 import {
   decorateJobController,
@@ -54,6 +58,25 @@ export const inject = ['webServer', 'credentials']
 
 /** Where the settings surface talks to this plugin. */
 const API_MOUNT = '/fleet/api'
+
+/**
+ * This plugin's own version, which doubles as the brain build's.
+ *
+ * The bundle a node receives is generated from this package (`embed-into-fleet.mjs`),
+ * so the two always ship together and one number describes both. It is read from the
+ * package manifest rather than hard-coded so a release bump cannot forget it.
+ */
+function localBrainVersion() {
+  try {
+    const manifestPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    if (typeof manifest.version === 'string') return manifest.version
+  } catch {
+    // An unreadable manifest is not worth failing the whole plugin over; the version
+    // gate degrades to "unknown brain build", which triggers a refresh.
+  }
+  return '0.0.0'
+}
 
 /**
  * Read the DSH version this profile runs, so every node is installed to match.
@@ -77,16 +100,25 @@ function localDshVersion() {
  * decorators, and the management API a settings surface reads.
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {{ enabled?: boolean, autoConnect?: boolean }} [config]
+ * @param {{ enabled?: boolean, autoConnect?: boolean, mirror?: string }} [config]
  */
 export function apply(ctx, config = {}) {
   if (config.enabled === false) return
   const log = message => ctx.logger?.info?.(message)
   const version = localDshVersion()
+  const brainVersion = localBrainVersion()
+  /** @type {SyncSwitches | undefined} — composed once `configEditor` exists. */
+  /** @type {SyncSwitches | undefined} — composed once `configEditor` exists. */
+  let switches
   const fleet = new Fleet({
     credentials: ctx.credentials,
     version,
+    brainVersion,
+    mirror: config.mirror,
     configEditor: () => configEditor,
+    // Read on every render: a switch flipped in the settings surface has to reach a
+    // running node on the next sync, not on the next connect.
+    syncBlock: () => switches?.render() ?? '',
     log,
   })
   const workspaces = new RemoteWorkspaces(fleet)
@@ -177,7 +209,20 @@ export function apply(ctx, config = {}) {
           runtime.phase = 'install'
           try {
             runtime.facts = await runtime.host.probe()
-            await runtime.host.install(runtime.facts)
+            // Same gate as a connect: a reinstall is a forced provisioning, not a
+            // way to bypass the version check.
+            const installed = await runtime.host.installedVersion()
+            const decision = decideGate({
+              hostVersion: version,
+              hostBrain: brainVersion,
+              nodeVersion: installed,
+              nodeBrain: runtime.provision?.brainVersion,
+            })
+            runtime.gate = decision
+            if (decision.action === 'ahead' || decision.action === 'unknown') {
+              throw apiError('node-ahead', decision.message, 409)
+            }
+            await runtime.host.install(runtime.facts, { mirror: config.mirror })
           } finally {
             runtime.phase = undefined
           }
@@ -236,6 +281,39 @@ export function apply(ctx, config = {}) {
         throw apiError('not-supported', 'remove a remote workspace from its own Harness', 400)
       }
 
+      // ---- Per-plugin sync switches -------------------------------------------
+      // One row per plugin this desktop composes, with two independent facts: the
+      // effective switch (what a node would load) and where that answer came from.
+      // The settings surface needs both — "off because it drives a window" is not
+      // something to undo, "off because I said so" is.
+      if (head === 'plugins' && id === undefined) {
+        if (req.method === 'GET') {
+          if (switches === undefined) {
+            throw apiError('not-ready', 'the plugin list is not composed yet; retry in a moment', 503)
+          }
+          sendJson(res, 200, { ok: true, rows: switches.list() })
+          return
+        }
+        throw apiError('method-not-allowed', 'use GET on the plugin collection', 405)
+      }
+
+      if (head === 'plugins' && id !== undefined) {
+        if (switches === undefined) {
+          throw apiError('not-ready', 'the plugin list is not composed yet; retry in a moment', 503)
+        }
+        if (req.method !== 'POST') throw apiError('method-not-allowed', 'switch a plugin with POST', 405)
+        const body = await readJsonBody(req)
+        if (typeof body.sync !== 'boolean') {
+          throw apiError('sync-required', 'a `sync` boolean is required', 400)
+        }
+        const row = switches.set(id, body.sync)
+        // A switch that only takes effect on reconnect would look broken; push it to
+        // every connected node now. The node's profile patch is hot-reloaded.
+        void fleet.syncConfig('plugin switches changed').catch(() => undefined)
+        sendJson(res, 200, { ok: true, row })
+        return
+      }
+
       throw apiError('route-not-found', `no fleet route for ${req.method ?? 'GET'} ${url.pathname}`, 404)
     }),
   }))
@@ -287,6 +365,14 @@ export function apply(ctx, config = {}) {
   let configEditor
   ctx.inject(['configEditor'], scope => {
     configEditor = scope.get('configEditor')
+    // The switch list describes what this desktop composes, so it can only be built
+    // once the editor exists. Until then `syncBlock` renders empty, which is exactly
+    // the "no per-plugin decisions yet" state.
+    switches = new SyncSwitches({
+      home: process.env.DSH_HOME ?? join(homedir(), '.dsh'),
+      configEditor: () => configEditor,
+      log,
+    })
   })
 
   // ---- Keeping connected nodes in step --------------------------------------

@@ -1,0 +1,122 @@
+/**
+ * Per-plugin "send this to nodes" switches, persisted beside the node registry.
+ *
+ * The decision *what* a switch means lives in `src/core/plugin-sync.js`; this is the
+ * part that owns a file and the list of rows those switches apply to.
+ *
+ * Rows come from the Host's own `configEditor.configuration()`, the same source
+ * `Provisioner` reads for the model roster. That is deliberate: the switch list has to
+ * describe what this desktop actually composes, and a hard-coded list would be wrong
+ * after the first upgrade.
+ *
+ * @module @local/dsh-fleet/host/sync-switches
+ */
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { parseSwitches, renderSyncBlock, resolveSwitches, rowsToDisable } from '../core/plugin-sync.js'
+
+/** Rows that are the node's own composition: never switchable. */
+const PROTECTED = Object.freeze(['web-runtime', 'brain-runtime'])
+
+export class SyncSwitches {
+  /**
+   * @param {object} options
+   * @param {string} options.home - `$DSH_HOME`.
+   * @param {() => object | undefined} options.configEditor - the local config editor.
+   * @param {(message: string) => void} [options.log]
+   */
+  constructor(options) {
+    this.path = join(options.home, 'fleet', 'plugins.json')
+    this.configEditor = options.configEditor
+    this.log = options.log ?? (() => {})
+    /** @type {Record<string, { sync: boolean }>} */
+    this.overrides = this.#read()
+  }
+
+  #read() {
+    try {
+      return parseSwitches(JSON.parse(readFileSync(this.path, 'utf8')))
+    } catch {
+      // A missing or unreadable file means "no opinions yet", which is exactly the
+      // state a fresh install is in. It is not an error to report.
+      return {}
+    }
+  }
+
+  #write() {
+    try {
+      mkdirSync(dirname(this.path), { recursive: true })
+      writeFileSync(this.path, `${JSON.stringify(this.overrides, undefined, 2)}\n`, 'utf8')
+    } catch (error) {
+      this.log(`fleet: could not save the plugin switches: ${error.message}`)
+    }
+  }
+
+  /** Every row this desktop composes, whether or not it can be switched. */
+  rows() {
+    const editor = this.configEditor()
+    if (editor === undefined || typeof editor.configuration !== 'function') return []
+    const out = []
+    for (const row of editor.configuration()) {
+      const id = row.entry?.options?.id
+      const name = row.entry?.options?.name
+      if (typeof id !== 'string' || typeof name !== 'string') continue
+      out.push({ id, name })
+    }
+    return out
+  }
+
+  /** Every row with its effective switch and where that answer came from. */
+  list() {
+    const resolved = resolveSwitches(this.rows(), this.overrides)
+    return resolved.map(row => ({
+      ...row,
+      // The node's own composition is shown but not switchable: turning it off would
+      // leave a node that starts and does nothing.
+      locked: PROTECTED.includes(row.id),
+    }))
+  }
+
+  /**
+   * Record one decision.
+   *
+   * Setting a switch back to its default removes the override instead of storing the
+   * same value twice — that keeps the file meaning "what I changed", so an upgrade
+   * that flips a default still reaches the user who never touched it.
+   * @param {string} rowId
+   * @param {boolean} sync
+   */
+  set(rowId, sync) {
+    const rows = this.rows()
+    if (!rows.some(row => row.id === rowId)) {
+      throw Object.assign(new Error(`no plugin row ${rowId} on this desktop`), { code: 'row-not-found' })
+    }
+    if (PROTECTED.includes(rowId)) {
+      throw Object.assign(new Error(`${rowId} is what makes a node a node; it cannot be switched off`), {
+        code: 'row-protected',
+      })
+    }
+    const verdict = resolveSwitches([rows.find(row => row.id === rowId)], {})
+      .find(row => row.id === rowId)
+    if (verdict !== undefined && verdict.sync === sync) delete this.overrides[rowId]
+    else this.overrides[rowId] = { sync }
+    this.#write()
+    return this.list().find(row => row.id === rowId)
+  }
+
+  /** The rows a node must not load, in composition order. */
+  disabledRows() {
+    const keep = PROTECTED.filter(id => id !== 'web-runtime' && id !== 'brain-runtime')
+    return rowsToDisable(resolveSwitches(this.rows(), this.overrides), keep)
+  }
+
+  /**
+   * The patch block that removes those rows on the node.
+   *
+   * Rendered into the node's own profile patch, which the resident host hot-reloads —
+   * so flipping a switch reconfigures a running node without a restart.
+   */
+  render() {
+    return renderSyncBlock(resolveSwitches(this.rows(), this.overrides), [])
+  }
+}
