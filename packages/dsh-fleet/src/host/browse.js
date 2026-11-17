@@ -11,12 +11,72 @@
  *
  * @module @local/dsh-fleet/host/browse
  */
-import { readdir, stat, realpath } from 'node:fs/promises'
+import { mkdir, readdir, stat, realpath } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
 /** How many folders one listing returns; a directory with more is still usable. */
 const MAX_ENTRIES = 500
+
+/**
+ * The drive letters this machine has, as roots a picker can jump to.
+ *
+ * A workspace on `D:\` was unreachable from the picker: every listing starts at the
+ * user's home and "up" stops at that drive's root, so `C:\` was the only tree there
+ * was. Asking the filesystem which letters answer is the only honest source.
+ *
+ * @returns {Promise<string[]>}
+ */
+async function localRoots() {
+  if (process.platform !== 'win32') return ['/']
+  const roots = []
+  for (const letter of 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('')) {
+    const root = `${letter}:\\`
+    try {
+      await stat(root)
+      roots.push(root)
+    } catch {
+      // A letter with no mounted volume: not offered.
+    }
+  }
+  // `A:`/`B:` are floppy-era letters that can legitimately be mounted; they are rare
+  // enough that probing them would only add a slow stat on every listing.
+  return roots
+}
+
+/**
+ * Create one child directory and return its absolute path.
+ *
+ * The name is a single path segment on purpose: the picker asks for a folder name, not
+ * a path, so a caller cannot walk out of the directory it is looking at. The check runs
+ * here rather than only in the browser, because this function is reachable over HTTP.
+ *
+ * @param {string} parent - existing absolute directory.
+ * @param {string} name
+ * @returns {Promise<string>}
+ */
+export async function makeLocalDirectory(parent, name) {
+  const segment = checkedSegment(name)
+  const target = join(normalizeLocal(parent), segment)
+  await mkdir(target)
+  return target
+}
+
+/**
+ * Reject a name that is not one usable directory segment.
+ * @param {unknown} name
+ * @returns {string}
+ */
+function checkedSegment(name) {
+  const segment = typeof name === 'string' ? name.trim() : ''
+  if (segment.length === 0 || segment === '.' || segment === '..') {
+    throw Object.assign(new Error('a folder name is required'), { code: 'name-invalid' })
+  }
+  if (/[/\\]/u.test(segment)) {
+    throw Object.assign(new Error('a folder name cannot contain a path separator'), { code: 'name-invalid' })
+  }
+  return segment
+}
 
 /**
  * Normalise a path the user typed or a parent link produced.
@@ -85,6 +145,7 @@ export async function listLocal(path) {
     path: target,
     home: homedir(),
     ...(parent === undefined ? {} : { parent }),
+    roots: await localRoots(),
     entries,
     truncated,
   }
@@ -155,9 +216,44 @@ find . -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print 2>/dev/null | LC_ALL=
     path: resolved,
     home,
     ...(parent === undefined ? {} : { parent }),
+    // A node has one tree, so the only root is `/`; the picker still needs to know so
+    // it can offer the same "jump to a root" affordance on both sides.
+    roots: ['/'],
     entries,
     truncated,
   }
+}
+
+/**
+ * Create one directory on a node.
+ *
+ * Over SSH for the same reason listing is: a folder is a filesystem question, and asking
+ * the node's Harness would keep the picker unusable while that Host restarts. `mkdir`
+ * without `-p` is deliberate — an existing name must fail loudly instead of silently
+ * selecting a directory the user did not choose.
+ *
+ * @param {import('../ssh/connection.js').SshConnection} connection
+ * @param {string} parent - absolute POSIX path.
+ * @param {string} name
+ * @returns {Promise<string>}
+ */
+export async function makeRemoteDirectory(connection, parent, name) {
+  const segment = checkedSegment(name)
+  if (!isPosixAbsolute(parent)) {
+    throw Object.assign(new Error('a node directory must be an absolute path'), { code: 'path-invalid' })
+  }
+  const target = `${parent.replace(/\/+$/u, '')}/${segment}`
+  const script = 'mkdir -- "$1"'
+  const result = await connection.exec({
+    argv: ['sh', '-c', script, 'sh', target],
+    timeoutMs: 20_000,
+    maxBytes: 64 * 1024,
+  })
+  if (result.code !== 0) {
+    const reason = `${result.stderr}`.trim() || `mkdir exited ${String(result.code)}`
+    throw Object.assign(new Error(`${target}: ${reason.slice(0, 300)}`), { code: 'create-failed' })
+  }
+  return target
 }
 
 /**

@@ -60,6 +60,90 @@ function rowsOfBundle(nodeModules, name) {
   return ids
 }
 
+/** Icon files DSH itself accepts for a plugin, with the media type each is served as. */
+const ICON_TYPES = Object.freeze({
+  svg: 'image/svg+xml',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+})
+
+/** DSH refuses a plugin icon above this size; the list must not grow the page past it. */
+const MAX_ICON_BYTES = 256 * 1024
+
+/**
+ * How one installed bundle presents itself.
+ *
+ * Mirroring DSH's own resolution matters more than it looks: the plugin page this switch
+ * list mirrors shows a title, a sentence and an icon per row, and rows that read
+ * `@local/dsh-rhino-mode / 22 行` describe a composition rather than a plugin. The
+ * sources are the same three DSH reads — `locale/<lang>.json` for localized display text,
+ * the package manifest's `name`/`description` as the fallback, and the manifest `icon`
+ * as a file relative to the package root, inlined as a data URL because the browser
+ * cannot fetch inside a profile directory.
+ *
+ * @param {string} nodeModules
+ * @param {string} name
+ * @returns {{ title?: string, titleEn?: string, description?: string, descriptionEn?: string, icon?: string }}
+ */
+function metaOfBundle(nodeModules, name) {
+  const dir = join(nodeModules, name)
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+  } catch {
+    return {}
+  }
+  const localized = language => {
+    try {
+      return JSON.parse(readFileSync(join(dir, 'locale', `${language}.json`), 'utf8'))
+    } catch {
+      return undefined
+    }
+  }
+  const zh = localized('zh')
+  const en = localized('en')
+  const textOf = (dictionary, field) => {
+    const value = dictionary === undefined ? undefined : Reflect.get(dictionary, field)
+    return typeof value === 'string' && value.length > 0 ? value : undefined
+  }
+  const meta = {}
+  const titleZh = textOf(zh, 'title')
+  const titleEn = textOf(en, 'title')
+  if (titleZh !== undefined) meta.title = titleZh
+  else if (titleEn !== undefined) meta.title = titleEn
+  else if (typeof manifest.name === 'string') meta.title = manifest.name
+  if (titleEn !== undefined) meta.titleEn = titleEn
+  const descriptionZh = textOf(zh, 'description')
+  const descriptionEn = textOf(en, 'description')
+  const fallbackDescription = typeof manifest.description === 'string' && manifest.description.length > 0
+    ? manifest.description
+    : undefined
+  const description = descriptionZh ?? descriptionEn ?? fallbackDescription
+  if (description !== undefined) meta.description = description
+  if (descriptionEn !== undefined) meta.descriptionEn = descriptionEn
+  else if (fallbackDescription !== undefined) meta.descriptionEn = fallbackDescription
+  const iconPath = typeof manifest.icon === 'string' && manifest.icon.length > 0 ? join(dir, manifest.icon) : undefined
+  const candidates = iconPath === undefined
+    ? Object.keys(ICON_TYPES).map(extension => join(dir, `icon.${extension}`))
+    : [iconPath]
+  for (const candidate of candidates) {
+    const extension = candidate.split('.').pop()?.toLowerCase()
+    const type = extension === undefined ? undefined : ICON_TYPES[extension]
+    if (type === undefined) continue
+    try {
+      const bytes = readFileSync(candidate)
+      if (bytes.length > MAX_ICON_BYTES) continue
+      meta.icon = `data:${type};base64,${bytes.toString('base64')}`
+      break
+    } catch {
+      // No icon file at this candidate: the page falls back to its own placeholder.
+    }
+  }
+  return meta
+}
+
 export class SyncSwitches {
   /**
    * @param {object} options
@@ -132,6 +216,7 @@ export class SyncSwitches {
     if (dir === undefined) return []
     const nodeModules = join(dir, 'node_modules')
     return installedPlugins(this.manifest(), name => rowsOfBundle(nodeModules, name))
+      .map(plugin => ({ ...plugin, meta: metaOfBundle(nodeModules, plugin.bundle) }))
   }
 
   /** Every plugin with its effective switch and where that answer came from. */

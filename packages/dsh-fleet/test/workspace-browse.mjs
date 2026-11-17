@@ -171,9 +171,11 @@ check(found?.path === picked, 'still carrying the node path once merged', String
 // A second registration of the same directory is the same workspace, not a duplicate row:
 // a person who opens the dialog twice must not end up with two identical entries.
 const again = await post('/workspaces', { nodeId: remote.id, path: picked })
-check(again.body.workspace?.workspaceId === workspace?.workspaceId,
-  'picking the same folder twice is idempotent',
-  `${String(again.body.workspace?.workspaceId ?? '?')}`)
+// Guard the identity itself: two answers that both lack a workspaceId would compare equal
+// and report a pass for the wrong reason.
+const againId = again.body.workspace?.workspaceId
+check(typeof againId === 'string' && againId === workspace?.workspaceId,
+  'picking the same folder twice is idempotent', String(againId ?? '?'))
 
 // Off-protocol input is refused per-endpoint, with the message the dialog shows.
 const relative = await post('/workspaces', { nodeId: remote.id, path: 'root/project' })

@@ -1,6 +1,6 @@
 /**
- * The five routing decorators plus the merged control stream: `session`,
- * `workspace`, `workspaceFiles`, `job`, `terminal`.
+ * The routing decorators plus the merged control stream: `session`, `workspace`,
+ * `workspaceFiles`, `job`, `terminal`, `agentTeams`.
  *
  * Each factory takes the live upstream Service and the router, and returns an
  * undo function. Nothing here replaces a Loader row, imports from inside
@@ -633,6 +633,120 @@ export function decorateTerminalController(service, router) {
             },
           }
         },
+      }
+    },
+  })
+}
+
+/**
+ * Install the `agentTeams` namespace router.
+ *
+ * The composer's 智能体协作 switch is one `@Remote` method, `setEnabled(agent, enabled)`.
+ * Its first parameter is an `Agent` the Gateway resolves from the wire's `agentId`
+ * **before** the body runs, which `host/lookups.js` already answers for a wrapped id
+ * with a placeholder. Upstream then asks `ctx.subagents.rootOf(agent)` for the tree
+ * root, and that check requires the exact live caller — a placeholder is not one, so
+ * the call died with `subagent tree access requires the exact live caller` and the
+ * switch never reached the node. Routing it here is the whole fix: the agent's `id`
+ * decodes to the node's own Session, the node answers for its own Agent, and the
+ * reply is boolean-shaped either way.
+ *
+ * The read side needs nothing: `isEnabled` is not `@Remote`, so the browser reads Team
+ * mode from the Session's own `agentTeam` projection, which already arrives through
+ * the merged projection stream.
+ *
+ * @param {object} service - the live upstream `TeamService`.
+ * @param {import('./router.js').Router} router
+ * @returns {() => void}
+ */
+export function decorateTeamService(service, router) {
+  return decorateMethods(service, {
+    setEnabled: local => async function setEnabled(agent, enabled, signal) {
+      const decoded = decodeRemoteId(agent?.id)
+      if (decoded === undefined) return await local(agent, enabled, signal)
+      await router.call(decoded.nodeId, 'agentTeams/setEnabled', { agentId: decoded.remoteId, enabled }, signal)
+    },
+  })
+}
+
+/**
+ * Install the `sessionQuery` router.
+ *
+ * One route reads a Session's events without the browser asking for them: the card that
+ * offers "open in file manager" resolves the declared file's **Host path** first, and it
+ * does that through `sessionQuery.readEvent` on this Host. For a remote Session that read
+ * raised `SESSION_QUERY_SESSION_NOT_FOUND`, the route answered 404, and the card said
+ * 「无法在文件管理器中显示，请重试」 — a message that invites a retry which can never
+ * work, because a file on the node has no local file manager to open in.
+ *
+ * Emulating the read here turns that into the honest answer: the event is found, the file
+ * is resolved on the node, and the route then refuses for the real reason (no local path),
+ * which the card renders as 「此文件没有可用的主机路径，请在侧边栏预览」. That is also
+ * what the reference client decides for a remote workspace: it only offers a file-manager
+ * reveal when the target is a local machine.
+ *
+ * The read is emulated from `session/page` pinned at the event's own seq, because
+ * `readEvent` itself is Host-internal and has no wire endpoint on the node.
+ *
+ * @param {object} service - the live upstream `SessionQueryEngine`.
+ * @param {import('./router.js').Router} router
+ * @returns {() => void}
+ */
+export function decorateSessionQuery(service, router) {
+  return decorateMethods(service, {
+    readEvent: local => async function readEvent(request, signal) {
+      const sessionId = request === null || typeof request !== 'object' ? undefined : Reflect.get(request, 'sessionId')
+      const decoded = decodeRemoteId(typeof sessionId === 'string' ? sessionId : undefined)
+      if (decoded === undefined) return await local(request, signal)
+      const seq = Reflect.get(request, 'seq')
+      const before = Reflect.get(request, 'before') ?? 0
+      const after = Reflect.get(request, 'after') ?? 0
+      if (!Number.isInteger(seq) || seq < 0) return await local(request, signal)
+      const page = await router.call(decoded.nodeId, 'session/page', {
+        request: {
+          address: { kind: 'session', sessionId: decoded.remoteId },
+          throughSeq: seq,
+          maxMessages: 1,
+        },
+      }, signal)
+      const records = Array.isArray(Reflect.get(page ?? {}, 'records')) ? Reflect.get(page, 'records') : []
+      const events = records
+        .map(record => Reflect.get(record ?? {}, 'event'))
+        .filter(event => event !== null && typeof event === 'object')
+      const target = events.find(event => Reflect.get(event, 'seq') === seq)
+      if (target === undefined) {
+        throw Object.assign(
+          new Error(`session "${sessionId}" has no event at seq ${String(seq)}`),
+          { code: 'SESSION_QUERY_EVENT_NOT_FOUND' },
+        )
+      }
+      // The route reads `session.cwd` and decides the file's workspace root from it, so
+      // the header has to be the node's own Session header. `session/list` is the one
+      // place a remote header is already wrapped: take the unwrapped copy for the node.
+      const listed = await router.call(decoded.nodeId, 'session/list', { _request: {} }, signal)
+      const rows = Array.isArray(Reflect.get(listed ?? {}, 'items')) ? Reflect.get(listed, 'items') : []
+      const row = rows.find(entry => Reflect.get(entry ?? {}, 'sessionId') === decoded.remoteId)
+      const cwd = row === undefined ? undefined : Reflect.get(row, 'cwd')
+      const start = Math.max(0, seq - before)
+      const end = Math.min(seq + after, Number(Reflect.get(page ?? {}, 'cursor') ?? seq))
+      return {
+        // Only `cwd` is read by the route; the rest mirrors a header closely enough that a
+        // different reader sees a Session rather than a partial object.
+        session: {
+          version: 1,
+          id: sessionId,
+          createdAt: Number(Reflect.get(row ?? {}, 'createdAt') ?? 0),
+          ...(typeof cwd === 'string' ? { cwd } : {}),
+          isSeeded: false,
+        },
+        inheritedEventCount: 0,
+        target,
+        events: events.filter(event => {
+          const at = Reflect.get(event, 'seq')
+          return typeof at === 'number' && at >= start && at <= end
+        }),
+        startSeq: start,
+        endSeq: end,
       }
     },
   })

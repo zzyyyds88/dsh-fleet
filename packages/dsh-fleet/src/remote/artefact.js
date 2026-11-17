@@ -68,6 +68,32 @@ export const RUNTIME_BUILD = 2
 export const BUILD_STAMP = '.fleet-artefact.json'
 
 /**
+ * How long a download may sit below {@link FETCH_FLOOR_BYTES} per second before curl gives up.
+ *
+ * A runtime archive is ~170 MiB, so a *working* link needs minutes, not seconds: a plain
+ * `--max-time` either kills healthy downloads on a slow line or lets a dead one run
+ * forever. Measured, not hypothesised: on the test node the mirror pulled the whole
+ * archive in 4 s while the direct GitHub fallback managed 925 KB in 30 s. The install
+ * script lists both, so a mirror failure silently turns into a fallback that would run
+ * for over an hour — which reads to the user as "connecting hangs" with nothing to see.
+ * Giving up after a minute below the floor turns that into the named
+ * `ARTEFACT_UNAVAILABLE` failure the caller already reports.
+ */
+export const FETCH_FLOOR_BYTES = 4096
+
+/** Seconds below {@link FETCH_FLOOR_BYTES} before that download is abandoned. */
+export const FETCH_FLOOR_SECONDS = 60
+
+/**
+ * Hard ceiling for one archive download, in seconds.
+ *
+ * 30 minutes is ~100 KB/s for a 170 MiB archive: slower than that is not a line anyone
+ * can install a node over, and the budget still leaves room for a genuinely slow but
+ * working link.
+ */
+export const FETCH_CEILING_SECONDS = 1800
+
+/**
  * `uname -s` / `uname -m` names → the platform tag used in a Release asset name.
  *
  * Only the pairs this plugin can actually provision are listed. An unknown pair is not
@@ -201,7 +227,9 @@ cd "$(dirname "$runtime")"
 fetch() {
   for target in "$@"; do
     if command -v curl >/dev/null 2>&1; then
-      curl -fLsS --connect-timeout 15 --retry 2 -o "$OUT" "$target" && return 0
+      curl -fLsS --connect-timeout 15 --retry 2 \\
+        --speed-limit ${FETCH_FLOOR_BYTES} --speed-time ${FETCH_FLOOR_SECONDS} \\
+        --max-time ${FETCH_CEILING_SECONDS} -o "$OUT" "$target" && return 0
     elif command -v wget >/dev/null 2>&1; then
       wget -q -T 20 -t 2 -O "$OUT" "$target" && return 0
     else

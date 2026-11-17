@@ -86,6 +86,8 @@ window.__ModuleLoader__.load({
           pluginNoNodes: '还没有连接任何节点；开关会记住，连接时生效',
           pluginsNone: '这台机器上没有装第三方插件。装了之后会出现在这里，逐个决定要不要发到节点。',
           pluginFailed: '插件列表还没准备好',
+          pluginOnHint: '已下发到这个节点',
+          pluginOffHint: '只在这台机器上运行',
           pickFolder: '选择工作区文件夹',
           machine: '在哪台机器上',
           thisMachine: '本机',
@@ -94,6 +96,15 @@ window.__ModuleLoader__.load({
           loading: '正在读取…',
           noFolders: '这个目录下没有子文件夹。',
           truncated: '只显示前 500 个文件夹；可以直接在上面输入完整路径。',
+          newFolder: '新建文件夹',
+          newFolderTitle: '新建文件夹',
+          newFolderName: '文件夹名称',
+          newFolderPlaceholder: '例如 my-project',
+          newFolderCreate: '创建',
+          newFolderFailed: '新建文件夹失败',
+          drives: '磁盘',
+          workspaceName: '工作区名称',
+          workspaceNamePlaceholder: '留空则用文件夹名',
         }
       : {
           title: 'Remote nodes',
@@ -161,6 +172,15 @@ window.__ModuleLoader__.load({
           loading: 'Reading…',
           noFolders: 'No subfolders here.',
           truncated: 'Showing the first 500 folders; type a full path above to go anywhere.',
+          newFolder: 'New folder',
+          newFolderTitle: 'New folder',
+          newFolderName: 'Folder name',
+          newFolderPlaceholder: 'e.g. my-project',
+          newFolderCreate: 'Create',
+          newFolderFailed: 'Could not create the folder',
+          drives: 'Drives',
+          workspaceName: 'Workspace name',
+          workspaceNamePlaceholder: 'Leave empty to use the folder name',
         }
 
     /** Token-driven styles so light and dark both work. */
@@ -289,9 +309,16 @@ window.__ModuleLoader__.load({
      *
      * It fills the same slot the shipped pickers fill, so the gesture is unchanged: the
      * plus button next to Workspaces, or a new Session, opens it. Picking a path is the
-     * only thing this does; creating the workspace is the shell's job, which is why the
+     * main thing this does; creating the workspace is the shell's job, which is why the
      * answer is `onPicked(path)` and not an API call. A remote path is routed to its node
      * by the Host half, so one callback covers both cases.
+     *
+     * Two things go beyond naming a directory, both because the shell cannot do them:
+     * a folder can be **created** here (a new project usually has no folder yet), and a
+     * workspace can be **named** here (the shell derives the title from the folder name).
+     * A name is applied by creating the workspace first and then handing its path to the
+     * shell: `workspace/create` is idempotent, so the shell resolves the row that already
+     * carries the title instead of making a second one.
      */
     function WorkspaceFolderFlow(props) {
       const open = props.open === true
@@ -301,6 +328,10 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState(undefined)
       const [loading, setLoading] = useState(false)
       const [typed, setTyped] = useState('')
+      const [creating, setCreating] = useState(false)
+      const [newName, setNewName] = useState('')
+      const [newError, setNewError] = useState(undefined)
+      const [title, setTitle] = useState('')
 
       // Load the machine list when the dialog opens, not on mount: this component stays
       // mounted for the whole Session, and polling a node list that nobody is looking at
@@ -344,21 +375,49 @@ window.__ModuleLoader__.load({
         if (!open) return
         setListing(undefined)
         setError(undefined)
+        setCreating(false)
+        setNewName('')
+        setNewError(undefined)
+        setTitle('')
         void browse(nodeId, '')
       }, [open, nodeId, browse])
 
       if (!open) return null
 
       const current = listing?.path ?? ''
+      const roots = listing?.roots ?? []
+
+      /**
+       * Apply a name and hand the path to the shell.
+       *
+       * Without a name this is the cheap path the shell expects. With one, the workspace
+       * is created here first so the title has somewhere to live; the shell then resolves
+       * that same row. A failure is reported in the dialog and nothing is handed over,
+       * because a workspace that exists but is not selected looks like a lost click.
+       */
       const pick = async () => {
         if (current.length === 0) return
         setError(undefined)
+        const wanted = title.trim()
+        if (wanted.length === 0) {
+          props.onPicked?.(current)
+          return
+        }
+        setLoading(true)
         try {
-          // The shell creates the workspace and reports its own failure; this dialog's job
-          // ends at naming a directory.
+          await api('/workspaces', {
+            method: 'POST',
+            body: JSON.stringify({
+              ...(nodeId === '' ? {} : { nodeId }),
+              path: current,
+              title: wanted,
+            }),
+          })
           props.onPicked?.(current)
         } catch (failure) {
-          setError(failure instanceof Error ? failure.message : String(failure))
+          setError(failure.message)
+        } finally {
+          setLoading(false)
         }
       }
 
@@ -366,6 +425,29 @@ window.__ModuleLoader__.load({
         event.preventDefault()
         if (typed.trim().length === 0) return
         void browse(nodeId, typed.trim())
+      }
+
+      /** Create the folder being named, then stand inside it. */
+      const createFolder = async event => {
+        event.preventDefault()
+        const name = newName.trim()
+        if (name.length === 0 || current.length === 0) return
+        setNewError(undefined)
+        try {
+          const body = await api('/browse', {
+            method: 'POST',
+            body: JSON.stringify({
+              ...(nodeId === '' ? {} : { nodeId }),
+              path: current,
+              name,
+            }),
+          })
+          setCreating(false)
+          setNewName('')
+          await browse(nodeId, body.path)
+        } catch (failure) {
+          setNewError(failure.message)
+        }
       }
 
       const nodeOptions = [{ id: '', label: T.thisMachine }, ...nodes.map(node => ({
@@ -379,7 +461,7 @@ window.__ModuleLoader__.load({
         background: 'color-mix(in srgb, var(--dsw-alias-bg-base) 62%, transparent)',
       }
       const dialog = {
-        width: 'min(560px, calc(100vw - 32px))', maxHeight: 'min(560px, calc(100vh - 64px))',
+        width: 'min(560px, calc(100vw - 32px))', maxHeight: 'min(620px, calc(100vh - 64px))',
         display: 'flex', flexDirection: 'column', gap: 12, padding: 18,
         background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
         border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 12,
@@ -391,6 +473,23 @@ window.__ModuleLoader__.load({
         appearance: 'none', background: 'transparent', border: 'none', borderRadius: 6,
         color: 'var(--dsw-alias-label-primary)', fontSize: 13,
       }
+      // A native `<select>` keeps the platform's square frame no matter what the box
+      // radius says, so the frame is drawn here and the arrow is our own glyph. Same for
+      // the paths: the two pickers have to look like one control.
+      const selectWrap = {
+        position: 'relative', display: 'flex', alignItems: 'center',
+        border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8,
+        background: 'var(--dsw-alias-bg-layer-1)',
+      }
+      const selectStyle = {
+        appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none',
+        flex: '1 1 auto', minWidth: 0, padding: '8px 30px 8px 10px', border: 'none',
+        borderRadius: 8, background: 'transparent', outline: 'none',
+        color: 'var(--dsw-alias-label-primary)', fontSize: 13, cursor: 'pointer',
+      }
+      const chipStyle = extra => ({
+        ...styles.button, padding: '3px 9px', fontSize: 12, borderRadius: 999, ...extra,
+      })
 
       return h('div', { style: overlay, role: 'dialog', 'aria-label': T.pickFolder },
         h('div', { style: dialog },
@@ -402,16 +501,35 @@ window.__ModuleLoader__.load({
               onClick: () => props.onCancel?.(),
             }, T.cancel)),
 
-          // Machine first, folder second: that is the one extra decision a remote
+          // Name first, then machine, then folder: the same order the shipped
+          // project form uses, so the two dialogs read as one flow.
+          h('label', { style: styles.field },
+            h('span', { style: styles.label }, T.workspaceName),
+            h('input', {
+              style: { ...styles.input, fontSize: 13 },
+              placeholder: T.workspaceNamePlaceholder,
+              value: title,
+              onChange: event => setTitle(event.target.value),
+            })),
+
+          // Machine next, folder last: that is the one extra decision a remote
           // workspace needs, and it is why the local picker could not do this job.
           h('label', { style: styles.field },
             h('span', { style: styles.label }, T.machine),
-            h('select', {
-              style: { ...styles.input, cursor: 'pointer' },
-              value: nodeId,
-              disabled: loading,
-              onChange: event => setNodeId(event.target.value),
-            }, nodeOptions.map(option => h('option', { key: option.id, value: option.id }, option.label)))),
+            h('span', { style: selectWrap },
+              h('select', {
+                style: selectStyle,
+                value: nodeId,
+                disabled: loading,
+                onChange: event => setNodeId(event.target.value),
+              }, nodeOptions.map(option => h('option', { key: option.id, value: option.id }, option.label))),
+              h('span', {
+                'aria-hidden': true,
+                style: {
+                  position: 'absolute', right: 11, pointerEvents: 'none',
+                  color: 'var(--dsw-alias-label-secondary)', fontSize: 10, lineHeight: 1,
+                },
+              }, '▼'))),
 
           h('form', { style: { display: 'flex', gap: 8 }, onSubmit: goTyped },
             h('button', {
@@ -428,6 +546,56 @@ window.__ModuleLoader__.load({
             }),
             h('button', { type: 'submit', style: { ...styles.button, flex: '0 0 auto' }, disabled: loading }, T.go)),
 
+          // A drive is a root the home directory cannot reach: walking "up" from
+          // `C:\Users\me` stops at `C:\`, so `D:\projects` needed a typed path. The
+          // listing answers which roots exist, and they read as chips on one line.
+          roots.length > 1
+            ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+                h('span', { style: styles.label }, T.drives),
+                roots.map(root => h('button', {
+                  key: root,
+                  type: 'button',
+                  style: chipStyle(current === root ? { borderColor: 'var(--dsw-alias-brand-primary)' } : {}),
+                  disabled: loading,
+                  onClick: () => { void browse(nodeId, root) },
+                }, root)))
+            : null,
+
+          creating
+            ? h('form', {
+                style: { display: 'flex', gap: 8, alignItems: 'center' },
+                onSubmit: createFolder,
+              },
+              h('input', {
+                style: { ...styles.input, flex: '1 1 auto', fontSize: 12 },
+                placeholder: T.newFolderPlaceholder,
+                'aria-label': T.newFolderName,
+                value: newName,
+                autoFocus: true,
+                onChange: event => setNewName(event.target.value),
+              }),
+              h('button', {
+                type: 'submit',
+                style: { ...styles.buttonPrimary, ...(newName.trim().length === 0 ? styles.buttonDisabled : {}) },
+                disabled: newName.trim().length === 0,
+              }, T.newFolderCreate),
+              h('button', {
+                type: 'button',
+                style: styles.button,
+                onClick: () => { setCreating(false); setNewName(''); setNewError(undefined) },
+              }, T.cancel))
+            : h('div', { style: { display: 'flex', justifyContent: 'flex-start' } },
+                h('button', {
+                  type: 'button',
+                  style: styles.button,
+                  disabled: current.length === 0 || loading,
+                  onClick: () => { setCreating(true); setNewError(undefined) },
+                }, `＋ ${T.newFolder}`)),
+
+          newError !== undefined
+            ? h('div', { style: { ...styles.errorBar, margin: 0 } }, `${T.newFolderFailed}: ${newError}`)
+            : null,
+
           h('div', {
             style: {
               flex: '1 1 auto', minHeight: 120, maxHeight: 260, overflowY: 'auto',
@@ -442,11 +610,12 @@ window.__ModuleLoader__.load({
                   key: entry.path,
                   type: 'button',
                   style: rowStyle,
-                  onDoubleClick: () => void browse(nodeId, entry.path),
+                  title: entry.path,
                   onClick: () => void browse(nodeId, entry.path),
                 }, h('span', { 'aria-hidden': true, style: { opacity: 0.6 } }, '📁'), entry.name))),
 
           listing?.truncated === true ? h('p', { style: styles.groupHint }, T.truncated) : null,
+
           error !== undefined ? h('div', { style: { ...styles.errorBar, margin: 0 } }, error) : null,
 
           h('div', { style: { ...styles.actions, marginTop: 'auto' } },
@@ -454,7 +623,7 @@ window.__ModuleLoader__.load({
             h('button', {
               type: 'button',
               style: { ...styles.buttonPrimary, ...(current.length === 0 ? styles.buttonDisabled : {}) },
-              disabled: current.length === 0,
+              disabled: current.length === 0 || loading,
               onClick: () => { void pick() },
             }, T.addWorkspace))),
       )
@@ -752,6 +921,25 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * A neutral tile for a plugin that ships no icon.
+     *
+     * Drawn rather than typed: an emoji here renders as a coloured glyph that competes
+     * with the real icons beside it, so a bundle without one looks like a different kind
+     * of thing instead of an unlabelled one.
+     */
+    function PluginGlyph({ size }) {
+      const edge = size ?? 18
+      return h('svg', {
+        width: edge, height: edge, viewBox: '0 0 24 24', fill: 'none', 'aria-hidden': true,
+        style: { display: 'block' },
+      },
+      h('rect', { x: 3, y: 3, width: 8, height: 8, rx: 1.6, stroke: 'currentColor', strokeWidth: 1.6 }),
+      h('rect', { x: 13, y: 3, width: 8, height: 8, rx: 1.6, stroke: 'currentColor', strokeWidth: 1.6 }),
+      h('rect', { x: 3, y: 13, width: 8, height: 8, rx: 1.6, stroke: 'currentColor', strokeWidth: 1.6 }),
+      h('rect', { x: 13, y: 13, width: 8, height: 8, rx: 1.6, stroke: 'currentColor', strokeWidth: 1.6 }))
+    }
+
+    /**
      * Per-plugin "send to nodes" switches — one row per plugin you installed.
      *
      * The row is a **bundle**, because that is the unit both sides understand: this
@@ -816,32 +1004,95 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * One switch, drawn like the shipped toggle.
+       *
+       * This plugin cannot import another plugin's control, so the switch is local. It
+       * keeps the same shape and the same `role="switch"` semantics so both pages read
+       * as one product.
+       */
+      const switchStyle = on => ({
+        position: 'relative', flex: '0 0 auto', width: 36, height: 20, padding: 0,
+        appearance: 'none', border: 'none', borderRadius: 999, cursor: 'pointer',
+        background: on ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-border-l2)',
+        transition: 'background 120ms ease',
+      })
+      const thumbStyle = on => ({
+        position: 'absolute', top: 2, left: on ? 18 : 2, width: 16, height: 16,
+        borderRadius: '50%', background: '#fff', transition: 'left 120ms ease',
+        boxShadow: '0 1px 2px rgba(0,0,0,0.25)',
+      })
+
       const detail = row => {
         const parts = []
-        if (row.spec.length > 0) parts.push(row.spec)
         if (row.rows.length > 0) parts.push(T.pluginRows(row.rows.length))
         parts.push(row.loaded ? T.pluginLoaded : T.pluginInstalledOnly)
         return parts.join(' · ')
       }
 
-      const rowNode = (row, index) => h('div', {
+      /**
+       * The row's display text in the reader's language.
+       *
+       * The Host reads both dictionaries because it does not know which one this browser
+       * wants; choosing here is what keeps the page from showing Chinese descriptions to
+       * someone reading the English UI. Where a plugin ships only one language, that one
+       * is shown — an untranslated sentence is more useful than a bare package name.
+       */
+      const metaText = row => {
+        const meta = row.meta ?? {}
+        const title = zh ? meta.title : (meta.titleEn ?? meta.title)
+        const description = zh ? meta.description : (meta.descriptionEn ?? meta.description)
+        return { title: title ?? row.bundle, description }
+      }
+
+      const rowNode = row => h('div', {
         key: row.bundle,
-        style: { ...styles.workspaceRow, ...(index === 0 ? styles.rowFirst : {}) },
+        style: { ...styles.workspaceRow, padding: '12px 14px', alignItems: 'flex-start', gap: 12 },
       },
-      h('label', {
-        style: { display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto', minWidth: 0, cursor: 'pointer' },
-      },
-      h('input', {
-        type: 'checkbox',
-        checked: row.sync === true,
+      // The icon is the bundle's own, resolved the way DSH resolves it for its plugin
+      // page; without one the row shows a neutral tile rather than a broken image.
+      row.meta?.icon === undefined
+        ? h('span', {
+            style: {
+              flex: '0 0 auto', width: 36, height: 36, borderRadius: 9,
+              background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-border-l1))',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: 'var(--dsw-alias-label-secondary)',
+            },
+            'aria-hidden': true,
+          }, h(PluginGlyph, { size: 18 }))
+        : h('img', {
+            src: row.meta.icon,
+            alt: '',
+            style: { flex: '0 0 auto', width: 36, height: 36, borderRadius: 9, objectFit: 'cover' },
+          }),
+      h('div', { style: { ...styles.grow, display: 'flex', flexDirection: 'column', gap: 3 } },
+        h('div', { style: { ...styles.name, fontWeight: 500 } }, metaText(row).title),
+        metaText(row).description === undefined
+          ? null
+          : h('div', {
+              style: {
+                fontSize: 12, lineHeight: 1.45, color: 'var(--dsw-alias-label-secondary)',
+                display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+              },
+            }, metaText(row).description),
+        // The identity and the local state stay readable, but they are the second line:
+        // the title above is what a person recognizes.
+        h('div', { style: styles.mono, title: detail(row) }, `${row.bundle} · ${detail(row)}`)),
+      h('button', {
+        type: 'button',
+        role: 'switch',
+        'aria-checked': row.sync === true,
+        'aria-label': metaText(row).title,
+        title: row.sync === true ? T.pluginOnHint : T.pluginOffHint,
         disabled: busy === row.bundle,
-        onChange: () => { void toggle(row) },
-      }),
-      h('span', { style: styles.grow },
-        h('div', { style: styles.name }, row.bundle),
-        // `title` keeps the version and row count readable without wrapping the row.
-        h('div', { style: styles.meta, title: detail(row) }, detail(row)))),
-      busy === row.bundle ? h('span', { style: styles.meta }, '…') : null)
+        style: {
+          ...switchStyle(row.sync === true),
+          ...(busy === row.bundle ? { opacity: 0.5, cursor: 'default' } : {}),
+          marginTop: 2,
+        },
+        onClick: () => { void toggle(row) },
+      }, h('span', { style: thumbStyle(row.sync === true), 'aria-hidden': true })))
 
       return h('section', null,
         h('div', { style: styles.groupHeader },
@@ -857,7 +1108,11 @@ window.__ModuleLoader__.load({
           ? h('div', { style: { ...styles.list, ...styles.empty } }, T.pluginFailed)
           : rows.length === 0
             ? h('div', { style: { ...styles.list, ...styles.empty } }, T.pluginsNone)
-            : h('div', { style: styles.list }, rows.map(rowNode)),
+            : h('div', { style: styles.list },
+                rows.map((row, index) => h('div', {
+                  key: row.bundle,
+                  style: { ...styles.row, ...(index === 0 ? styles.rowFirst : {}) },
+                }, rowNode(row)))),
       )
     }
 

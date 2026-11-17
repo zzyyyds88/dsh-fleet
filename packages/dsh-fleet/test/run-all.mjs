@@ -276,7 +276,13 @@ const SUITES = [
     layer: 'e2e',
     file: ['packages', 'dsh-fleet', 'test', 'artefact-acceptance.mjs'],
     runtime: 'node',
-    timeoutMs: 1_500_000,
+    // The suite installs twice (the second install proves replacement + rollback), and each
+    // install downloads a ~165 MiB archive. On a fast mirror that is 70 s; measured on a slow
+    // one it was 653 s per install. Two downloads at the script's own 1800 s ceiling plus
+    // unpack and `node --version` is the honest upper bound, so this budget is 45 minutes.
+    // It is network-bound, not CPU-bound: it is the one suite worth `--skip artefact` for a
+    // quick loop, and the one whose runtime says nothing about the plugin's own speed.
+    timeoutMs: 2_700_000,
     needs: 'release',
     proves: 'the real install script on the real node: download, checksum, unpack, replace, version, rollback',
   },

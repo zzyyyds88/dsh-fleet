@@ -37,6 +37,21 @@ const SESSION_REQUEST_KEYS = Object.freeze(['request', 'sessionId', 'address'])
 const SESSION_ID_PATTERN = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
 
 /**
+ * A Session identity with no `session-` marker.
+ *
+ * A subagent's own Session is stored as a bare uuid, so a client that lists one gets
+ * `sessionId: "93f9…"` and builds a `{kind:'subagent', parentSessionId, childSessionId}`
+ * address from it. Left unwrapped, that child id names nothing on this Host, the route
+ * falls through to the local implementation, and opening the child's history answers
+ * `subagent/not-found`. A bare uuid is only ever a subagent Session here, and only a
+ * Session field can hold one, so the field name is what makes wrapping safe.
+ */
+const BARE_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
+
+/** Fields whose value is a Session identity even when it carries no `session-` marker. */
+const SESSION_FIELDS = Object.freeze(new Set(['sessionId', 'childSessionId', 'parentSessionId']))
+
+/**
  * Pull the Session identity out of one request object.
  * @param {Record<string, unknown> | undefined} request
  * @returns {string | undefined}
@@ -166,31 +181,45 @@ export class Router {
    * Turn one node's answer into the local form: its own identities become the
    * wrapped ones.
    *
-   * Only a string that is *exactly* a Session identity is rewritten. A plain
+   * A marked `session-<uuid>` string is rewritten wherever it appears. A plain
    * `session-` prefix test would also catch event types such as
    * `session-log-deepseek/delivery-accepted` and corrupt them, so the match is the
    * full identity shape.
+   *
+   * A **subagent's own Session has no marker**: the node stores and lists it as a
+   * bare uuid. Only the field name says it is an identity, so `sessionId`,
+   * `childSessionId` and `parentSessionId` are wrapped by name. Without that a
+   * listed child row reached the client as a bare uuid, the client built a
+   * subagent address from it, nothing on this Host decoded it, and opening that
+   * child's history fell through to the local Host and answered
+   * `subagent/not-found`.
+   *
    * @param {unknown} value
    * @param {string} nodeId
    */
   toLocal(value, nodeId) {
     const map = new Map()
-    const wrap = node => {
+    const wrapString = node => {
+      if (isRemoteId(node)) return node
+      if (!SESSION_ID_PATTERN.test(node) && !BARE_SESSION_ID_PATTERN.test(node)) return node
+      const encoded = encodeRemoteId(nodeId, node)
+      map.set(node, encoded)
+      return encoded
+    }
+    const wrap = (node, key) => {
       if (typeof node === 'string') {
-        if (!SESSION_ID_PATTERN.test(node) || isRemoteId(node)) return node
-        const encoded = encodeRemoteId(nodeId, node)
-        map.set(node, encoded)
-        return encoded
+        if (!SESSION_FIELDS.has(key) && !SESSION_ID_PATTERN.test(node)) return node
+        return wrapString(node)
       }
       if (node === null || typeof node !== 'object') return node
-      if (Array.isArray(node)) return node.map(wrap)
+      if (Array.isArray(node)) return node.map(entry => wrap(entry, key))
       const prototype = Object.getPrototypeOf(node)
       if (prototype !== Object.prototype && prototype !== null) return node
       const out = {}
-      for (const key of Object.keys(node)) out[key] = wrap(node[key])
+      for (const field of Object.keys(node)) out[field] = wrap(node[field], field)
       return out
     }
-    const walked = wrap(value)
+    const walked = wrap(value, undefined)
     return map.size === 0 ? walked : remapIds(walked, map)
   }
 

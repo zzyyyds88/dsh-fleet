@@ -32,7 +32,13 @@ import { fileURLToPath } from 'node:url'
 import { apiError, describeFailure, readJsonBody, sendJson } from './core/http-error.js'
 import { decideGate } from './core/version.js'
 import { Fleet, BRAIN_BUNDLES } from './host/fleet.js'
-import { isPosixAbsolute, listLocal, listRemote } from './host/browse.js'
+import {
+  isPosixAbsolute,
+  listLocal,
+  listRemote,
+  makeLocalDirectory,
+  makeRemoteDirectory,
+} from './host/browse.js'
 import { RemoteControl } from './host/remote-control.js'
 import { RemoteEvents } from './host/remote-events.js'
 import { RemoteWaterfalls } from './host/remote-waterfall.js'
@@ -43,7 +49,9 @@ import { overrideAgentLookup, overrideWorkspaceFileScope } from './host/lookups.
 import {
   decorateJobController,
   decorateSessionController,
+  decorateSessionQuery,
   decorateTerminalController,
+  decorateTeamService,
   decorateWorkspaceController,
   decorateWorkspaceFiles,
 } from './host/decorators.js'
@@ -110,6 +118,15 @@ export function apply(ctx, config = {}) {
   const brainVersion = localBrainVersion()
   /** @type {SyncSwitches | undefined} — composed once `configEditor` exists. */
   let switches
+  /**
+   * The live Workspace controller.
+   *
+   * The management surface needs it for one thing the shell cannot do: naming a local
+   * workspace at creation time. Held here rather than reached for on every request,
+   * because a Host without that row must answer "not composed yet" instead of throwing.
+   * @type {object | undefined}
+   */
+  let workspaceController
   const fleet = new Fleet({
     credentials: ctx.credentials,
     version,
@@ -241,23 +258,59 @@ export function apply(ctx, config = {}) {
           return
         }
         if (req.method === 'POST') {
-          // Register a directory on a node as a workspace.
+          // Register a folder as a workspace, on either machine.
           //
-          // A local folder does not come through here at all: the picker's own flow hands
-          // the path to the shell, which creates the local workspace itself. This endpoint
-          // exists for the one case the shell cannot do — the path lives on another
-          // machine, and only that machine's Host can register it.
+          // A remote folder is the case the shell cannot do at all: only that machine's
+          // Host can register a directory there. A local folder only comes through here
+          // when the person typed a name — the shell creates the row itself and takes the
+          // title from the folder name, so naming one is the one thing left over.
           const body = await readJsonBody(req)
-          const nodeId = typeof body.nodeId === 'string' ? body.nodeId : undefined
+          const nodeId = typeof body.nodeId === 'string' && body.nodeId.length > 0 ? body.nodeId : undefined
           const path = typeof body.path === 'string' ? body.path.trim() : ''
-          if (nodeId === undefined) throw apiError('node-required', 'name the node this directory lives on', 400)
+          // The name a person typed. Upstream derives a Workspace's title from the
+          // folder name and has no create-time title, so a custom name is a rename
+          // applied to the row we just created — the node records one workspace
+          // either way, and the sidebar shows what was asked for.
+          const title = typeof body.title === 'string' ? body.title.trim() : ''
+          if (path.length === 0) throw apiError('path-required', 'a folder path is required', 400)
+          if (nodeId === undefined) {
+            // A local folder, reached only because a name was asked for: without one the
+            // picker hands the path straight to the shell, which creates the row itself.
+            // Answering a nameless local request here would silently take over a job the
+            // shell already owns, so it stays refused exactly as it was.
+            if (title.length === 0) {
+              throw apiError('node-required', 'name the node this directory lives on', 400)
+            }
+            if (workspaceController === undefined) {
+              throw apiError('not-composed', 'the workspace controller is not available yet', 503)
+            }
+            let value = await workspaceController.create({ path })
+            const createdId = Reflect.get(Reflect.get(value ?? {}, 'workspace') ?? {}, 'workspaceId')
+            if (typeof createdId === 'string') {
+              value = await workspaceController.rename({ workspaceId: createdId, title })
+            }
+            sendJson(res, 200, { ok: true, ...value })
+            return
+          }
           if (!isPosixAbsolute(path)) {
             throw apiError('path-invalid', 'a remote workspace path must be absolute, e.g. /root/project', 400)
           }
           const runtime = fleet.get(nodeId)
           if (runtime === undefined) throw apiError('node-not-found', `no node ${nodeId}`, 404)
           if (!runtime.routable) throw apiError('node-offline', `${runtime.record.name} is not connected`, 409)
-          const value = await router.call(nodeId, 'workspace/create', { request: { path } })
+          let value = await router.call(nodeId, 'workspace/create', { request: { path } })
+          const createdId = Reflect.get(Reflect.get(value ?? {}, 'workspace') ?? {}, 'workspaceId')
+          if (title.length > 0 && typeof createdId === 'string') {
+            // A rename that fails must not lose the workspace that was just created:
+            // report the row, and let the surface show its own default name.
+            try {
+              value = await router.call(nodeId, 'workspace/rename', {
+                request: { workspaceId: createdId, title },
+              })
+            } catch (error) {
+              log(`fleet: created ${path} on ${nodeId} but could not name it: ${error.message}`)
+            }
+          }
           await workspaces.sync()
           // Same shape as the `workspace/create` decorator returns, because the surface
           // reads one shape: `{workspace, created}`. Wrapping the whole reply rather than
@@ -274,8 +327,36 @@ export function apply(ctx, config = {}) {
       // lists this machine, with one it lists that node over the SSH connection this
       // plugin already holds. The answer has the same shape either way, so the surface
       // has one rendering path — that is what makes a remote folder feel like a local one.
+      //
+      // `POST` on the same path creates one folder inside the directory being shown: the
+      // picker needs to make a project directory without leaving the dialog, on both
+      // sides. The name is one path segment and the parent is whatever the dialog is
+      // displaying, so a caller cannot create outside it.
       if (head === 'browse' && id === undefined) {
-        if (req.method !== 'GET') throw apiError('method-not-allowed', 'use GET to browse folders', 405)
+        if (req.method === 'POST') {
+          const body = await readJsonBody(req)
+          const nodeId = typeof body.nodeId === 'string' && body.nodeId.length > 0 ? body.nodeId : undefined
+          const parent = typeof body.path === 'string' ? body.path.trim() : ''
+          const name = typeof body.name === 'string' ? body.name : ''
+          let created
+          try {
+            if (nodeId === undefined) {
+              created = await makeLocalDirectory(parent, name)
+            } else {
+              const runtime = fleet.get(nodeId)
+              if (runtime === undefined) throw apiError('node-not-found', `no node ${nodeId}`, 404)
+              if (!runtime.routable) throw apiError('node-offline', `${runtime.record.name} is not connected`, 409)
+              created = await makeRemoteDirectory(runtime.connection, parent, name)
+            }
+          } catch (error) {
+            if (error?.code === 'node-not-found' || error?.code === 'node-offline') throw error
+            const code = error?.code === 'name-invalid' || error?.code === 'path-invalid' ? 'name-invalid' : 'create-failed'
+            throw apiError(code, error instanceof Error ? error.message : String(error), 400)
+          }
+          sendJson(res, 200, { ok: true, nodeId, path: created, parent })
+          return
+        }
+        if (req.method !== 'GET') throw apiError('method-not-allowed', 'use GET to browse folders, POST to create one', 405)
         const nodeId = url.searchParams.get('node') ?? undefined
         const path = url.searchParams.get('path') ?? ''
         if (nodeId === undefined || nodeId.length === 0) {
@@ -386,6 +467,7 @@ export function apply(ctx, config = {}) {
     const workspace = scope.get('workspaceController')
     const files = scope.get('workspaceFiles')
     if (session === undefined || workspace === undefined || files === undefined) return
+    workspaceController = workspace
     const undo = [
       decorateSessionController(session, router, workspaces, control),
       decorateWorkspaceController(workspace, router, workspaces),
@@ -398,6 +480,16 @@ export function apply(ctx, config = {}) {
     if (jobs !== undefined) undo.push(decorateJobController(jobs, router))
     const terminal = scope.get('terminalController')
     if (terminal !== undefined) undo.push(decorateTerminalController(terminal, router))
+    // The composer's 智能体协作 switch names a remote Session's Agent, which only the
+    // node that hosts it can act on. See `decorateTeamService` for why the
+    // placeholder Agent is not enough on its own.
+    const teams = scope.get('agentTeams')
+    if (teams !== undefined) undo.push(decorateTeamService(teams, router))
+    // A remote Session's events are not in this Host's query engine, so the route that
+    // backs "open in file manager" could not find the event it was asked about and
+    // answered 404. See `decorateSessionQuery` for the read it now gets instead.
+    const query = scope.get('sessionQuery')
+    if (query !== undefined) undo.push(decorateSessionQuery(query, router))
     // A remote Session id is not a local Session, so the Gateway's own lookup
     // cannot resolve a file scope for it; teach that lookup about wrapped ids.
     const undoLookup = overrideWorkspaceFileScope(scope)
@@ -412,6 +504,7 @@ export function apply(ctx, config = {}) {
       }
       try { undoLookup?.() } catch { /* already gone */ }
       try { undoAgent?.() } catch { /* already gone */ }
+      workspaceController = undefined
     }, 'dsh-fleet: routing decorators')
   })
 

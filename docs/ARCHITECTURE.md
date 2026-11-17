@@ -98,6 +98,8 @@ fleet_n0123456789ab_session-1dc98667-3f1e-4f47-9d5b-2a4e2b3d3f6a
 
 一条必须遵守的规则：**只有完整匹配 Session 身份形状的字符串才重写**。松散的 `startsWith('session-')` 会把事件**类型** `session-log-deepseek/delivery-accepted` 也改写掉，于是客户端渲染的每一个事件都被静默污染。`test/host-routing.mjs` 有一条专门的断言守这个。
 
+**子代理的 Session 没有 `session-` 前缀**：节点用裸 uuid 铸造它（`sessionId: "026e33cb-…"`，父 Session 才是 `session-<uuid>`）。所以「按值匹配形状」不够，方向反过来的 `toLocal` 还得**按字段名**包装：`sessionId`、`childSessionId`、`parentSessionId` 里出现裸 uuid 一律包。只按值匹配的后果实测过一次：侧栏列出的子代理 id 是裸 uuid，浏览器按目录行拼出 `{kind:'subagent', parentSessionId, childSessionId}` 地址，本机 `decodeRemoteId` 解不出来，`session/page` 落到本地实现，本机没有那段日志，于是「历史加载失败：subagent is unavailable（subagent/not-found）」。字段名是这里唯一的判据，因为一个裸 uuid 只可能是子代理 Session，而只有 Session 字段能装它。
+
 Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不同（`workspaceId` / `workspaceIds` / `beforeWorkspaceId`）。
 
 ---
@@ -116,12 +118,25 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 | `workspace/create` | **按路径路由** | 绝对 POSIX 路径逐节点尝试（节点侧 `realpath` 校验必须通过） |
 | `workspace/rename` 等变更 | **按 owner 转发** | 按 workspaceId 找节点 |
 | `workspaceFiles/{list,stat,read,…}` | **路由** | 靠缝隙二解析出节点，payload 用 `workspaceFileScopeId` |
+| `agentTeams/setEnabled` | **按 owner 转发** | 形参是 `Agent`，但装饰器先用 `agent.id` 解出节点再转发，见下 |
+| `sessionQuery.readEvent` | **按 owner 转发** | Host 内部方法，没有 wire 端点，见下 |
 | `job/list`、`follow`、`kill` | **路由** | 按 Session id 找节点；`follow` 的 `sessionId` 是可选的（无主 job 谁都能看），没有它就不猜节点 |
 | `terminal/list`、`watch` | **路由** | 让侧栏能报告远程 Session 的终端 |
 | `terminal/create`、`attach` … | **保持本地** | 形参里是 `Agent` 对象，远程 Session 在本地没有 Agent |
 | `session/modelCatalog`、`agentPresets/*`、`settings/*`、`pluginManager/*` | **保持本地** | 描述的是**这个安装**的模型与配置，与节点无关 |
 
 `workspace/create` 的按路径路由有个现实理由：**本地目录选择器只能浏览本机**，永远选不到节点上的 `/root/project`。所以远程工作区从 `/fleet/api/workspaces` 加入（设置页节点行展开后的输入框），它在节点上 `workspace/create`，再把结果包装成本地身份还回来。
+
+### 形参里是 `Agent` 的两个例外
+
+上游把「带身份的端点」分成两类：身份在 `request.sessionId` 里，或者身份是一个 `Agent` 对象（`invocation.kind === 'context', context: 'agent'`）。第一类靠 `decodeRemoteId` 就够了；第二类不能只靠包装 id —— Gateway 在方法体运行**之前**就用 `ctx.typert.contexts.registerHost('agent', …)` 把 `agentId` 解成节点上那个 Agent，而我们的 `overrideAgentLookup` 只能给包装 id 造一个**占位对象**。占位对象不是注册过的 Agent，`ctx.agents.get(id)` 拿不到它，于是上游自己的守卫先炸：
+
+- `agentTeams/setEnabled`：`TeamService` 第一行就 `ctx.subagents.rootOf(agent)`，要求 `agents.get(caller.id) === caller`，否则抛 `subagent tree access requires the exact live caller`。它不是 `RemoteError`，Gateway 兜底成 `gateway/internal`，浏览器把原文显示成「智能体协作无法打开」。
+- `sessionQuery.readEvent`：不是 `@Remote`，是 Host 内部方法，`/api/present.open` 用它按 `{sessionId, seq}` 取事件。远程 Session 的事件不在本机的 query engine 里，于是那个路由 404，卡片显示「无法在文件管理器中显示，请重试」—— 一句让人反复重试却永远不可能成功的话。
+
+两个都用同一种办法绕开，因为上游那两个方法体的**前置条件在本机无法满足**：装饰器先用 `agent.id` / `request.sessionId` 解出节点，再把**节点自己的形参**转过去。`sessionQuery.readEvent` 没有 wire 端点，所以读法是拿 `session/page` 钉在事件自己的 `seq` 上（`throughSeq` 取该 seq），Session 头从 `session/list` 那一行取 `cwd` —— 路由只用 `cwd` 定位工作区根目录。
+
+转发之后 `/api/present.open` 不再是 404 而是 **422**，这不是退步而正是正确答案：`openVerified` 用 `ctx.fs.processPathFromHostPath` 把节点路径映射成本机路径，节点上的 `/root/x.html` 在 Windows 上没有映射，于是拒绝。上游客户端把 422 记成 `nativeUnavailable`，文案是「此文件没有可用的主机路径，请在侧边栏预览」—— 这是对一台远程机器上的文件唯一诚实的答案，也正好对得上 zcode 的判据：只有目标是本机（或 WSL）时才提供「在文件管理器中显示」。
 
 ### 为什么"快照对"不等于"侧栏活"
 
@@ -447,6 +462,15 @@ Release，节点下载 `dsh-<version>-<platform>.tar.gz` + `.sha256`。
 使用时失败；解压到 `runtime.incoming` 后整体 rename，失败回滚到 `runtime.previous`；退出码
 3 表示"这个平台没有制品"，只有它才回退 npm。
 
+**下载要有下限，也要有上限。** 候选 URL 是"加速地址 + 直连 GitHub"，两者速度差两个数量级：
+实测同一台节点上加速地址 4 秒拉完 172 683 323 字节，直连 30 秒只拿到 925 295 字节。旧脚本对
+curl 只有 `--connect-timeout 15 --retry 2` —— 那只管**建连**，不管**传输**。于是加速地址关掉
+或超时之后，直连那一路会以 ~30 KB/s 爬 170 MiB，一个多小时毫无输出，对用户就是"连节点卡住"。
+现在的判据是 `--speed-limit 4096 --speed-time 60`（低于 4 KB/s 持续 60 秒就放弃这一路，按已有的
+`ARTEFACT_UNAVAILABLE` 命名失败返回）加 `--max-time 1800`（慢但能用的线路仍有 ~100 KB/s 的
+完整预算）。两个数都是常量（`FETCH_FLOOR_BYTES` / `FETCH_FLOOR_SECONDS` /
+`FETCH_CEILING_SECONDS`），`version-unit` 有断言守着。
+
 ### 每节点一份路径
 
 两个节点记录可以指向同一台机器的不同 `remoteRoot` —— 这是测试第二个节点最方便的方式，也是真
@@ -544,6 +568,7 @@ bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，
 | `waterfall-unit.mjs` | 审批/提问中继：允许的 waterfall 才发到浏览器、拒绝与超时各自结算、节点断开时卡片被取消、问题按自己的名字转发 | 无 |
 | `workspace-browse.mjs` | 加工作区对话框背后的两个接口：本机与节点用同一形状回答、节点列的是节点的盘（`/` 没有上级、隐藏目录不列、不存在的目录报 shell 的原因）、选中的节点目录变成带包裹身份的工区 | 运行中的 Host + 已连接节点 |
 | `plugin-switch.mjs` | 单个插件的开关真的落到节点：包被安装或复制上去、节点自己的 bundle 列表里排在脑 bundle **之前**、常驻 host 重启后仍答得出、远程工区数量不变；关回去同样干净，异常退出也恢复开关 | 同上 |
+| 手工 §2b / §7c | 脚本走协议、用户走界面，两者都要过：真实 Chrome 里新建远程会话、敲字、发送、看到「已完成」；再看智能体协作开关、子代理历史、产物卡片的原生打开 | 运行中的 Host + 真实 Chrome |
 
 ### 一条命令跑完
 

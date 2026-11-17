@@ -22,6 +22,9 @@ import {
   artefactName,
   artefactUrls,
   DEFAULT_MIRROR,
+  FETCH_CEILING_SECONDS,
+  FETCH_FLOOR_BYTES,
+  FETCH_FLOOR_SECONDS,
   inspectRuntime,
   installScript,
   platformTag,
@@ -148,6 +151,15 @@ const check = (ok, label, detail) => {
   check(script.includes('curl') && script.includes('wget'),
     'it works with either downloader, since a node may have only one')
   check(script.includes('--connect-timeout 15'), 'a hanging download cannot hang the connect')
+  // A dead fallback must give up on its own: measured on the test node, the mirror pulled
+  // the whole 170 MiB archive in 4 s while the direct GitHub fallback managed 925 KB in
+  // 30 s. Without a floor the install sat there for over an hour, which the user sees as
+  // "connecting hangs" with nothing to report.
+  check(script.includes(`--speed-limit ${FETCH_FLOOR_BYTES}`)
+    && script.includes(`--speed-time ${FETCH_FLOOR_SECONDS}`),
+  'and a download that stalls gives up instead of running forever')
+  check(script.includes(`--max-time ${FETCH_CEILING_SECONDS}`),
+    'while a slow but working line still gets a real budget')
   check(script.includes('sha256sum') && script.includes('shasum'),
     'it verifies the checksum on either flavour of coreutils')
   check(script.includes('ARTEFACT_CHECKSUM_MISMATCH'), 'and reports a mismatch by name')

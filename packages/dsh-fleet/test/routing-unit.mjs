@@ -22,6 +22,8 @@ import { RemoteWorkspaces } from '../src/host/remote-workspaces.js'
 import {
   decorateJobController,
   decorateSessionController,
+  decorateSessionQuery,
+  decorateTeamService,
   decorateTerminalController,
   decorateWorkspaceController,
   decorateWorkspaceFiles,
@@ -136,6 +138,22 @@ function fakeFleet(nodeId, gateway) {
   const inbound = router.toLocal({ sessionId: SESSION, cwd: '/root/x' }, NODE)
   check(inbound.sessionId === WRAPPED, 'toLocal wraps a session identity')
   check(inbound.cwd === '/root/x', 'toLocal leaves a path alone')
+
+  // A subagent's own Session has no `session-` marker: the node lists it as a bare
+  // uuid. Only the field name says it is an identity, and a listed child row that
+  // stayed a bare uuid made the client address a Session nothing on this Host knew.
+  const BARE = '93f9bbcf-bba5-4284-a0ed-9b5ee3803d8e'
+  const child = router.toLocal({ sessionId: BARE, parentSessionId: SESSION, cwd: '/root/y' }, NODE)
+  check(child.sessionId === `fleet_${NODE}_${BARE}`, 'toLocal wraps a bare subagent Session id', child.sessionId)
+  check(child.parentSessionId === WRAPPED, 'toLocal wraps the parent id on the same row')
+  check(child.cwd === '/root/y', 'toLocal leaves the path alone on a child row')
+  const address = router.toLocal({
+    address: { kind: 'subagent', parentSessionId: SESSION, childSessionId: BARE, mode: 'unknown' },
+  }, NODE)
+  check(address.address.childSessionId === `fleet_${NODE}_${BARE}`, 'toLocal wraps an address child id')
+  check(address.address.parentSessionId === WRAPPED, 'toLocal wraps an address parent id')
+  const unrelated = router.toLocal({ id: BARE, label: 'not an identity field' }, NODE)
+  check(unrelated.id === BARE, 'a bare uuid outside a Session field is left alone')
 
   const workspace = router.toLocalWorkspace({ workspace: { workspaceId: 'ws-1', path: '/root/w' } }, NODE)
   check(workspace.workspace.workspaceId === `fleet_${NODE}_ws-1`, 'toLocalWorkspace wraps a workspace id')
@@ -404,6 +422,85 @@ function fakeFleet(nodeId, gateway) {
   const localEnv = await service.environment({ id: 'session-local' })
   check(localEnv.agentId === 'session-local', 'a local agent still reaches the upstream method')
   check(calls.length === 0, 'and no node is contacted', String(calls.length))
+}
+
+// ---- the composer's 智能体协作 switch reaches the node ----------------------
+// Upstream resolves the `Agent` parameter before the body runs, so a wrapped id
+// reaches this decorator as the placeholder `{ id: <fleet_…> }`. Handing that to
+// upstream asks `subagents.rootOf()` for a live caller no placeholder can be, which
+// answered `subagent tree access requires the exact live caller` and lost the switch.
+{
+  // Upstream `setEnabled` returns void; the fake gateway treats `undefined` as a
+  // missing answer, so the handler reports its own acknowledgement instead.
+  const { gateway, calls } = fakeGateway(NODE, { 'agentTeams/setEnabled': () => ({ applied: true }) })
+  const router = new Router({ fleet: fakeFleet(NODE, gateway) })
+  class FakeTeamService {
+    async setEnabled(agent, enabled) { throw new Error(`upstream must not run for a remote Agent (${agent?.id})`) }
+  }
+  const service = new FakeTeamService()
+  decorateTeamService(service, router)
+
+  await service.setEnabled({ id: WRAPPED, ctx: {} }, true, undefined)
+  check(calls.at(-1)?.endpoint === 'agentTeams/setEnabled', 'the team switch is dispatched to the node')
+  check(calls.at(-1)?.args.agentId === SESSION, 'the node receives its own Session id as agentId')
+  check(calls.at(-1)?.args.enabled === true, 'and the requested mode')
+
+  // A local Agent still reaches the upstream body.
+  calls.length = 0
+  let upstreamRan = false
+  service.setEnabled = async (agent, enabled) => { upstreamRan = agent?.id === 'session-local' && enabled === false }
+  decorateTeamService(service, router)
+  await service.setEnabled({ id: 'session-local' }, false, undefined)
+  check(upstreamRan, 'a local Agent still reaches the upstream method')
+  check(calls.length === 0, 'and asks no node', String(calls.length))
+}
+
+// ---- the deliverables route reads a remote Session's event ------------------
+// `sessionQuery.readEvent` is Host-internal, so a remote Session's event is not in
+// this Host's query engine: the route that backs "show in file manager" answered 404
+// for every remote file. Emulating the read turns that into the honest refusal (a file
+// on a node has no local file manager), which the card already has copy for.
+{
+  const { gateway, calls } = fakeGateway(NODE, {
+    'session/page': args => ({
+      cursor: args.request.throughSeq,
+      records: [
+        { type: 'event', event: { type: 'deliverables/presented', seq: 4, data: { files: [] } } },
+        { type: 'event', event: { type: 'deliverables/presented', seq: 5, data: { files: [{ path: 'a.xlsx' }] } } },
+      ],
+    }),
+    'session/list': () => ({ items: [{ sessionId: SESSION, cwd: '/root/project', createdAt: 7 }] }),
+  })
+  const router = new Router({ fleet: fakeFleet(NODE, gateway) })
+  class FakeSessionQuery {
+    async readEvent() { throw new Error('the upstream read must not run for a remote Session') }
+  }
+  const service = new FakeSessionQuery()
+  decorateSessionQuery(service, router)
+
+  const window = await service.readEvent({ sessionId: WRAPPED, seq: 5, before: 0, after: 0 })
+  check(window.target?.seq === 5, 'a remote event is read from the node', String(window.target?.seq))
+  check(window.session?.cwd === '/root/project', 'the node Session header supplies the workspace root', String(window.session?.cwd))
+  // The route resolves the declared file against that root; the id it hands back has to be
+  // the local (wrapped) identity, or its own follow-up call routes nowhere.
+  check(window.session?.id === WRAPPED, 'the header names the Session in local form', String(window.session?.id))
+  check(calls[0]?.endpoint === 'session/page' && calls[0]?.args.request.throughSeq === 5,
+    'the read is pinned at the event seq')
+  check(calls[0]?.args.request.address.sessionId === SESSION, 'the node is asked for its own Session')
+
+  // An event the node does not have is the node's own answer, not a silent empty window.
+  let missing
+  try { await service.readEvent({ sessionId: WRAPPED, seq: 99, before: 0, after: 0 }) } catch (error) { missing = error }
+  check(missing?.code === 'SESSION_QUERY_EVENT_NOT_FOUND', 'an absent event reports the query code', String(missing?.code))
+
+  // A local Session still reaches the upstream method.
+  calls.length = 0
+  let upstreamRan = false
+  service.readEvent = async request => { upstreamRan = request.sessionId === 'session-local' }
+  decorateSessionQuery(service, router)
+  await service.readEvent({ sessionId: 'session-local', seq: 1, before: 0, after: 0 })
+  check(upstreamRan, 'a local Session read still reaches the upstream method')
+  check(calls.length === 0, 'and asks no node', String(calls.length))
 }
 
 // ---- `attach` pumps the uplink in both directions ------------------------

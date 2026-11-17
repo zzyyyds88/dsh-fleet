@@ -103,6 +103,30 @@ node packages\dsh-fleet\test\session-acceptance.mjs <base> <token>
 > 第 6 条是这套验收的关键：插件自己报告「我调用了 write」不算证据，节点文件系统上有那个字节
 > 才算。脚本用 `test/node.mjs` 另建 SSH 连接读文件，不复用插件连接。
 
+### 2b. 同一件事，从界面做一遍（不碰 API）
+
+脚本走的是协议；用户走的是界面。两者都要过，因为协议对了界面也可能没接上。这一步的
+判据是**页面上看得见**，不是接口返回：
+
+1. 侧栏里点远程工作区的「新建会话」→ 页面出现一个新的空会话，模型选择器旁显示的是
+   **那个工作区**的名字（`fleet-relay-mwkiidoo`），不是本地某个工区；
+2. 在输入框里真敲一条指令（不是脚本注入 `textContent`：编辑器的内部模型要收到真实的
+   `insertText`，否则发送按钮不会亮）：
+   `在 /root/<dir> 下用 write 工具创建 gui-<随机>.txt，内容只有一行 <随机>；然后用 bash
+   工具运行 wc -c 那个文件并原样贴出输出；最后一行只回复 DONE。`
+3. 发送 → 页面上依次出现「正在分析请求 / 深度求索中」→「已完成，用时 …秒」，正文里有
+   代码块 `13 gui-<随机>.txt` 和 `DONE`；
+4. **独立证据**：另开 SSH `cat` 那个文件，内容与 prompt 一致（实测 13 字节 = 12 字符 +
+   换行）。
+5. 会话标题是模型起的（实测「创建验收文件并统计字节」），说明标题那条 LLM 调用也发生在
+   节点上，不是本地补的。
+
+实测记录（2026-11-17 22:04，本地 Chrome 9222 驱动真实页面）：新建会话 → 输入 → 发送 →
+18 秒完成 → `cat` 得到 `ACCEPT_956968`（13 字节）→ 节点日志
+`--root-fleet-relay-mwkiidoo--/session-83de59a8-…` 里 `seq 20` 是 `tool/call` name=`write`、
+`seq 26` 是 `tool/call` name=`bash`、`seq 36` 是 `turn/end {kind:completed}`。
+
+
 ## 3. 终端：在远程会话里真开一个 PTY
 
 人工：打开远程会话的终端面板，新建终端，输入 `echo MARKER_<随机>`。
@@ -215,15 +239,20 @@ node packages\dsh-fleet\test\run-all.mjs --layer e2e --only plugin-switch  # 真
 期望与判据：
 
 1. 弹出的是**本项目的**目录对话框（标题「选择工作区文件夹」），不是系统的原生选择框；
-2. 第一个下拉是「在哪台机器上」，选项是「本机」+ 每个节点（名字 · 主机）；
-3. 选「本机」列的是本机目录；选节点列的是**节点上的**目录（`/root` 下的真实名字），
-   上一级/打开/直接输路径都能用，路径栏显示的是节点上的绝对路径；
-4. 选中后点「加入工作区」，侧栏立刻出现这个工区，`/fleet/api/workspaces` 里有
-   `fleet_<nodeId>_…` 行且 `path` 是节点路径；
-5. 进那个工区新建会话，会话 `cwd` 是节点路径 —— 与本地工区的操作完全相同。
+2. 最上面是「工作区名称」输入框，留空就用文件夹名；填了就用手填的名字；
+3. 第二个下拉是「在哪台机器上」，圆角，选项是「本机」+ 每个节点（名字 · 主机）；
+4. 选「本机」列的是本机目录，**盘符 chips 覆盖所有存在的盘**（不只 C:）；选节点列的是
+   **节点上的**目录（`/root` 下的真实名字），上一级/打开/直接输路径都能用，路径栏显示的
+   是节点上的绝对路径；
+5. 「＋ 新建文件夹」在对话框内展开一个内联表单：自己命名 → 「创建」 → 目录列表跳进新目录；
+   本机与节点走同一个手势，落到各自的磁盘上；
+6. 选中后点「加入工作区」，侧栏立刻出现这个工区（标题就是第 2 步的名字），
+   `/fleet/api/workspaces` 里有 `fleet_<nodeId>_…` 行且 `path` 是节点路径；
+7. 进那个工区新建会话，会话 `cwd` 是节点路径 —— 与本地工区的操作完全相同。
 
 失败先看：`GET /fleet/api/browse?node=<id>&path=` 的返回；节点未连接时该接口报
-`this node has no stored password` 之类的 SSH 原文，而不是空列表。
+`this node has no stored password` 之类的 SSH 原文，而不是空列表。新建文件夹失败返回
+`node-not-found` 404 / `node-offline` 409 / `name-invalid` 与 `create-failed` 400，不编造成功。
 
 ```powershell
 node packages\dsh-fleet\test\workspace-browse.mjs <base> <token>
@@ -234,10 +263,34 @@ node packages\dsh-fleet\test\workspace-browse.mjs <base> <token>
 | 判据 | 脚本里对应的断言 |
 |---|---|
 | 1 是本项目的对话框 | `client-bundle.mjs`：三个 `*.directoryFlow` 插槽都注册且渲染 |
-| 2 先选机器 | 下拉第一项 `''`＝本机，其余是节点（`名字 · 主机`） |
-| 3 列的是节点的盘 | `workspace-browse.mjs`：节点那一路的 `nodeId` 就是被选中的节点、`home` 是节点上的 `/root`、`/` 没有上级、隐藏目录不出现、不存在的目录带 shell 原文 |
-| 4 选中即落地 | 同脚本：POST 后返回 `fleet_<nodeId>_…` 身份 + 节点绝对 `path`，且出现在 `workspace/follow` 的合并 baseline 里 |
-| 5 与本地操作相同 | 同脚本：同一目录再选一次是幂等的（同一个 workspaceId），相对路径被 400 拒绝 |
+| 2 可以自己命名 | `workspace-browse.mjs`：POST 带 `title` → 合并后的行 `title` 就是它，不带 `title` 时回落成文件夹名 |
+| 3 先选机器 | 下拉第一项 `''`＝本机，其余是节点（`名字 · 主机`） |
+| 4 列的是节点的盘 | 同脚本：节点那一路的 `nodeId` 就是被选中的节点、`home` 是节点上的 `/root`、`/` 没有上级、隐藏目录不出现、不存在的目录带 shell 原文；本机那一路的 `roots` 含非 `C:` 盘 |
+| 5 能新建文件夹 | 同脚本：本机与节点各建一个目录，建完能列举到；重名与 `../escape` 各自 400 |
+| 6 选中即落地 | 同脚本：POST 后返回 `fleet_<nodeId>_…` 身份 + 节点绝对 `path`，且出现在 `workspace/follow` 的合并 baseline 里 |
+| 7 与本地操作相同 | 同脚本：同一目录再选一次是幂等的（同一个 workspaceId），相对路径被 400 拒绝 |
+
+## 7c. 远程会话里那几处「和本地一样」
+
+远程大脑的会话与本地会话在同一个侧栏，所以**本地能点的每个入口在远程会话里都得能用**，
+或者给出一个说得通的拒绝。人工在**远程**工作区的会话里逐项过一遍：
+
+| 入口 | 期望 | 凭什么判断 |
+|---|---|---|
+| 智能体协作开关 | 真的能开、能关 | 开关落到节点的 `agentTeams/setEnabled`；本机不报 `subagent tree access requires the exact live caller` |
+| 子代理会话的历史 | 点开能读到那条子会话的记录 | 侧栏列出的子会话 id 是 `fleet_<nodeId>_<裸 uuid>`；`session/page` 返回 `cursor>0` 且含 `subagent/descriptor` |
+| 产物卡片「在文件管理器中显示」 | 远程文件**不假装能开** | 点开得到 422，卡片显示「此文件没有可用的主机路径，请在侧边栏预览」；**不是**「无法在文件管理器中显示，请重试」那种让人反复重试的文案 |
+| 产物卡片预览 | 能读到内容 | `/api/present.open` 先转发节点的 `session/page`，再被 `openVerified` 以 422 拒绝原生打开 —— 预览走的是另一条（`workspaceFiles/read`），照旧可用 |
+
+两个 ID 判据的实测方法（不需要点界面）：
+
+```powershell
+# 子会话 id 是不是包裹形式
+node -e "fetch('http://127.0.0.1:54720/fleet/api/nodes').then(r=>r.json()).then(console.log)"
+# 产物卡片的原生打开状态码
+node .scratch/verify-reveal.mjs <base> <token>
+```
+
 
 ## 8. 纯逻辑与契约层（每次改代码都要跑）
 
@@ -361,3 +414,62 @@ runner 自己的三条硬约束（都实测过会踩）：
    内存里有什么，与中继正确性无关。
 5. **没有 Chrome 时 `browser` 套件抛 `ECONNREFUSED`。** 它本该是 SKIP（退出码 3 + 原因），
    现在连不上调试端口就报 SKIP 并给出启动命令，而不是把一次成功的全量验收变成红。
+
+### 2026-11-17 · 一条命令跑完 24 个套件（第二次）
+
+`node test/run-all.mjs --host … --token …`（复用已在跑的 `fleettest` Host、真节点 `probe-93`）：
+**22 passed, 1 failed, 1 skipped in 1747.5s**。
+
+| 层 | 结果 |
+|---|---|
+| offline（6） | 全过 |
+| contract（3） | 全过 |
+| e2e（15） | 13 过；`artefact` 1500 s 超时；`browser` 因未设 `DSH_BROWSER_DEBUG_PORT` 报 SKIP |
+
+修完下面两条之后**重跑全绿**：`24 passed, 0 failed, 0 skipped in 1217.9s`
+（`DSH_BROWSER_DEBUG_PORT=9222` 已设；`artefact` 单项 964.1 s）。
+
+两个非绿项都不是功能坏了，但都要说明白：
+
+1. **`artefact` 超时是一次真的缺陷暴露，已修。** 单独复跑 68 s 全过，说明装得上；慢的是
+   下载这一步。实测两条候选 URL 的差距：加速地址 4 s 拉完 172 683 323 字节，直连 GitHub
+   30 s 只拿到 925 295 字节（5 GB/s 级差距，不是抖动）。旧脚本对 curl 只有
+   `--connect-timeout 15 --retry 2`，没有任何**传输**上限，于是加速地址一旦失败，直连那一路
+   会以 ~30 KB/s 爬 170 MiB —— 一个多小时，对用户就是「连节点卡住、没有任何输出」。
+   修法：`--speed-limit 4096 --speed-time 60`（低于 4 KB/s 持续 60 s 就放弃这一路）+
+   `--max-time 1800`（慢但能用的线路仍有 100 KB/s 的完整预算），放弃后按已有的
+   `ARTEFACT_UNAVAILABLE` 命名失败返回。`version-unit` 加了两条断言守这两个数字。
+   同时把矩阵里这一项的预算从 1500 s 提到 2700 s：这套要**装两次**（第二次证明替换与回滚），
+   每次都是一个 165 MiB 的下载，按脚本自己的 1800 s 上限算，45 分钟才是诚实的上界。
+   修完实测：完整跑一次 **653 s**（加速地址那一路当时只有 ~260 KB/s），20 条断言全过；
+   `version-unit` 全过。
+2. **`browser` 是环境 SKIP，不是通过。** 单独用 `DSH_BROWSER_DEBUG_PORT=9222` 复跑全过
+   （10 条断言：侧栏渲染、合并 baseline 7/7 远程工区、三个远程工区标题可见、插件入口
+   「远程节点」可达、结束仍绘制），截图 `.scratch/browser-acceptance.png`。
+
+本轮同时修掉的两个「页面上看着正常、换了会话就废」的问题（都已在实际 GUI 上验证）：
+
+1. **智能体协作打不开。** `agentTeams/setEnabled` 的形参是 `Agent`，Gateway 在方法体运行前
+   就把 `agentId` 解成节点上的 Agent，而本地只有占位对象，上游 `TeamService` 第一行
+   `ctx.subagents.rootOf(agent)` 要求 `agents.get(caller.id) === caller`，直接抛
+   `subagent tree access requires the exact live caller`（`gateway/internal`）。改成装饰器先用
+   `agent.id` 解节点再转发节点自己的形参。实测开/关成功。
+2. **子代理会话历史「历史加载失败：subagent is unavailable（subagent/not-found）」。**
+   子代理自己的 Session 在节点上是**裸 uuid**（父才是 `session-<uuid>`），`toLocal` 只按值匹配
+   `session-<uuid>` 形状，于是侧栏列出的子会话 id 没被包裹。浏览器拿它拼
+   `{kind:'subagent', parentSessionId, childSessionId}`，本机解不出节点，落到本地实现，本机没有
+   那段日志 —— 于是 not-found。改成**按字段名**包装（`sessionId`/`childSessionId`/`parentSessionId`
+   里的裸 uuid 一律包）。实测 5 个子会话 id 全是 `fleet_n00a5f7394401_<uuid>`，
+   `session/page` 返回 `cursor=19` 且含 `subagent/descriptor`。
+
+界面侧这轮补齐的两处（都在真实 Chrome 里点过）：
+
+- **插件同步卡片**改成和官方「已安装插件」一致的排版：36×36 图标、标题、两行描述、右侧开关；
+  没有自带图标的插件画一个中性方块图标（原先是一个彩色 emoji，混在真图标里像另一种东西）；
+  中英文按浏览器语言各取一份（Host 两本字典都读，选哪本该由页面决定）。
+- **目录对话框**：加了「工作区名称」输入框（留空用文件夹名）、圆角「在哪台机器上」下拉、
+  「＋ 新建文件夹」内联表单（自己命名 → 创建 → 跳进新目录，本机与节点同一手势）、
+  本机盘符 chips 覆盖所有存在的盘而不是只有 `C:`。真实 GUI 走查：
+  切设备 → 新建文件夹 `accept-1794919839121` → 命名工作区「中继实验」→ 加入工作区，
+  侧栏出现该工区（17 个工作区）。
+
