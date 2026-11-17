@@ -20,9 +20,10 @@
  * through the same pipe a local one does.
  *
  * Scoped waterfalls (`approval/request`, `user-questions/request`) arrive on the
- * same stream. They are answered with `next` — the node's own default — because
- * this Host has no local Agent to scope the question to, and an unanswered
- * waterfall does not fail: it waits forever, which would wedge the remote turn.
+ * same stream. They are handed to {@link RemoteWaterfalls}, which asks this Host's
+ * browser and answers the node with whatever came back: the browser synthesises an
+ * Agent scope for the wrapped identity, renders the ordinary approval / question
+ * card, and its answer settles the node's waterfall through `$events/result`.
  *
  * @module @local/dsh-fleet/host/remote-events
  */
@@ -54,15 +55,16 @@ const EVENT_STREAM_ENDPOINT = '$events'
 const EVENT_RESULT_ENDPOINT = '$events/result'
 
 /** One node's forwarded-event stream. */
-class NodeEvents {
-  /**
+class NodeEvents {  /**
    * @param {string} nodeId
    * @param {import('./remote-gateway.js').RemoteGateway} gateway
+   * @param {import('./remote-waterfall.js').NodeWaterfalls} waterfalls - the same node's waterfall relay.
    * @param {{ emit: (event: string, args: unknown[]) => void, log: (message: string) => void }} sink
    */
-  constructor(nodeId, gateway, sink) {
+  constructor(nodeId, gateway, waterfalls, sink) {
     this.nodeId = nodeId
     this.gateway = gateway
+    this.waterfalls = waterfalls
     this.sink = sink
     /** @type {{ close: () => void } | undefined} */
     this.stream = undefined
@@ -81,6 +83,7 @@ class NodeEvents {
         // `sync()` reopens on the next fleet change.
         this.stream = undefined
         this.clientId = undefined
+        this.waterfalls.close()
       },
     }).then(stream => {
       this.stream = stream
@@ -98,6 +101,7 @@ class NodeEvents {
     try { this.stream?.close() } catch { /* already closing */ }
     this.stream = undefined
     this.clientId = undefined
+    this.waterfalls.close()
   }
 
   #onFrame(value) {
@@ -108,10 +112,18 @@ class NodeEvents {
     if (type === 'ready') {
       const clientId = Reflect.get(frame, 'clientId')
       this.clientId = typeof clientId === 'string' ? clientId : undefined
+      this.waterfalls.ready(this.clientId)
       return
     }
     if (type === 'waterfall') {
-      void this.#decline(frame)
+      void this.waterfalls.relay(frame)
+      return
+    }
+    // The node withdrew a request it had asked about — e.g. the tool call failed
+    // or the turn was cancelled. The local card has to go away with it; answering
+    // is pointless because the node already settled that waterfall.
+    if (type === 'cancel') {
+      this.waterfalls.cancelled(Reflect.get(frame, 'eventId'))
       return
     }
     if (type !== 'emit') return
@@ -121,27 +133,48 @@ class NodeEvents {
     if (!Array.isArray(args)) return
     this.sink.emit(event, args)
   }
+}
 
+/**
+ * Answer every waterfall with `next` — the node's own default.
+ *
+ * Used when this Host has no `typertGateway` to relay through (an older or partial
+ * composition). It keeps the old behaviour rather than leaving the remote turn
+ * waiting for an answer that can never come.
+ */
+class DecliningRelay {
   /**
-   * Answer one scoped waterfall with `next`, which is the node's own default.
-   *
-   * The result is an ordinary RPC on the same Gateway: `$events/result` carries
-   * the client and event identities the node handed us. A failure here is logged
-   * and dropped — retrying cannot help, and throwing into the frame callback
-   * would take the whole stream down.
+   * @param {string} nodeId
+   * @param {import('./remote-gateway.js').RemoteGateway} gateway
+   * @param {(message: string) => void} log
    */
-  async #decline(frame) {
+  constructor(nodeId, gateway, log) {
+    this.nodeId = nodeId
+    this.gateway = gateway
+    this.log = log
+    this.clientId = undefined
+    /** @type {Map<string, never>} */
+    this.pending = new Map()
+  }
+
+  ready(clientId) {
+    this.clientId = typeof clientId === 'string' ? clientId : undefined
+  }
+
+  close() {
+    this.clientId = undefined
+  }
+
+  cancelled() {}
+
+  async relay(frame) {
     const clientId = this.clientId
     const eventId = Reflect.get(frame, 'eventId')
     if (clientId === undefined || typeof eventId !== 'string') return
     try {
-      await this.gateway.call(EVENT_RESULT_ENDPOINT, {
-        clientId,
-        eventId,
-        outcome: { kind: 'next' },
-      })
+      await this.gateway.call(EVENT_RESULT_ENDPOINT, { clientId, eventId, outcome: { kind: 'next' } })
     } catch (error) {
-      this.sink.log(`[${this.nodeId}] could not decline ${String(Reflect.get(frame, 'event'))}: ${error instanceof Error ? error.message : String(error)}`)
+      this.log(`[${this.nodeId}] could not decline ${String(Reflect.get(frame, 'event'))}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 }
@@ -152,10 +185,16 @@ export class RemoteEvents {
    * @param {import('./fleet.js').Fleet} fleet
    * @param {import('./router.js').Router} router
    * @param {{ emit: (event: string, args: unknown[]) => void, log?: (message: string) => void }} sink
+   * @param {{ forNode: (runtime: object) => object } | undefined} waterfalls - relays the
+   *   two scoped waterfalls that arrive on the same stream; without it they are
+   *   answered for the user (the old behaviour) instead of shown. It is read through
+   *   a getter because the Gateway this Host composes arrives after the plugin body
+   *   runs.
    */
-  constructor(fleet, router, sink) {
+  constructor(fleet, router, sink, waterfalls) {
     this.fleet = fleet
     this.router = router
+    this.waterfalls = waterfalls
     this.emit = sink.emit
     this.log = sink.log ?? (() => {})
     /** @type {Map<string, NodeEvents>} */
@@ -181,13 +220,37 @@ export class RemoteEvents {
     for (const runtime of routable) {
       const nodeId = runtime.record.id
       if (this.nodes.has(nodeId)) continue
-      const node = new NodeEvents(nodeId, runtime.gateway, {
-        emit: (event, args) => this.#relay(nodeId, event, args),
-        log: this.log,
-      })
+      const node = new NodeEvents(
+        nodeId,
+        runtime.gateway,
+        // Without a relay the node's own default applies, which is what this
+        // module's older build always did. Keeping that fallback means a Host
+        // composed without `typertGateway` still answers instead of hanging.
+        this.waterfalls?.forNode(runtime) ?? new DecliningRelay(nodeId, runtime.gateway, this.log),
+        {
+          emit: (event, args) => this.#relay(nodeId, event, args),
+          log: this.log,
+        },
+      )
       this.nodes.set(nodeId, node)
       void node.open()
     }
+  }
+
+  /**
+   * Start relaying waterfalls, now that the Host has composed a Gateway.
+   *
+   * Streams opened before this point hold the declining fallback, which answered
+   * every request for the user. Reopening them is cheap and is the only way those
+   * nodes start showing cards without a reconnect.
+   * @param {import('./remote-waterfall.js').RemoteWaterfalls} waterfalls
+   */
+  adopt(waterfalls) {
+    this.waterfalls = waterfalls
+    if (this.disposed) return
+    for (const node of this.nodes.values()) node.close()
+    this.nodes.clear()
+    this.sync()
   }
 
   /** Close every stream. */

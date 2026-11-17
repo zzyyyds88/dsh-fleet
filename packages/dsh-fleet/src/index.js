@@ -31,6 +31,7 @@ import { apiError, describeFailure, readJsonBody, sendJson } from './core/http-e
 import { Fleet } from './host/fleet.js'
 import { RemoteControl } from './host/remote-control.js'
 import { RemoteEvents } from './host/remote-events.js'
+import { RemoteWaterfalls } from './host/remote-waterfall.js'
 import { RemoteWorkspaces } from './host/remote-workspaces.js'
 import { Router } from './host/router.js'
 import { overrideWorkspaceFileScope } from './host/lookups.js'
@@ -318,9 +319,29 @@ export function apply(ctx, config = {}) {
   // a remote Session emits none locally. This relays a node's forwarded-event stream
   // into this Host's own bus with the identities wrapped, so a remote row updates
   // through exactly the path a local one uses.
+  //
+  // The same stream carries the two scoped waterfalls — `approval/request` and
+  // `user-questions/request`. Those need the Gateway the Host composed, so the relay
+  // is created inside `inject` and this holder starts out empty; until it exists the
+  // older behaviour (answer with the node's default) still applies.
+  /** @type {import('./host/remote-waterfall.js').RemoteWaterfalls | undefined} */
+  let waterfalls
   const remoteEvents = new RemoteEvents(fleet, router, {
     emit: (event, args) => ctx.emit(event, ...args),
     log,
+  }, {
+    forNode: runtime => waterfalls?.forNode(runtime),
+  })
+  ctx.inject(['typertGateway'], scope => {
+    const gateway = scope.get('typertGateway')
+    if (gateway === undefined) return
+    waterfalls = new RemoteWaterfalls(fleet, router, gateway, { log })
+    waterfalls.sync()
+    remoteEvents.adopt(waterfalls)
+    scope.effect(() => () => {
+      waterfalls?.dispose()
+      waterfalls = undefined
+    }, 'dsh-fleet: relayed waterfalls')
   })
 
   // ---- Boot and teardown ----------------------------------------------------
