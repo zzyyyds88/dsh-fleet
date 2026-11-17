@@ -130,9 +130,21 @@ check(remoteRows.length > 0, 'the merged baseline carries remote workspaces',
   `${String(remoteRows.length)} of ${String(workspaceRows.length)}`)
 
 const bodyText = await text()
-for (const row of remoteRows.slice(0, 3)) {
-  const name = String(row.title ?? row.path ?? '')
-  check(bodyText.includes(name), `the sidebar renders the remote workspace "${name}"`)
+// The sidebar is painted from `workspace/follow`'s baseline, and a Session or a node
+// changing one moment earlier makes the client re-render. Reading once right after paint
+// therefore races the merge — measured: a run that followed a node being added showed
+// no remote rows even though the API had them, and the same check passed a minute later.
+// So the assertion polls for a bounded time instead of sampling once.
+const remoteNames = remoteRows.slice(0, 3).map(row => String(row.title ?? row.path ?? ''))
+const sidebarDeadline = Date.now() + 30_000
+let sidebarText = bodyText
+while (Date.now() < sidebarDeadline) {
+  sidebarText = await text()
+  if (remoteNames.every(name => sidebarText.includes(name))) break
+  await sleep(500)
+}
+for (const name of remoteNames) {
+  check(sidebarText.includes(name), `the sidebar renders the remote workspace "${name}"`)
 }
 
 // ---- 2. a remote Session appears under it --------------------------------
@@ -157,10 +169,10 @@ const surfaces = await cdp.evaluate(`
     .filter(Boolean)
 `)
 check(Array.isArray(surfaces), 'the sidebar exposes clickable surfaces')
-const hasFleetEntry = bodyText.includes('远程节点') || bodyText.includes('Remote nodes')
+const hasFleetEntry = sidebarText.includes('远程节点') || sidebarText.includes('Remote nodes')
   || surfaces.some(label => label.includes('远程') || label.includes('Remote'))
 check(hasFleetEntry, 'the plugin\'s own entry is reachable from the shell',
-  '远程节点' + (bodyText.includes('远程节点') ? '' : ' (missing)'))
+  '远程节点' + (sidebarText.includes('远程节点') ? '' : ' (missing)'))
 
 // ---- 4. a screenshot, so a human can confirm without re-running ---------
 const shot = await cdp.send('Page.captureScreenshot', { format: 'png' })
