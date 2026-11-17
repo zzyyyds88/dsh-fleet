@@ -28,6 +28,11 @@
 1. 这样桌面端的侧栏、会话视图、文件查看器、审批、终端、job、goal 全部照常工作，因为它们看的本来就是这两个接口；
 2. `ds-harness-remote` v0.6.5（P2P 端到端加密远控）的白名单里就是 `session/list` / `session/follow` / `session/prompt` / `session/page` / `workspace/follow` / `workspaceFiles/*`。本地网关多返回远程行，手机端就自然读得到，**它一行都不用改**。
 
+手机那条路（DSH Go → 中转 → 桌面 Host → 节点）的形态、边界与实施顺序见
+[ADR-0003](adr-0003-phone-control.zh.md)。一句话结论：中转的每一次调用走
+`gateway.dispatch`，而 fleet 把 override 装在同一批 service 实例上，所以**混排与路由对手机
+自动生效**，两个插件不需要互相知道对方存在。
+
 ---
 
 ## 二、形态
