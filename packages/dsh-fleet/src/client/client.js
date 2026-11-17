@@ -105,6 +105,21 @@ window.__ModuleLoader__.load({
           drives: '磁盘',
           workspaceName: '工作区名称',
           workspaceNamePlaceholder: '留空则用文件夹名',
+          createProject: '创建项目',
+          projectName: '项目名称',
+          projectNamePlaceholder: '新项目',
+          device: '设备',
+          addRemoteDevice: '添加远程设备…',
+          sourceFolder: '源文件夹',
+          chooseFolder: '选择文件夹',
+          chooseFolderHint: 'Harness 可以读取和编辑这些文件夹',
+          changeFolder: '更换',
+          pickThisFolder: '选择此文件夹',
+          back: '返回',
+          create: '创建',
+          existingOnDeviceHint: '这台设备上已有项目？',
+          existingOnDeviceAction: '添加到侧栏',
+          existingEmpty: '这台设备上还没有工作区。',
         }
       : {
           title: 'Remote nodes',
@@ -181,6 +196,21 @@ window.__ModuleLoader__.load({
           drives: 'Drives',
           workspaceName: 'Workspace name',
           workspaceNamePlaceholder: 'Leave empty to use the folder name',
+          createProject: 'Create project',
+          projectName: 'Project name',
+          projectNamePlaceholder: 'New project',
+          device: 'Device',
+          addRemoteDevice: 'Add remote device…',
+          sourceFolder: 'Source folder',
+          chooseFolder: 'Choose a folder',
+          chooseFolderHint: 'Harness can read and edit these folders',
+          changeFolder: 'Change',
+          pickThisFolder: 'Use this folder',
+          back: 'Back',
+          create: 'Create',
+          existingOnDeviceHint: 'A project already on this device?',
+          existingOnDeviceAction: 'Add to sidebar',
+          existingEmpty: 'This device has no workspaces yet.',
         }
 
     /** Token-driven styles so light and dark both work. */
@@ -300,7 +330,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The folder picker the shell asks for when a workspace is added.
+     * The project form the shell asks for when a workspace is added.
      *
      * The shell's own picker browses **this** machine, so it can never name `/root/project`
      * on a node. This replaces that dialog with one that first asks *which machine* and
@@ -313,43 +343,57 @@ window.__ModuleLoader__.load({
      * answer is `onPicked(path)` and not an API call. A remote path is routed to its node
      * by the Host half, so one callback covers both cases.
      *
-     * Two things go beyond naming a directory, both because the shell cannot do them:
-     * a folder can be **created** here (a new project usually has no folder yet), and a
-     * workspace can be **named** here (the shell derives the title from the folder name).
-     * A name is applied by creating the workspace first and then handing its path to the
-     * shell: `workspace/create` is idempotent, so the shell resolves the row that already
-     * carries the title instead of making a second one.
+     * Three things go beyond naming a directory, all because the shell cannot do them:
+     * a folder can be **created** here (a new project usually has no folder yet), a
+     * workspace can be **named** here (the shell derives the title from the folder name),
+     * and an existing folder on the node can be **adopted** without re-browsing to it.
+     *
+     * The first screen is the form — name, device, source folder — and the browser is a
+     * second page it opens. That order matters: opening a file browser as the first thing
+     * reads as "operate a folder dialog", while asking for a name first reads as "create a
+     * project", which is the thing the person actually came to do.
      */
     function WorkspaceFolderFlow(props) {
       const open = props.open === true
+      // One dialog, two entry points. A new Session is creating a project; the sidebar is
+      // adding a workspace to a list. Same fields, different words — and the words are
+      // what make the same form read correctly in both places.
+      const asProject = props.origin === 'conversation.hero.workspace.directoryFlow'
+        || props.origin === 'workspace.picker.directoryFlow'
       const [nodes, setNodes] = useState([])
       const [nodeId, setNodeId] = useState('')
-      const [listing, setListing] = useState(undefined)
+      /** `form` | `browse` | `device` | `existing` */
+      const [page, setPage] = useState('form')
+      const [title, setTitle] = useState('')
+      /** The folder the person confirmed: `{ path, name }`, absent until they pick one. */
+      const [chosen, setChosen] = useState(undefined)
+      const [saving, setSaving] = useState(false)
       const [error, setError] = useState(undefined)
+      const [listing, setListing] = useState(undefined)
       const [loading, setLoading] = useState(false)
       const [typed, setTyped] = useState('')
-      const [creating, setCreating] = useState(false)
+      const [makingFolder, setMakingFolder] = useState(false)
       const [newName, setNewName] = useState('')
       const [newError, setNewError] = useState(undefined)
-      const [title, setTitle] = useState('')
+      /** Workspaces already on the selected device, while the "add to sidebar" page is up. */
+      const [existing, setExisting] = useState(undefined)
 
       // Load the machine list when the dialog opens, not on mount: this component stays
       // mounted for the whole Session, and polling a node list that nobody is looking at
       // would be a request every two seconds for nothing.
+      const reloadNodes = useCallback(async () => {
+        try {
+          const body = await api('/nodes')
+          setNodes((body.nodes ?? []).filter(node => node.id !== undefined))
+        } catch {
+          // A node list that cannot be read must not block picking a local folder.
+        }
+      }, [])
+
       useEffect(() => {
         if (!open) return
-        let cancelled = false
-        void (async () => {
-          try {
-            const body = await api('/nodes')
-            if (cancelled) return
-            setNodes((body.nodes ?? []).filter(node => node.id !== undefined))
-          } catch {
-            // A node list that cannot be read must not block picking a local folder.
-          }
-        })()
-        return () => { cancelled = true }
-      }, [open])
+        void reloadNodes()
+      }, [open, reloadNodes])
 
       const browse = useCallback(async (target, dir) => {
         setLoading(true)
@@ -368,19 +412,29 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      // Opening the dialog lands on the chosen machine's home directory: that is where a
-      // person's projects are on either side, and asking them to type a path first would
-      // make the remote case feel different from the local one again.
+      // Opening the dialog starts on the form with nothing carried over, so a second visit
+      // does not open on the folder the first visit happened to be looking at.
       useEffect(() => {
         if (!open) return
+        setPage('form')
         setListing(undefined)
         setError(undefined)
-        setCreating(false)
+        setMakingFolder(false)
         setNewName('')
         setNewError(undefined)
         setTitle('')
+        setChosen(undefined)
+        setExisting(undefined)
+      }, [open])
+
+      // The browser lands on the chosen machine's home directory: that is where a person's
+      // projects are on either side, and asking them to type a path first would make the
+      // remote case feel different from the local one again.
+      useEffect(() => {
+        if (!open || page !== 'browse') return
+        setListing(undefined)
         void browse(nodeId, '')
-      }, [open, nodeId, browse])
+      }, [open, page, nodeId, browse])
 
       if (!open) return null
 
@@ -388,36 +442,38 @@ window.__ModuleLoader__.load({
       const roots = listing?.roots ?? []
 
       /**
-       * Apply a name and hand the path to the shell.
+       * Commit the project form: name the workspace, then hand the folder to the shell.
        *
-       * Without a name this is the cheap path the shell expects. With one, the workspace
-       * is created here first so the title has somewhere to live; the shell then resolves
-       * that same row. A failure is reported in the dialog and nothing is handed over,
-       * because a workspace that exists but is not selected looks like a lost click.
+       * Without a name this is the cheap path the shell expects — it derives the title from
+       * the folder name itself. With one, the workspace is created here first so the title
+       * has somewhere to live; the shell then resolves that same row (create is
+       * idempotent). A failure is reported in the form and nothing is handed over, because
+       * a workspace that exists but is not selected looks like a lost click.
        */
-      const pick = async () => {
-        if (current.length === 0) return
+      const commit = async () => {
+        const folder = chosen?.path ?? ''
+        if (folder.length === 0) return
         setError(undefined)
-        const wanted = title.trim()
-        if (wanted.length === 0) {
-          props.onPicked?.(current)
-          return
-        }
-        setLoading(true)
+        setSaving(true)
         try {
+          const wanted = title.trim()
+          if (wanted.length === 0) {
+            props.onPicked?.(folder)
+            return
+          }
           await api('/workspaces', {
             method: 'POST',
             body: JSON.stringify({
               ...(nodeId === '' ? {} : { nodeId }),
-              path: current,
+              path: folder,
               title: wanted,
             }),
           })
-          props.onPicked?.(current)
+          props.onPicked?.(folder)
         } catch (failure) {
           setError(failure.message)
         } finally {
-          setLoading(false)
+          setSaving(false)
         }
       }
 
@@ -442,11 +498,29 @@ window.__ModuleLoader__.load({
               name,
             }),
           })
-          setCreating(false)
+          setMakingFolder(false)
           setNewName('')
           await browse(nodeId, body.path)
         } catch (failure) {
           setNewError(failure.message)
+        }
+      }
+
+      /** List what the selected device already has, so an existing folder need not be found again. */
+      const openExisting = async () => {
+        if (nodeId === '') return
+        setError(undefined)
+        setPage('existing')
+        setExisting(undefined)
+        try {
+          const body = await api('/workspaces')
+          const prefix = `fleet_${nodeId}_`
+          const items = body.baseline?.items ?? []
+          setExisting(items.filter(item => typeof item.workspaceId === 'string'
+            && item.workspaceId.startsWith(prefix)))
+        } catch (failure) {
+          setError(failure.message)
+          setExisting([])
         }
       }
 
@@ -490,39 +564,237 @@ window.__ModuleLoader__.load({
       const chipStyle = extra => ({
         ...styles.button, padding: '3px 9px', fontSize: 12, borderRadius: 999, ...extra,
       })
+      /** The empty source-folder card: dashed, with the same wording the shipped form uses. */
+      const folderSlot = {
+        display: 'flex', alignItems: 'center', gap: 10, width: '100%', boxSizing: 'border-box',
+        padding: '12px 14px', cursor: 'pointer', textAlign: 'left',
+        appearance: 'none', borderRadius: 10, fontSize: 13,
+        border: '1px dashed var(--dsw-alias-border-l2)',
+        background: 'color-mix(in srgb, var(--dsw-alias-bg-layer-2) 55%, transparent)',
+        color: 'var(--dsw-alias-label-primary)',
+      }
+      const title2 = asProject ? T.createProject : T.pickFolder
+      const commitLabel = asProject ? T.create : T.addWorkspace
 
-      return h('div', { style: overlay, role: 'dialog', 'aria-label': T.pickFolder },
-        h('div', { style: dialog },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 10 } },
-            h('h2', { style: { margin: 0, fontSize: 15, fontWeight: 600 } }, T.pickFolder),
-            h('button', {
+      const header = (heading, withBack) => h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        withBack
+          ? h('button', {
               type: 'button',
-              style: { ...styles.link, marginLeft: 'auto' },
-              onClick: () => props.onCancel?.(),
-            }, T.cancel)),
+              'aria-label': T.back,
+              style: { ...styles.link, textDecoration: 'none', fontSize: 13 },
+              onClick: () => { setPage('form') },
+            }, `‹ ${T.back}`)
+          : null,
+        h('h2', { style: { margin: 0, fontSize: 15, fontWeight: 600 } }, heading),
+        h('button', {
+          type: 'button',
+          style: { ...styles.link, marginLeft: 'auto' },
+          onClick: () => props.onCancel?.(),
+        }, T.cancel))
 
-          // Name first, then machine, then folder: the same order the shipped
-          // project form uses, so the two dialogs read as one flow.
+      // ---- adding a remote device, from inside the device list -----------------
+      if (page === 'device') {
+        return h('div', { style: overlay, role: 'dialog', 'aria-label': T.addRemoteDevice },
+          h('div', { style: dialog },
+            header(T.addRemoteDevice, true),
+            h(NodeForm, {
+              onSubmit: async draft => {
+                await api('/nodes', { method: 'POST', body: JSON.stringify(draft) })
+                await reloadNodes()
+                setPage('form')
+              },
+              onCancel: () => setPage('form'),
+            })))
+      }
+
+      // ---- adopt a folder the node already has ---------------------------------
+      if (page === 'existing') {
+        const rows = existing ?? []
+        return h('div', { style: overlay, role: 'dialog', 'aria-label': T.existingOnDeviceAction },
+          h('div', { style: dialog },
+            header(T.existingOnDeviceAction, true),
+            h('p', { style: { ...styles.groupHint, margin: 0 } }, T.existingOnDeviceHint),
+            existing === undefined
+              ? h('div', { style: styles.empty }, T.loading)
+              : rows.length === 0
+                ? h('div', { style: styles.empty }, T.existingEmpty)
+                : h('div', {
+                    style: {
+                      flex: '1 1 auto', minHeight: 120, maxHeight: 320, overflowY: 'auto',
+                      border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8, padding: 4,
+                    },
+                  },
+                  rows.map(row => h('button', {
+                    key: row.workspaceId,
+                    type: 'button',
+                    style: rowStyle,
+                    title: row.path,
+                    onClick: () => { props.onPicked?.(row.path) },
+                  }, h('span', { 'aria-hidden': true, style: { opacity: 0.6 } }, '📁'),
+                    h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                      row.title ?? row.path)))),
+            error !== undefined ? h('div', { style: { ...styles.errorBar, margin: 0 } }, error) : null,
+            h('div', { style: { ...styles.actions, marginTop: 'auto' } },
+              h('button', { type: 'button', style: styles.button, onClick: () => setPage('form') }, T.back))))
+      }
+
+      // ---- browse the chosen machine's folders ----------------------------------
+      if (page === 'browse') {
+        return h('div', { style: overlay, role: 'dialog', 'aria-label': T.chooseFolder },
+          h('div', { style: dialog },
+            header(T.chooseFolder, true),
+
+            // The machine stays switchable here: a person may realize mid-browse that the
+            // folder is on the other side, and losing the name they typed to find that out
+            // would be a worse trade than one extra control.
+            h('label', { style: styles.field },
+              h('span', { style: styles.label }, T.machine),
+              h('span', { style: selectWrap },
+                h('select', {
+                  style: selectStyle,
+                  value: nodeId,
+                  disabled: loading,
+                  onChange: event => setNodeId(event.target.value),
+                }, nodeOptions.map(option => h('option', { key: option.id, value: option.id }, option.label))),
+                h('span', {
+                  'aria-hidden': true,
+                  style: {
+                    position: 'absolute', right: 11, pointerEvents: 'none',
+                    color: 'var(--dsw-alias-label-secondary)', fontSize: 10, lineHeight: 1,
+                  },
+                }, '▼'))),
+
+            h('form', { style: { display: 'flex', gap: 8 }, onSubmit: goTyped },
+              h('button', {
+                type: 'button',
+                style: { ...styles.button, flex: '0 0 auto' },
+                disabled: listing?.parent === undefined || loading,
+                onClick: () => { if (listing?.parent !== undefined) void browse(nodeId, listing.parent) },
+              }, T.up),
+              h('input', {
+                style: { ...styles.input, flex: '1 1 auto', fontFamily: 'var(--dsw-alias-font-code, ui-monospace, monospace)', fontSize: 12 },
+                placeholder: current.length === 0 ? T.pathPlaceholder : current,
+                value: typed,
+                onChange: event => setTyped(event.target.value),
+              }),
+              h('button', { type: 'submit', style: { ...styles.button, flex: '0 0 auto' }, disabled: loading }, T.go)),
+
+            // A drive is a root the home directory cannot reach: walking "up" from
+            // `C:\Users\me` stops at `C:\`, so `D:\projects` needed a typed path. The
+            // listing answers which roots exist, and they read as chips on one line.
+            roots.length > 1
+              ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+                  h('span', { style: styles.label }, T.drives),
+                  roots.map(root => h('button', {
+                    key: root,
+                    type: 'button',
+                    style: chipStyle(current === root ? { borderColor: 'var(--dsw-alias-brand-primary)' } : {}),
+                    disabled: loading,
+                    onClick: () => { void browse(nodeId, root) },
+                  }, root)))
+              : null,
+
+            makingFolder
+              ? h('form', {
+                  style: { display: 'flex', gap: 8, alignItems: 'center' },
+                  onSubmit: createFolder,
+                },
+                h('input', {
+                  style: { ...styles.input, flex: '1 1 auto', fontSize: 12 },
+                  placeholder: T.newFolderPlaceholder,
+                  'aria-label': T.newFolderName,
+                  value: newName,
+                  autoFocus: true,
+                  onChange: event => setNewName(event.target.value),
+                }),
+                h('button', {
+                  type: 'submit',
+                  style: { ...styles.buttonPrimary, ...(newName.trim().length === 0 ? styles.buttonDisabled : {}) },
+                  disabled: newName.trim().length === 0,
+                }, T.newFolderCreate),
+                h('button', {
+                  type: 'button',
+                  style: styles.button,
+                  onClick: () => { setMakingFolder(false); setNewName(''); setNewError(undefined) },
+                }, T.cancel))
+              : h('div', { style: { display: 'flex', justifyContent: 'flex-start' } },
+                  h('button', {
+                    type: 'button',
+                    style: styles.button,
+                    disabled: current.length === 0 || loading,
+                    onClick: () => { setMakingFolder(true); setNewError(undefined) },
+                  }, `＋ ${T.newFolder}`)),
+
+            newError !== undefined
+              ? h('div', { style: { ...styles.errorBar, margin: 0 } }, `${T.newFolderFailed}: ${newError}`)
+              : null,
+
+            h('div', {
+              style: {
+                flex: '1 1 auto', minHeight: 120, maxHeight: 260, overflowY: 'auto',
+                border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8, padding: 4,
+              },
+            },
+            loading
+              ? h('div', { style: styles.empty }, T.loading)
+              : (listing?.entries ?? []).length === 0
+                ? h('div', { style: styles.empty }, T.noFolders)
+                : (listing?.entries ?? []).map(entry => h('button', {
+                    key: entry.path,
+                    type: 'button',
+                    style: rowStyle,
+                    title: entry.path,
+                    onClick: () => void browse(nodeId, entry.path),
+                  }, h('span', { 'aria-hidden': true, style: { opacity: 0.6 } }, '📁'), entry.name))),
+
+            listing?.truncated === true ? h('p', { style: styles.groupHint }, T.truncated) : null,
+
+            error !== undefined ? h('div', { style: { ...styles.errorBar, margin: 0 } }, error) : null,
+
+            h('div', { style: { ...styles.actions, marginTop: 'auto' } },
+              h('button', { type: 'button', style: styles.button, onClick: () => setPage('form') }, T.cancel),
+              h('button', {
+                type: 'button',
+                style: { ...styles.buttonPrimary, ...(current.length === 0 ? styles.buttonDisabled : {}) },
+                disabled: current.length === 0 || loading,
+                onClick: () => {
+                  const leaf = current.split(/[\\/]/).filter(Boolean).pop() ?? current
+                  setChosen({ path: current, name: leaf })
+                  setPage('form')
+                },
+              }, T.pickThisFolder))))
+      }
+
+      // ---- the form itself: name → device → source folder -----------------------
+      return h('div', { style: overlay, role: 'dialog', 'aria-label': title2 },
+        h('div', { style: dialog },
+          header(title2, false),
+
           h('label', { style: styles.field },
-            h('span', { style: styles.label }, T.workspaceName),
+            h('span', { style: styles.label }, asProject ? T.projectName : T.workspaceName),
             h('input', {
               style: { ...styles.input, fontSize: 13 },
-              placeholder: T.workspaceNamePlaceholder,
+              placeholder: asProject ? T.projectNamePlaceholder : T.workspaceNamePlaceholder,
               value: title,
               onChange: event => setTitle(event.target.value),
             })),
 
-          // Machine next, folder last: that is the one extra decision a remote
-          // workspace needs, and it is why the local picker could not do this job.
+          // Machine next, folder last: that is the one extra decision a remote workspace
+          // needs, and it is why the local picker could not do this job.
           h('label', { style: styles.field },
-            h('span', { style: styles.label }, T.machine),
+            h('span', { style: styles.label }, asProject ? T.device : T.machine),
             h('span', { style: selectWrap },
               h('select', {
                 style: selectStyle,
                 value: nodeId,
-                disabled: loading,
-                onChange: event => setNodeId(event.target.value),
-              }, nodeOptions.map(option => h('option', { key: option.id, value: option.id }, option.label))),
+                disabled: saving,
+                onChange: event => {
+                  if (event.target.value === '__add') setPage('device')
+                  else setNodeId(event.target.value)
+                },
+              },
+              nodeOptions.map(option => h('option', { key: option.id, value: option.id }, option.label)),
+              h('option', { value: '__add' }, T.addRemoteDevice)),
               h('span', {
                 'aria-hidden': true,
                 style: {
@@ -531,90 +803,45 @@ window.__ModuleLoader__.load({
                 },
               }, '▼'))),
 
-          h('form', { style: { display: 'flex', gap: 8 }, onSubmit: goTyped },
-            h('button', {
-              type: 'button',
-              style: { ...styles.button, flex: '0 0 auto' },
-              disabled: listing?.parent === undefined || loading,
-              onClick: () => { if (listing?.parent !== undefined) void browse(nodeId, listing.parent) },
-            }, T.up),
-            h('input', {
-              style: { ...styles.input, flex: '1 1 auto', fontFamily: 'var(--dsw-alias-font-code, ui-monospace, monospace)', fontSize: 12 },
-              placeholder: current.length === 0 ? T.pathPlaceholder : current,
-              value: typed,
-              onChange: event => setTyped(event.target.value),
-            }),
-            h('button', { type: 'submit', style: { ...styles.button, flex: '0 0 auto' }, disabled: loading }, T.go)),
-
-          // A drive is a root the home directory cannot reach: walking "up" from
-          // `C:\Users\me` stops at `C:\`, so `D:\projects` needed a typed path. The
-          // listing answers which roots exist, and they read as chips on one line.
-          roots.length > 1
-            ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-                h('span', { style: styles.label }, T.drives),
-                roots.map(root => h('button', {
-                  key: root,
+          // The shipped form offers this right under the device, only for a remote one: a
+          // folder that already exists there should not have to be found again by hand.
+          nodeId !== ''
+            ? h('p', { style: { ...styles.groupHint, margin: 0 } },
+                T.existingOnDeviceHint, ' ',
+                h('button', {
                   type: 'button',
-                  style: chipStyle(current === root ? { borderColor: 'var(--dsw-alias-brand-primary)' } : {}),
-                  disabled: loading,
-                  onClick: () => { void browse(nodeId, root) },
-                }, root)))
+                  style: { ...styles.link, color: 'var(--dsw-alias-brand-primary)' },
+                  onClick: () => { void openExisting() },
+                }, `${T.existingOnDeviceAction} ›`))
             : null,
 
-          creating
-            ? h('form', {
-                style: { display: 'flex', gap: 8, alignItems: 'center' },
-                onSubmit: createFolder,
-              },
-              h('input', {
-                style: { ...styles.input, flex: '1 1 auto', fontSize: 12 },
-                placeholder: T.newFolderPlaceholder,
-                'aria-label': T.newFolderName,
-                value: newName,
-                autoFocus: true,
-                onChange: event => setNewName(event.target.value),
-              }),
-              h('button', {
-                type: 'submit',
-                style: { ...styles.buttonPrimary, ...(newName.trim().length === 0 ? styles.buttonDisabled : {}) },
-                disabled: newName.trim().length === 0,
-              }, T.newFolderCreate),
-              h('button', {
-                type: 'button',
-                style: styles.button,
-                onClick: () => { setCreating(false); setNewName(''); setNewError(undefined) },
-              }, T.cancel))
-            : h('div', { style: { display: 'flex', justifyContent: 'flex-start' } },
+          h('div', { style: styles.field },
+            h('span', { style: styles.label }, T.sourceFolder),
+            chosen === undefined
+              ? h('button', {
+                  type: 'button',
+                  style: folderSlot,
+                  onClick: () => setPage('browse'),
+                },
+                h('span', { 'aria-hidden': true, style: { fontSize: 16, opacity: 0.7 } }, '📁'),
+                h('span', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+                  h('span', { style: { fontWeight: 500 } }, T.chooseFolder),
+                  h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, T.chooseFolderHint)))
+              : h('div', {
+                  style: {
+                    display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
+                    border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 10,
+                  },
+                },
+                h('span', { 'aria-hidden': true, style: { fontSize: 16, opacity: 0.7 } }, '📁'),
+                h('span', { style: { flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 } },
+                  h('span', { style: { fontSize: 13 } }, chosen.name),
+                  h('span', { style: { ...styles.mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, chosen.path)),
                 h('button', {
                   type: 'button',
                   style: styles.button,
-                  disabled: current.length === 0 || loading,
-                  onClick: () => { setCreating(true); setNewError(undefined) },
-                }, `＋ ${T.newFolder}`)),
-
-          newError !== undefined
-            ? h('div', { style: { ...styles.errorBar, margin: 0 } }, `${T.newFolderFailed}: ${newError}`)
-            : null,
-
-          h('div', {
-            style: {
-              flex: '1 1 auto', minHeight: 120, maxHeight: 260, overflowY: 'auto',
-              border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8, padding: 4,
-            },
-          },
-          loading
-            ? h('div', { style: styles.empty }, T.loading)
-            : (listing?.entries ?? []).length === 0
-              ? h('div', { style: styles.empty }, T.noFolders)
-              : (listing?.entries ?? []).map(entry => h('button', {
-                  key: entry.path,
-                  type: 'button',
-                  style: rowStyle,
-                  title: entry.path,
-                  onClick: () => void browse(nodeId, entry.path),
-                }, h('span', { 'aria-hidden': true, style: { opacity: 0.6 } }, '📁'), entry.name))),
-
-          listing?.truncated === true ? h('p', { style: styles.groupHint }, T.truncated) : null,
+                  onClick: () => setPage('browse'),
+                }, T.changeFolder))),
 
           error !== undefined ? h('div', { style: { ...styles.errorBar, margin: 0 } }, error) : null,
 
@@ -622,11 +849,11 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', style: styles.button, onClick: () => props.onCancel?.() }, T.cancel),
             h('button', {
               type: 'button',
-              style: { ...styles.buttonPrimary, ...(current.length === 0 ? styles.buttonDisabled : {}) },
-              disabled: current.length === 0 || loading,
-              onClick: () => { void pick() },
-            }, T.addWorkspace))),
-      )
+              style: { ...styles.buttonPrimary, ...(chosen === undefined || saving ? styles.buttonDisabled : {}) },
+              disabled: chosen === undefined || saving,
+              onClick: () => { void commit() },
+            }, commitLabel)),
+        ))
     }
 
     /** Add one directory on a node as a workspace. */
@@ -1254,12 +1481,18 @@ window.__ModuleLoader__.load({
           // never name a directory on a node. Registering here replaces the dialog for
           // every entry point at once — the sidebar's plus button, the new-Session flow,
           // and the workspace picker — without touching any of them.
+          //
+          // The slot is named on the props rather than read from context: the two entry
+          // points ask for the same fields under different words (a new Session creates a
+          // **project**, the sidebar adds a **workspace**), and a component that cannot
+          // tell which one opened it would have to say one of them wrongly.
           for (const slot of [
             'sidebar.workspaces.directoryFlow',
             'conversation.hero.workspace.directoryFlow',
             'workspace.picker.directoryFlow',
           ]) {
-            ctx.slots.inject(slot, () => ctx.slots.register({ name: slot }, WorkspaceFolderFlow))
+            ctx.slots.inject(slot, () => ctx.slots.register({ name: slot },
+              props => h(WorkspaceFolderFlow, { ...props, origin: slot })))
           }
         }
       },

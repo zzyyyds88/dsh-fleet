@@ -234,25 +234,33 @@ node packages\dsh-fleet\test\run-all.mjs --layer e2e --only plugin-switch  # 真
 
 ## 7b. 加工作区：先选机器，再选目录
 
-人工：左侧栏「工作区」旁的点号 → 添加工作区；或在会话里新建会话。
+人工：左侧栏「工作区」旁的点号 → 添加工作区…（或新建会话时的「选择工作区」→「添加工作区…」）。
 
 期望与判据：
 
-1. 弹出的是**本项目的**目录对话框（标题「选择工作区文件夹」），不是系统的原生选择框；
-2. 最上面是「工作区名称」输入框，留空就用文件夹名；填了就用手填的名字；
-3. 第二个下拉是「在哪台机器上」，圆角，选项是「本机」+ 每个节点（名字 · 主机）；
-4. 选「本机」列的是本机目录，**盘符 chips 覆盖所有存在的盘**（不只 C:）；选节点列的是
-   **节点上的**目录（`/root` 下的真实名字），上一级/打开/直接输路径都能用，路径栏显示的
-   是节点上的绝对路径；
-5. 「＋ 新建文件夹」在对话框内展开一个内联表单：自己命名 → 「创建」 → 目录列表跳进新目录；
-   本机与节点走同一个手势，落到各自的磁盘上；
-6. 选中后点「加入工作区」，侧栏立刻出现这个工区（标题就是第 2 步的名字），
-   `/fleet/api/workspaces` 里有 `fleet_<nodeId>_…` 行且 `path` 是节点路径；
-7. 进那个工区新建会话，会话 `cwd` 是节点路径 —— 与本地工区的操作完全相同。
+1. 弹出的是**本项目的**对话框，不是系统原生选择框。第一屏是**表单**，字段顺序固定为
+   项目名称 → 设备 → 源文件夹；「新建会话」入口标题是「创建项目」、末按钮「创建」，
+   侧栏入口标题是「选择工作区文件夹」、末按钮「加入工作区」，其余字段完全一样；
+2. 项目/工作区名称留空就用文件夹名；填了就用手填的名字；
+3. 设备下拉圆角自绘，选项是「本机」+ 每个节点（`名字 · 主机`），**最后一项是「添加远程设备…」**，
+   选中它进新增节点表单（与设置页同一个表单），提交后回到第一屏且新节点已经在列表里；
+4. 选节点后，设备下方多一行「这台设备上已有项目？添加到侧栏 ›」，点开列出**那台机器上已有**的工作区，
+   点一条直接按那条路径建/选工作区，不必再浏览；
+5. 「源文件夹」是虚线空态卡片（「选择文件夹 / Harness 可以读取和编辑这些文件夹」）；点它进第二屏
+   浏览页，标题「选择文件夹」，左上「‹ 返回」，机器仍可切换；
+6. 浏览页：选「本机」列的是本机目录、**盘符 chips 覆盖所有存在的盘**（不只 C:）；选节点列的是
+   **节点上的**目录（`/root` 下的真实名字），上一级/打开/直接输路径都能用，路径栏显示节点绝对路径；
+7. 「＋ 新建文件夹」在对话框内展开内联表单：自己命名 → 「创建」 → 目录列表跳进新目录；本机与节点
+   走同一个手势，落到各自磁盘上；建好后点「选择此文件夹」回第一屏，源文件夹显示成
+   `名字 + 绝对路径 + 更换`；
+8. 点末按钮：侧栏立刻出现这个工区（标题就是第 2 步的名字），`/fleet/api/workspaces` 里有
+   `fleet_<nodeId>_…` 行且 `path` 是节点路径；
+9. 进那个工区新建会话，会话 `cwd` 是节点路径 —— 与本地工区的操作完全相同。
 
 失败先看：`GET /fleet/api/browse?node=<id>&path=` 的返回；节点未连接时该接口报
 `this node has no stored password` 之类的 SSH 原文，而不是空列表。新建文件夹失败返回
 `node-not-found` 404 / `node-offline` 409 / `name-invalid` 与 `create-failed` 400，不编造成功。
+名称非空时先建工作区再交接，失败会停在表单里报错、不交接 —— 否则就是「点了没反应」。
 
 ```powershell
 node packages\dsh-fleet\test\workspace-browse.mjs <base> <token>
@@ -264,11 +272,10 @@ node packages\dsh-fleet\test\workspace-browse.mjs <base> <token>
 |---|---|
 | 1 是本项目的对话框 | `client-bundle.mjs`：三个 `*.directoryFlow` 插槽都注册且渲染 |
 | 2 可以自己命名 | `workspace-browse.mjs`：POST 带 `title` → 合并后的行 `title` 就是它，不带 `title` 时回落成文件夹名 |
-| 3 先选机器 | 下拉第一项 `''`＝本机，其余是节点（`名字 · 主机`） |
-| 4 列的是节点的盘 | 同脚本：节点那一路的 `nodeId` 就是被选中的节点、`home` 是节点上的 `/root`、`/` 没有上级、隐藏目录不出现、不存在的目录带 shell 原文；本机那一路的 `roots` 含非 `C:` 盘 |
-| 5 能新建文件夹 | 同脚本：本机与节点各建一个目录，建完能列举到；重名与 `../escape` 各自 400 |
-| 6 选中即落地 | 同脚本：POST 后返回 `fleet_<nodeId>_…` 身份 + 节点绝对 `path`，且出现在 `workspace/follow` 的合并 baseline 里 |
-| 7 与本地操作相同 | 同脚本：同一目录再选一次是幂等的（同一个 workspaceId），相对路径被 400 拒绝 |
+| 3/4/5/6 设备与浏览 | 同脚本：下拉第一项 `''`＝本机，其余是节点（`名字 · 主机`）；节点那一路的 `nodeId` 就是被选中的节点、`home` 是节点上的 `/root`、`/` 没有上级、隐藏目录不出现、不存在的目录带 shell 原文；本机那一路的 `roots` 含非 `C:` 盘 |
+| 7 能新建文件夹 | 同脚本：本机与节点各建一个目录，建完能列举到；重名与 `../escape` 各自 400 |
+| 8 选中即落地 | 同脚本：POST 后返回 `fleet_<nodeId>_…` 身份 + 节点绝对 `path`，且出现在 `workspace/follow` 的合并 baseline 里 |
+| 9 与本地操作相同 | 同脚本：同一目录再选一次是幂等的（同一个 workspaceId），相对路径被 400 拒绝 |
 
 ## 7c. 远程会话里那几处「和本地一样」
 
@@ -472,4 +479,81 @@ runner 自己的三条硬约束（都实测过会踩）：
   本机盘符 chips 覆盖所有存在的盘而不是只有 `C:`。真实 GUI 走查：
   切设备 → 新建文件夹 `accept-1794919839121` → 命名工作区「中继实验」→ 加入工作区，
   侧栏出现该工区（17 个工作区）。
+
+### 2026-11-18 · 「创建项目」表单 + 六项功能真实用户验收
+
+**这一轮的验收方式是用户视角**：下达一条真指令到节点，用界面点，再用独立 SSH 读磁盘核对。
+
+一、全量矩阵（`node test/run-all.mjs`，`fleettest` Host + 真节点 `probe-93`）：
+
+第一次跑 **23 passed, 1 failed, 0 skipped in 1557.8s**，唯一失败项是 `e2e/multi-node`：
+
+- 现象：`probe-93:connected multi-…:failed` —— 第二个节点建得出来、连不上。
+- 根因不在产品：这套测试给第二个记录写的是 `password: DSH_FLEET_TEST_PASSWORD`，而这台测试机
+  只配了 `DSH_FLEET_TEST_KEY_FILE`（公开仓库不允许内置密码，key 是正常形态）。于是第二个记录
+  没有可用凭据，`connect` 报「no stored credential」。`node.mjs` 一直两种凭据都支持，只有这套
+  测试写死了 password。
+- 修法：`multi-node-acceptance.mjs` 与 `node.mjs` 对齐——有 `DSH_FLEET_TEST_KEY_FILE` 就传
+  `privateKey` 并把 `auth.kind` 设成 `key`，有密码才传密码。改完单跑 `--only multi-node`：
+  **1 passed … in 10.3s**。
+
+修完重跑全量：**24 passed, 0 failed, 0 skipped in 590.2s**（`artefact` 371.6 s、
+`tool-parity` 58.4 s、`approval` 48.1 s、`session` 14.1 s、`multi-node` 10.2 s）。
+
+二、第 6 项「创建项目」表单（真实 Chrome 9222，全部靠点击，不碰 API）：
+
+| 判据 | 实测 |
+|---|---|
+| 新建会话入口是「创建项目」，字段序 项目名称 → 设备 → 源文件夹 | 通过：`aria-label="创建项目"`，正文 `创建项目 \| 项目名称 \| 设备 \| 本机 \| probe-93 · 192.168.3.93 \| 添加远程设备… \| 源文件夹 \| 📁 选择文件夹 \| Harness 可以读取和编辑这些文件夹 \| 取消 \| 创建`（截图 `.scratch/final-project-form.png`） |
+| 侧栏入口说「选择工作区文件夹 / 工作区名称 / 加入工作区」 | 通过：同一组件在 `sidebar.workspaces.directoryFlow` 下报另一套词（截图 `.scratch/form-sidebar.png`） |
+| 设备选节点后出现「这台设备上已有项目？添加到侧栏 ›」 | 通过：切到 `probe-93` 后该行出现 |
+| 点它能列出**那台机器上已有**的工作区 | 通过：`aria-label="添加到侧栏"` 的页里 8 行，与 `/fleet/api/workspaces` 的 8 条远程行一一对应（`验收项目`、`fleet-relay-mwkiidoo`、`SCIdream`、`111`、`FuDaiZuJian`、`grouptest`、`fleet-second`、`fleet-brain-test`） |
+| 点一条直接交接，不必再浏览 | 通过：点「验收项目」→ 对话框关闭 → 进入该工区的新会话页（源文件夹/浏览页都没经过） |
+| 源文件夹是虚线空态卡片 | 通过：截图里 `📁 选择文件夹 / Harness 可以读取和编辑这些文件夹` 是虚线卡 |
+| 第二页「选择文件夹」可返回、机器仍可切 | 通过：正文首行 `‹ 返回`，下拉仍在且值仍是节点 |
+
+三、同一个对话框真的建出一个远程工区（用户在界面里做，不看接口）：
+
+1. 表单里填名称 `验收项目`；
+2. 设备选 `probe-93`；
+3. 点源文件夹 → 第二页 → 「＋ 新建文件夹」→ 命名 `accept-project-1` → 「创建」→ 列表跳进
+   `/root/accept-project-1`；
+4. 「选择此文件夹」→ 回第一屏，源文件夹显示 `accept-project-1 / /root/accept-project-1 / 更换`；
+5. 「创建」→ 对话框关闭，侧栏出现「验收项目」。
+6. 接口核对：`/fleet/api/workspaces` 从 7 条变 8 条，多出
+   `验收项目 | /root/accept-project-1 | fleet_n00a5f7394401_ef149cfe-…`。
+
+四、像真实用户一样给远程大脑下达任务（验收的核心，不是跑脚本）：
+
+在「验收项目」工区新建会话，用真实 `Input.insertText` 敲入并点 `aria-label="发送消息"`：
+
+> 在 /root/accept-project-1 下做三件事，每件都用工具真做：1. 用 write 工具创建
+> task-ACCEPT_540623.txt，内容只有一行 ACCEPT_540623；2. 用 bash 工具运行
+> wc -c task-ACCEPT_540623.txt 并原样贴出输出；3. 用 bash 工具运行 hostname 并原样贴出输出。
+> 最后一行只回复 DONE。
+
+页面回读：**「已完成，用时 14秒」**，正文三段——`已用 write 工具创建
+/root/accept-project-1/task-ACCEPT_540623.txt`、代码块 `14 task-ACCEPT_540623.txt`、
+代码块 `Develop`、末行 `DONE`；用量算 `1 轮 4 步 · 256 tok/s`。
+
+**独立证据**（另开一条 SSH，不复用插件的连接）：
+
+```
+$ cat /root/accept-project-1/task-ACCEPT_540623.txt   →  ACCEPT_540623
+$ wc -c …                                             →  14 /root/accept-project-1/task-ACCEPT_540623.txt
+$ hostname                                            →  Develop
+```
+
+节点的 `hostname` 是 `Develop`，本地不是——这条比任何日志都直接地说明工具真的在节点上跑。
+
+再验证界面里的产物入口：点会话里 `aria-label="在侧边栏打开 …/task-ACCEPT_540623.txt"`，
+右侧预览直接显示 `ACCEPT_540623` —— 远程产物的预览走 `workspaceFiles/read`，和本地一样能用。
+
+五、这一轮动到的代码与文档：
+
+- `packages/dsh-fleet/src/client/client.js`：`WorkspaceFolderFlow` 从「一个文件浏览器」改成
+  「表单 + 浏览 + 加设备 + 已有项目」四页；两套词按插槽名（注册时塞进 props 的 `origin`）选；
+  新增 15 个文案键（中英各一份）。
+- `docs/ARCHITECTURE.md` §六之六：补「一个对话框，两页，第三种叫法」。
+- `packages/dsh-fleet/test/multi-node-acceptance.mjs`：第二个节点支持 key 认证。
 
