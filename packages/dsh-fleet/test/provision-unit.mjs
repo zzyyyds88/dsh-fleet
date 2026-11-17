@@ -161,18 +161,25 @@ check(!/disabled: true/u.test(text),
 
 // With switches set, the disable block is appended and carries the reason — this file
 // lands on somebody's server, so it has to explain itself.
+// With switches set, the disable block is appended and carries the reason — this file
+// lands on somebody's server, so it has to explain itself. Only rows the node
+// composition contains appear: everything else it never loads, so naming it would be
+// a patch entry about nothing.
 const withSwitches = renderBrainPatch({
   ...plan,
   syncBlock: renderSyncBlock([
-    { id: 'sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar', sync: false, source: 'default', reason: 'browser' },
     { id: 'bash', name: '@deepseek-ai/dsh-tool-bash', sync: false, source: 'explicit', reason: 'set by hand' },
-  ]),
+  ], ['bash']),
 })
-check(withSwitches.includes('- id: sidebar') && withSwitches.includes('  disabled: true'),
-  'a switched-off row is disabled in the node patch')
+check(withSwitches.includes('- id: bash') && withSwitches.includes('  disabled: true'),
+  'a switched-off composed row is disabled in the node patch')
 check(withSwitches.includes('turned off by hand'), 'and a hand-made decision is marked as such')
-check(withSwitches.indexOf('- id: sidebar') > withSwitches.indexOf('config:'),
+check(withSwitches.indexOf('- id: bash') > withSwitches.indexOf('config:'),
   'the disable block comes after the config rows, so it reads as a separate concern')
+check(!renderBrainPatch({ ...plan, syncBlock: renderSyncBlock([
+  { id: 'ui-sidebar', name: '@deepseek-ai/dsh-client-ui-sidebar', sync: false, source: 'default', reason: 'x' },
+], []) }).includes('ui-sidebar'),
+  'and a row the node does not compose is never named')
 
 if (YAML === undefined) {
   log('note: no YAML parser available; skipping the round-trip checks')

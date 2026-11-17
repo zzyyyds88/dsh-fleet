@@ -141,7 +141,7 @@ export class SyncSwitches {
     if (!rows.some(row => row.id === rowId)) {
       throw Object.assign(new Error(`no plugin row ${rowId} on this desktop`), { code: 'row-not-found' })
     }
-    if (PROTECTED.includes(rowId) || this.required.includes(rowId)) {
+    if (PROTECTED.includes(rowId)) {
       throw Object.assign(
         new Error(`${rowId} is what makes a node a node; it cannot be switched off`),
         { code: 'row-protected' },
@@ -158,16 +158,18 @@ export class SyncSwitches {
   /** The rows a node must not load, in composition order. */
   disabledRows() {
     const keep = PROTECTED.filter(id => id !== 'web-runtime' && id !== 'brain-runtime')
-    return rowsToDisable(resolveSwitches(this.rows(), this.overrides, this.required), keep)
+    return rowsToDisable(resolveSwitches(this.rows(), this.overrides, this.required), this.required, keep)
   }
 
   /**
    * The patch block that removes those rows on the node.
    *
    * Rendered into the node's own profile patch, which the resident host hot-reloads —
-   * so flipping a switch reconfigures a running node without a restart.
+   * so flipping a switch reconfigures a running node without a restart. Only rows the
+   * composition contains are listed: everything else a node never loads, so naming it
+   * would be a decision about nothing.
    */
   render() {
-    return renderSyncBlock(resolveSwitches(this.rows(), this.overrides, this.required), [])
+    return renderSyncBlock(resolveSwitches(this.rows(), this.overrides, this.required), this.required, [])
   }
 }

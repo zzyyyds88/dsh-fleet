@@ -80,6 +80,7 @@ window.__ModuleLoader__.load({
           pluginsHint: '远程节点跑同一套 DSH，所以它默认会加载同一批插件。这里逐个决定哪些真的发过去：窗口类插件在节点上没有意义，关掉可以减少它的启动负担。改动会立即下发到已连接的节点。',
           pluginSync: '同步到远程节点',
           pluginLocked: '节点自身的组合，不可关闭',
+          pluginAbsent: '节点不加载这一行，无需开关',
           pluginDefaultOff: '默认关闭：需要浏览器窗口',
           pluginDefaultOn: '默认开启',
           pluginSetOff: '已手动关闭',
@@ -138,6 +139,7 @@ window.__ModuleLoader__.load({
           pluginsHint: 'A node runs the same DSH, so it would load the same plugins. Decide per plugin what actually goes there: a window-driven plugin has nothing to do on a node, and leaving it out keeps the node lean. A change reaches connected nodes immediately.',
           pluginSync: 'Send to remote nodes',
           pluginLocked: 'part of the node composition; cannot be switched off',
+          pluginAbsent: 'the node does not load this row at all',
           pluginDefaultOff: 'off by default: needs a browser window',
           pluginDefaultOn: 'on by default',
           pluginSetOff: 'turned off by hand',
@@ -584,6 +586,10 @@ window.__ModuleLoader__.load({
 
       const note = row => {
         if (row.locked) return T.pluginLocked
+        // A brain loads dsh-base + its own bundle, so every dsh-web-app UI row is simply
+        // absent there. Shown, because "this desktop runs it, the node does not" is the
+        // honest answer, but not switchable: there is nothing on the node to switch.
+        if (row.present === false) return T.pluginAbsent
         if (row.source === 'explicit') return row.sync ? T.pluginSetOn : T.pluginSetOff
         return row.sync ? T.pluginDefaultOn : T.pluginDefaultOff
       }
@@ -601,7 +607,7 @@ window.__ModuleLoader__.load({
       h('input', {
         type: 'checkbox',
         checked: row.sync === true,
-        disabled: row.locked === true || busy === row.id,
+        disabled: row.locked === true || row.present === false || busy === row.id,
         onChange: () => { void toggle(row) },
       }),
       h('span', { style: styles.grow },

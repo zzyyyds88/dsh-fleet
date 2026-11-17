@@ -211,7 +211,7 @@ node packages\dsh-fleet\test\multi-node-acceptance.mjs <base> <token>
 | 4 审批/提问 | 通过 | `waterfall-unit` 7 段全过（允许的才转发、拒绝/超时各自结算、断线取消卡片、问题按自己名字转发） |
 | 5 多节点 | 通过 | 同一机器两个 `remoteRoot` 同时 connected；两边工区 id 唯一；各建 Session 前缀各自 nodeId、读回落到正确节点；合并列表两行；移除一台不影响另一台 |
 | 6 版本闸门 | 通过 | `version-unit` 全过；`artefact-acceptance` 在真节点 8 秒装完 832MiB、原生包 `sherpa-onnx-linux-x64`/`sharp-linux-x64`（无 win-x64）、二次安装与回滚均通过；实测一台 3.9GB 的旧树被替换成 832MiB |
-| 7 插件开关 | 通过 | 207 行，147 开 / 60 关 / 134 锁定；关掉的行写进节点 profile patch 的 disabled 块；结构行无法关闭（实测关掉会 `1 required plugin did not activate`） |
+| 7 插件开关 | 通过 | 207 行中，节点组合里真的有的 133 行默认开、其余 74 行标为「节点不加载」且不可开关；把 `plan-mode` 关掉后节点 patch 出现对应 disabled 条目、拨回默认即消失；14 个结构行（HTTP 服务 + Remote API 控制器/传输）不可关闭 —— 实测关掉要么 `1 required plugin did not activate`，要么节点活着但 `session/list` 不存在 |
 | 8 纯逻辑 | 通过 | routing-unit / multipart-unit / provision-unit / waterfall-unit / version-unit / dispatch-seam / upstream-smoke / descriptor-smoke |
 | 9 端到端 | 通过 | workspace-flow / host-routing / tool-parity / tool-git-image / client-bundle / event-relay / gateway-smoke / session / terminal / multi-node / browser |
 
@@ -219,4 +219,4 @@ node packages\dsh-fleet\test\multi-node-acceptance.mjs <base> <token>
 就抓到）；②制品裁剪规则误删 `yaml/dist/doc/directives.js`，节点启动即 `MODULE_NOT_FOUND` 而
 版本闸门说"已是最新"，为此加了 `.fleet-artefact.json` 打包戳；③把 `connection`/`web-startup`
 当浏览器行关掉导致节点没有 HTTP 服务，为此加了 `STRUCTURAL_ROWS` + 从已安装 `dsh-base` 解析
-必需行；④浏览器验收固定采样一次会撞上侧栏重绘，改成有界轮询。
+必需行；④浏览器验收固定采样一次会撞上侧栏重绘，改成有界轮询（截图超时不再算失败、CDP 定时器成功即清）；⑤插件开关第一版按名字猜默认值、把 `connection`/`web-startup` 当浏览器行、并给 59 行节点从不加载的行写了 disabled —— 三处都实测炸过，现在默认值取节点实际组合、结构行实测收敛、只对节点真有的行写 disabled。

@@ -184,68 +184,93 @@ const check = (ok, label, detail) => {
     { id: 'llm', name: '@deepseek-ai/dsh-llm-deepseek-api-key' },
     { id: 'picker', name: '@deepseek-ai/dsh-directory-picker' },
   ]
-  const defaults = resolveSwitches(rows, {})
-  check(defaults.find(row => row.id === 'bash')?.sync === true, 'a tool defaults to synced')
-  check(defaults.find(row => row.id === 'sidebar')?.sync === false, 'a UI row defaults to unsynced')
+  // The set a real brain composes: dsh-base's rows plus the brain bundle's. The UI
+  // rows come from dsh-web-app, which a node does not compose at all.
+  const composed = ['bash', 'llm']
+
+  const defaults = resolveSwitches(rows, {}, composed)
+  check(defaults.find(row => row.id === 'bash')?.sync === true, 'a composed tool defaults to synced')
+  // The bundle list is the default, not a name-shape guess: a node keeps
+  // `connection`/`locale`/`resources` and drops every `dsh-client-ui-*` row, and the
+  // page has to start out saying exactly that.
+  check(defaults.find(row => row.id === 'bash')?.sync === true, 'a composed row defaults to on')
+  check(defaults.find(row => row.id === 'sidebar')?.sync === false,
+    'a row the node does not compose defaults to unsynced')
+  check(defaults.find(row => row.id === 'sidebar')?.present === false,
+    'and is marked absent, so the UI does not offer a switch for it')
   check(defaults.every(row => row.source === 'default'), 'with no overrides, every answer is a default')
-  check(defaults.find(row => row.id === 'sidebar')?.reason.includes('browser'),
-    'and the reason names why', defaults.find(row => row.id === 'sidebar')?.reason)
+  check(defaults.find(row => row.id === 'llm')?.reason.includes('host-plane'),
+    'a composed row explains itself by what it is', defaults.find(row => row.id === 'llm')?.reason)
+  check(defaults.find(row => row.id === 'sidebar')?.reason.includes('does not load'),
+    'an absent row says the node does not load it', defaults.find(row => row.id === 'sidebar')?.reason)
 
   const explicit = resolveSwitches(rows, {
     bash: { sync: false },
     sidebar: { sync: true },
     picker: { sync: true },
     ghost: { sync: false },
-  })
+  }, composed)
   check(explicit.find(row => row.id === 'bash')?.sync === false,
     'an explicit off beats the default on')
   check(explicit.find(row => row.id === 'bash')?.source === 'explicit', 'and says it was set by hand')
-  check(explicit.find(row => row.id === 'sidebar')?.sync === true,
-    'an explicit on beats the default off')
   check(explicit.find(row => row.id === 'ghost') === undefined,
     'a switch for a row that is not composed is ignored')
+  // A switch on a row the node does not load is remembered but locked: the intent is
+  // kept for when the node does compose it, and the checkbox cannot lie meanwhile.
+  const absentOn = explicit.find(row => row.id === 'sidebar')
+  check(absentOn?.sync === true && absentOn.locked === true,
+    'a switch on an absent row stays locked rather than pretending to apply')
 
-  const disabled = rowsToDisable(explicit)
-  check(disabled.includes('bash'), 'a hand-disabled tool is in the disable list')
-  check(!disabled.includes('llm'), 'a default-on row is not')
-  // The picker was explicitly turned ON, so it must NOT be disabled even though its
-  // default is off. This is the case a "disable everything browser-shaped" shortcut
-  // would get wrong.
-  check(!disabled.includes('picker'), 'an explicitly enabled row is not disabled')
+  // Only rows the node composition contains can be disabled: everything else is not in
+  // its bundle list, so naming it would be a patch entry about a row that never loads.
+  // Measured: one node's patch carried 59 such entries, all of them from dsh-web-app.
+  const disabled = rowsToDisable(explicit, composed)
+  check(disabled.includes('bash'), 'a hand-disabled composed tool is in the disable list')
+  check(!disabled.includes('sidebar'), 'an absent row never is, even when switched on')
+  check(!rowsToDisable(explicit, []).includes('bash'),
+    'and with an empty composition nothing is disabled at all')
   check(!disabled.includes('web-runtime') && !disabled.includes('brain-runtime'),
     'the node composition itself is never disabled')
 
-  const rendered = renderSyncBlock(explicit)
+  const rendered = renderSyncBlock(explicit, composed)
   check(rendered.includes('- id: bash') && rendered.includes('disabled: true'),
     'the rendered block disables the switched-off row')
   check(rendered.includes('turned off by hand'), 'and marks the hand-made decision')
   check(!rendered.includes('- id: llm'), 'an enabled row does not appear at all')
 
-  // A row the node's own composition needs is on and locked, whatever its name looks
-  // like. This is the case that broke a node outright: `connection`, `file-upload`,
-  // `locale`, `shortcuts`, `resources` and `web-startup` are all `@deepseek-ai/dsh-client-*`
-  // or browser-shaped, yet the brain composes them and `webserver`/`brain-runtime`
-  // cannot start without `webStartup`. Measured: six plugins waiting for services and no
-  // HTTP server at all.
-  const required = ['sidebar', 'pickerr']
-  const withRequired = resolveSwitches(rows, { sidebar: { sync: false } }, required)
-  const sidebarRow = withRequired.find(row => row.id === 'sidebar')
-  check(sidebarRow?.sync === true, 'a row the node composition needs stays on')
-  check(sidebarRow?.source === 'required', 'and says the composition is why', sidebarRow?.source)
-  check(sidebarRow?.locked === true, 'so the UI cannot offer a switch for it')
+  // The rows a node cannot start without are locked whatever the composition says.
+  const structural = resolveSwitches(
+    [{ id: 'web', name: '@deepseek-ai/dsh-web' }, { id: 'webserver', name: '@deepseek-ai/dsh-host-webserver' }],
+    { web: { sync: false }, webserver: { sync: false } },
+    ['web', 'webserver'],
+  )
+  check(structural.every(row => row.sync && row.locked),
+    'a row a node cannot start without is locked, even after an explicit off')
+  check(structural.some(row => row.reason.includes('cannot start')),
+    'and the reason says why', structural[0]?.reason)
+  check(rowsToDisable(structural, ['web', 'webserver']).length === 0,
+    'so nothing structural ever reaches the disable block')
+  check(isStructuralRow('web') && isStructuralRow('web-startup') && isStructuralRow('brain-runtime'),
+    'the structural set covers the rows measured to be fatal')
+  check(!isStructuralRow('office-kit') && !isStructuralRow('workflow-ptc')
+    && !isStructuralRow('tool-web') && !isStructuralRow('plan-mode'),
+    'and leaves genuinely optional rows switchable')
+  // The Remote API itself is structural: with a controller or the transport off, the
+  // node still answers HTTP but `session/list` is simply absent — a connected node that
+  // cannot list a Session.
+  for (const id of ['connection', 'api-remotes', 'file-upload', 'session-controller',
+    'terminal-controller', 'workspace-controller', 'workspace-files']) {
+    check(isStructuralRow(id), `${id} is structural, because losing it removes the Remote API`)
+  }
 
-  // A row that IS required and is also browser-shaped must not be disabled either.
-  const disableRequired = rowsToDisable(withRequired)
-  check(!disableRequired.includes('sidebar'), 'and it never reaches the disable list')
-
-  // Parsing the generated patch is how the plugin learns that set; a hand-written list
-  // would go stale on the next upstream sync and take a node down with it.
+  // A required-by-name row is not in the brain patch; parsing is how the plugin learns
+  // the set without a hand-written list that would go stale on the next upstream sync.
   const ids = parsePatchRowIds([
     '- id: one',
     '  config:',
     '    path: x',
     '- insert:',
-    '    - id: two',
+    "    - id: two",
     "      name: '@deepseek-ai/x'",
     '- id: three',
   ].join('\n'))
@@ -254,26 +279,6 @@ const check = (ok, label, detail) => {
   check(parsePatchRowIds('').length === 0, 'an empty patch has no rows')
   check(parsePatchRowIds(undefined).length === 0, 'a missing patch has no rows')
   check(parsePatchRowIds('- id: one\n- id: one').length === 1, 'a repeated id is listed once')
-
-  // The rows a node cannot start without are locked even though they are not in the
-  // patch's row list — `web`, for instance, comes from `dsh-base` and every web tool
-  // injects it. Switching it off left a node whose tool calls answered
-  // "tool-web: waiting for web" instead of doing anything.
-  const structural = resolveSwitches(
-    [{ id: 'web', name: '@deepseek-ai/dsh-web' }, { id: 'webserver', name: '@deepseek-ai/dsh-host-webserver' }],
-    { web: { sync: false }, webserver: { sync: false } },
-  )
-  check(structural.every(row => row.sync && row.locked),
-    'a row a node cannot start without is locked, even after an explicit off')
-  check(structural.some(row => row.reason.includes('cannot start')),
-    'and the reason says why', structural[0]?.reason)
-  check(rowsToDisable(structural).length === 0,
-    'so nothing structural ever reaches the disable block')
-  check(isStructuralRow('web') && isStructuralRow('web-startup') && isStructuralRow('brain-runtime'),
-    'the structural set covers the rows measured to be fatal')
-  check(!isStructuralRow('office-kit') && !isStructuralRow('workflow-ptc'),
-    'and leaves genuinely optional rows switchable')
-
   const parsed = parseSwitches({ bash: { sync: false }, llm: true, junk: { sync: 'yes' } })
   check(parsed.bash?.sync === false, 'a stored switch round-trips')
   check(parsed.llm?.sync === true, 'a bare boolean is accepted as a shorthand')
@@ -284,8 +289,11 @@ const check = (ok, label, detail) => {
   // A row with no entry must never be written as "disabled": that is the difference
   // between a compact settings file and one that freezes today's defaults forever.
   const none = resolveSwitches(rows, {})
-  check(rowsToDisable(none).every(id => id === 'sidebar' || id === 'picker'),
-    'only the browser rows are disabled when nothing was set by hand', rowsToDisable(none).join(','))
+  check(rowsToDisable(none, composed).every(id => id === 'sidebar' || id === 'picker'),
+    'only the browser rows are disabled when nothing was set by hand',
+    rowsToDisable(none, composed).join(','))
+  check(rowsToDisable(none, []).length === 0,
+    'and with an empty composition nothing is disabled at all')
 }
 
 // ---- one node's own filesystem layout, derived from its root ---------------

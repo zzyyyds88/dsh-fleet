@@ -65,16 +65,22 @@ class Cdp {
     return cdp
   }
 
-  send(method, params = {}) {
+  send(method, params = {}, timeoutMs = 30_000) {
     const id = ++this.next
     this.socket.send(JSON.stringify({ id, method, params }))
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject })
-      setTimeout(() => {
+      // The timer has to be cleared on success: a pending 30-second timer keeps this
+      // process alive after every check has already passed, and a script that hangs at
+      // exit reads exactly like a failing one.
+      const timer = setTimeout(() => {
         if (!this.pending.has(id)) return
         this.pending.delete(id)
         reject(new Error(`${method} timed out`))
-      }, 30_000)
+      }, timeoutMs)
+      this.pending.set(id, {
+        resolve: value => { clearTimeout(timer); resolve(value) },
+        reject: error => { clearTimeout(timer); reject(error) },
+      })
     })
   }
 
@@ -175,14 +181,21 @@ check(hasFleetEntry, 'the plugin\'s own entry is reachable from the shell',
   '远程节点' + (sidebarText.includes('远程节点') ? '' : ' (missing)'))
 
 // ---- 4. a screenshot, so a human can confirm without re-running ---------
-const shot = await cdp.send('Page.captureScreenshot', { format: 'png' })
+// A full-page screenshot of a large window over CDP can take longer than the default
+// call timeout, and a timed-out capture would otherwise fail a run whose checks all
+// passed. The screenshot is evidence, not a pass condition.
+const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, 90_000).catch(() => undefined)
 const { writeFileSync, mkdirSync } = await import('node:fs')
 const { dirname, join, resolve } = await import('node:path')
 const { fileURLToPath } = await import('node:url')
-const shots = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '.scratch')
-mkdirSync(shots, { recursive: true })
-writeFileSync(join(shots, 'browser-acceptance.png'), Buffer.from(shot.data, 'base64'))
-log(`screenshot: ${join(shots, 'browser-acceptance.png')}`)
+if (shot === undefined) {
+  log('screenshot: skipped (capture did not answer in time)')
+} else {
+  const shots = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '.scratch')
+  mkdirSync(shots, { recursive: true })
+  writeFileSync(join(shots, 'browser-acceptance.png'), Buffer.from(shot.data, 'base64'))
+  log(`screenshot: ${join(shots, 'browser-acceptance.png')}`)
+}
 
 const finalText = await text()
 check(finalText.length > 200, 'the page is still painted at the end', `${String(finalText.length)} chars`)

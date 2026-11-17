@@ -447,19 +447,47 @@ profile 名也按 root 派生（`~/.dsh-fleet` 仍是 `fleet`，`~/.dsh-fleet-b`
 
 ## 六之五、每插件同步开关
 
-节点跑同一套 DSH，所以它默认会加载同一批插件，但其中几十个是窗口类。开关决定哪些真的发过去。
+节点跑同一套 DSH，所以它默认会加载同一批插件。开关决定哪些真的发过去。
 
-- **默认值按"这行是什么"推，不按名字列表**：`@deepseek-ai/dsh-client-ui-*` / `dsh-client-*` /
-  `dsh-web*` 等默认关，其余默认开。上游新增 UI 行不需要有人改列表，新增工具也不会被漏掉。
-- **两个来源会覆盖默认值，而且都是锁定态**：节点组合本身包含的行（从**已安装的** `dsh-base`
-  patch 与生成的大脑 patch 里解析出来），以及 `STRUCTURAL_ROWS`（`web-startup`、`webserver`、
-  `web`、`brain-runtime`）。实测：把 `connection`/`web-startup` 之类当"浏览器行"关掉，节点报
-  `1 required plugin did not activate`、六个插件在等服务、根本没有 HTTP 服务；把 `web` 关掉则是
-  每个 web 工具回"waiting for web"。
-- **关掉写成 `- id: X` + `disabled: true`**，进节点 profile patch（常驻 host 会热重载），而不是
-  改 bundle 列表：bundle 是发布物里生成好的，per-node 改它就等于每台节点一份组合。
-- 状态存 `$DSH_HOME/fleet/plugins.json`；把开关拨回默认值**删掉那条记录**而不是存同值，这样升级
-  改了默认值还能到达从没碰过它的用户。
+### 默认值来自 bundle 列表，不是名字形状
+
+一个大脑组合的是 `dsh-base` + `@local/dsh-fleet-brain`，而大脑是从 `dsh-web-app` **减**出来的：
+所以 `dsh-web-app` 的一百多行「默认就在、节点上一行都没有」。反过来，工作区里也留着几行名字像
+浏览器、其实是 headless 的（`connection` 是 Remote mux、`file-upload` 是 session-controller
+注入的附件能力、`locale`/`shortcuts`/`resources` 同理）。
+
+因此默认值取**节点的实际组合**（从已安装的 `dsh-base` patch 与生成的大脑 patch 解析出来）：
+
+| 情况 | 默认 | 能否开关 |
+|---|---|---|
+| 行在节点组合里，且不是结构行 | 开 | 能 |
+| 行不在节点组合里 | 关 | 不能（显示为「节点不加载这一行」） |
+| 结构行 | 开 | 不能 |
+
+只看名字会得出错误答案：第一版按名字判断，把 `connection`/`web-startup` 当浏览器行，节点直接
+报 `1 required plugin did not activate`、六个插件在等服务、根本没有 HTTP 服务。名字规则现在只作为
+**提示**保留 —— 一行名字像窗口却被节点组合着，正是关掉前需要被提醒的情况。
+
+### 结构行是实测出来的，不是推出来的
+
+`STRUCTURAL_ROWS` 收敛的是两类独立失败：
+
+- 提供 `webStartup` / `webServer` / `web` / `fileUploads` 的行被关 → 节点起不来，报告里**一个
+  字都没提开关**；
+- 控制器或传输被关 → 节点活着、HTTP 能通，但 `session/list` 之类根本不存在，桌面看到的是
+  「已连接但不能列会话」。
+
+其余行（`office-kit`、`workflow-ptc`、`tool-web`、模型适配器）都是真选择，关掉就是更小的节点。
+
+### 关掉怎么写
+
+写成 `- id: X` + `disabled: true` 进**节点 profile patch**（常驻 host 会热重载），且**只写节点
+组合里真有的行** —— 给一行节点从不加载的行写 disabled，是一条什么也没决定的记录，曾让一台节点
+的 patch 里堆了 59 条这样的条目。bundle 列表不改：它是发布物里生成好的，per-node 改它等于每台
+节点一份组合。
+
+状态存 `$DSH_HOME/fleet/plugins.json`；把开关拨回默认值**删掉那条记录**而不是存同值，这样升级
+改了默认值还能到达从没碰过它的用户。
 
 ## 七、测试
 

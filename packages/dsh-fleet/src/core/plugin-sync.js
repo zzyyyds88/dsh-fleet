@@ -86,27 +86,41 @@ export function parseSwitches(value) {
 }
 
 /**
- * Rows a node cannot start without.
+ * Rows a node cannot serve without.
  *
- * Measured, not inferred. Disabling any of these produced
- * `dsh: startup failed: 1 required plugin did not activate` and the node never served
- * HTTP at all, because they provide services other rows `inject` as required:
+ * Curated from measurement rather than derived, because the `inject` graph that would
+ * imply it is inside the packages and this plugin keeps zero upstream imports. Two
+ * independent failures were reproduced against a real node:
  *
- * - `web-startup` provides `webStartup`, which `webserver` and `brain-runtime` require;
- * - `webserver` provides `webServer`, which `brain-runtime` requires;
- * - `brain-runtime` is the tokenized entry point the resident host is started for;
- * - `web` provides the `web` service `tool-web`/`web-search`/`web-fetch` inject — they
- *   wait for it rather than failing, but every web capability then reports
- *   `waiting for web` instead of working.
+ * - **The node never answers HTTP at all** when the rows providing `webStartup`,
+ *   `webServer`, `web` or `fileUploads` are off. `dsh` reports
+ *   `startup failed: 1 required plugin did not activate`, lists six plugins waiting for
+ *   services, and exits — the switches are not mentioned anywhere in that message.
+ * - **The node answers but has no Remote API** when a controller or the transport is off:
+ *   `session/list` and friends simply are not there, so the desktop sees a connected node
+ *   that cannot list a Session.
  *
- * Everything else is a genuine choice: switching `office-kit` or `workflow-ptc` off is a
- * smaller node, which is what this whole layer is for.
+ * Everything outside this list — `office-kit`, `workflow-ptc`, `tool-web`, the model
+ * adapters — is a genuine choice, and turning some of them off is exactly what this layer
+ * is for: a smaller node.
  */
 export const STRUCTURAL_ROWS = Object.freeze([
+  // The HTTP service itself.
   'web-startup',
   'webserver',
   'web',
   'brain-runtime',
+  // The Remote API: transport, multiplexing and the controllers the desktop calls.
+  'connection',
+  'api-remotes',
+  'file-upload',
+  'session-controller',
+  'terminal-controller',
+  'workspace-controller',
+  'workspace-files',
+  'job-controller',
+  'settings-controller',
+  'agent-preset-registry',
 ])
 
 /**
@@ -133,34 +147,36 @@ export function isStructuralRow(id) {
  * activate", six plugins waiting for services that will never arrive, and no HTTP
  * server — measured, not theorised.
  *
- * @param {Array<{ id: string, name: string }>} rows - the composed rows, in order.
+ * @param {Array<{ id: string, name: string }>} rows - the rows this desktop composes, in order.
  * @param {Record<string, { sync: boolean }>} overrides - persisted per-row choices.
- * @param {Iterable<string>} [required] - row ids the node's own composition contains.
- * @returns {Array<{ id: string, name: string, sync: boolean, source: 'default' | 'explicit' | 'required', reason: string, locked: boolean }>}
+ * @param {Iterable<string>} [composed] - row ids the node's own composition contains.
+ * @returns {Array<{ id: string, name: string, sync: boolean, source: 'default' | 'explicit' | 'required', reason: string, locked: boolean, present: boolean }>}
  */
-export function resolveSwitches(rows, overrides, required = []) {
-  const requiredIds = new Set(required)
+export function resolveSwitches(rows, overrides, composed = []) {
+  const composedIds = new Set(composed)
   const out = []
   const seen = new Set()
   for (const row of rows) {
     if (typeof row?.id !== 'string' || seen.has(row.id)) continue
     seen.add(row.id)
-    // The node's own composition wins over both the default and a stored choice: this
-    // is not "a plugin this desktop sends", it is "a row the brain is built from".
-    if (requiredIds.has(row.id) || isStructuralRow(row.id)) {
+    // Only the handful of rows a node cannot run without are locked. Everything else the
+    // node composes is a real choice: turning `office-kit` or `workflow-ptc` off is a
+    // smaller node, which is what this layer exists for. The rows a node does *not*
+    // compose are shown but not switchable — a brain loads dsh-base + its own bundle, so
+    // every dsh-web-app UI row is simply absent and a switch for it would control nothing.
+    if (isStructuralRow(row.id)) {
       out.push({
         id: row.id,
         name: row.name,
         sync: true,
         source: 'required',
-        reason: isStructuralRow(row.id)
-          ? 'a node cannot start without it'
-          : 'part of the node composition itself',
+        reason: 'a node cannot start without it',
         locked: true,
+        present: true,
       })
       continue
     }
-    const verdict = classifyRow(row.name)
+    const present = composedIds.has(row.id)
     const explicit = overrides[row.id]
     if (explicit !== undefined) {
       out.push({
@@ -169,17 +185,32 @@ export function resolveSwitches(rows, overrides, required = []) {
         sync: explicit.sync,
         source: 'explicit',
         reason: 'set by hand',
-        locked: false,
+        locked: !present,
+        present,
       })
       continue
     }
+    const verdict = classifyRow(row.name)
     out.push({
       id: row.id,
       name: row.name,
-      sync: !verdict.browserOnly,
+      // **The bundle list already decided.** A row the node composes is one the brain's
+      // author chose to keep — `connection`, `file-upload`, `locale`, `shortcuts`,
+      // `resources` are all `dsh-client-*` by name yet genuinely headless — so it
+      // defaults to on and the switch is a way to trim it. A row the node does not
+      // compose defaults to off and is locked: there is no bundle to add it back to.
+      sync: present,
       source: 'default',
-      reason: verdict.reason,
-      locked: false,
+      // The name-shape rule survives as a *note* rather than as the default, because a
+      // row that looks browser-only and is nevertheless composed is exactly the case a
+      // reader needs warned about before switching it off.
+      reason: present
+        ? (verdict.browserOnly
+          ? 'the brain composes it, even though its name suggests a window'
+          : verdict.reason)
+        : 'the node does not load this row',
+      locked: !present,
+      present,
     })
   }
   return out
@@ -212,18 +243,23 @@ export function parsePatchRowIds(text) {
 /**
  * The rows a node must not load, as the profile patch's disable list.
  *
- * A row the node's composition requires is never listed, and neither is the composition
- * itself: disabling either leaves a node that starts and does nothing (or does not start
- * at all).
+ * Only rows the node's own composition **contains** are listed. Everything else — a
+ * `dsh-client-ui-*` row, a native dialog — is not in the node's bundle list at all, so
+ * disabling it would name a row that was never going to load: dead weight that hides the
+ * real signal, and it made one node's patch carry 59 entries none of which meant
+ * anything. Measured against a real node: every row in the generated block came from
+ * `dsh-web-app`, which a node does not compose.
  *
  * @param {Array<{ id: string, name: string, sync: boolean, locked?: boolean }>} resolved
- * @param {readonly string[]} keep - row ids that are the node's composition itself.
+ * @param {readonly string[]} present - row ids the node composition contains.
+ * @param {readonly string[]} keep - row ids that are the composition itself.
  * @returns {string[]}
  */
-export function rowsToDisable(resolved, keep = []) {
+export function rowsToDisable(resolved, present = [], keep = []) {
+  const presentIds = new Set(present)
   const protectedIds = new Set(['web-runtime', 'brain-runtime', ...keep])
   return resolved
-    .filter(row => !row.sync && !row.locked && !protectedIds.has(row.id))
+    .filter(row => !row.sync && !row.locked && !protectedIds.has(row.id) && presentIds.has(row.id))
     .map(row => row.id)
 }
 
@@ -233,20 +269,23 @@ export function rowsToDisable(resolved, keep = []) {
  * Commented with *why* each row is off, because this file lands on somebody's server
  * and the next person to read it needs to know whether turning one back on is safe.
  * @param {Array<{ id: string, name: string, sync: boolean, source: string, reason: string, locked?: boolean }>} resolved
+ * @param {readonly string[]} present - row ids the node composition contains.
  * @param {readonly string[]} keep
  * @returns {string}
  */
-export function renderSyncBlock(resolved, keep = []) {
+export function renderSyncBlock(resolved, present = [], keep = []) {
+  const presentIds = new Set(present)
   const off = resolved.filter(row => !row.sync && !row.locked
+    && presentIds.has(row.id)
     && !['web-runtime', 'brain-runtime', ...keep].includes(row.id))
   if (off.length === 0) return ''
   const lines = [
     '',
-    '# ── rows this desktop does not send to this node ────────────────────────────',
+    '# ── rows this desktop turned off on this node ──────────────────────────────',
     '#',
-    '# Written from the desktop\'s per-plugin switches. An "off" row is absent from the',
-    '# node composition rather than loaded-and-disabled: a disabled row still costs its',
-    '# module load, and one that needs a browser would still fail to start.',
+    '# Written from the desktop\'s per-plugin switches, and only for rows the brain',
+    '# composition actually contains: a `disabled: true` entry naming a row a node never',
+    '# loads would be dead weight pretending to be a decision.',
   ]
   for (const row of off) {
     lines.push(`#   ${row.id}: ${row.reason}${row.source === 'explicit' ? ' (turned off by hand)' : ''}`)
