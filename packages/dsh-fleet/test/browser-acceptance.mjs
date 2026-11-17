@@ -11,8 +11,11 @@
  * It also exercises the plugin's own settings surface, because that is where the plugin
  * sync switches live and a switch nobody can reach is not a switch.
  *
- * Chrome must already be running with `--remote-debugging-port=9222`. Kept out of the
- * default matrix for that reason; `docs/ACCEPTANCE.zh.md` sections 1 and 7 call for it.
+ * Chrome must already be running with `--remote-debugging-port=9222`. Without it this suite
+ * reports SKIP (exit code 3) with the command to start Chrome — a deployment that has no
+ * debug port cannot answer the question, and calling that a failure teaches people to
+ * ignore the one suite that reads the rendered page. `docs/ACCEPTANCE.zh.md` §1 and §7
+ * call for it.
  *
  * Usage: node test/browser-acceptance.mjs <hostBase> <launchToken>
  */
@@ -102,7 +105,17 @@ class Cdp {
   }
 }
 
-const cdp = await Cdp.attach()
+// No Chrome, no suite. This is the documented SKIP contract (exit code 3 with a reason),
+// not a failure: a deployment without a debug port cannot answer the question this file
+// asks, and reporting it as a failure would train people to ignore the one suite that
+// looks at the rendered page.
+const cdp = await Cdp.attach().catch(error => {
+  const port = String(process.env.DSH_BROWSER_DEBUG_PORT ?? 9222)
+  // The runner reports the last line as the SKIP reason, so the actionable sentence is last.
+  log(`cannot reach Chrome's debug port ${port}: ${error.message}`)
+  log(`start Chrome with --remote-debugging-port=${port} (see docs/ACCEPTANCE.zh.md §1)`)
+  process.exit(3)
+})
 await cdp.send('Page.enable')
 await cdp.send('Runtime.enable')
 await cdp.send('Page.navigate', { url: `${base}/?token=${encodeURIComponent(token)}` })

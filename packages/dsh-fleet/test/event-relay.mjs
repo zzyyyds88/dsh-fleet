@@ -148,20 +148,21 @@ check(rows.some(row => row.sessionId === wrapped),
 // ---- 2. the projection stream --------------------------------------------
 // Two properties matter and they fail in opposite directions, so both are checked:
 //
-//   - the opening baseline must carry this Session under its wrapped id (a node
-//     that connected earlier is visible without a page reload);
-//   - there must be **exactly one** baseline, because a client treats any baseline
-//     as "this is now the whole picture" — a second one would wipe the first out
-//     and remote projections would look like they never worked.
+//   - there must be **exactly one** baseline on a stream, because a client treats any
+//     baseline as "this is now the whole picture" — a second one would wipe the first out
+//     and remote projections would look like they never worked;
+//   - a client that attaches **later** must find the node's Sessions in its opening
+//     baseline, i.e. a node that was already running is visible without a page reload.
+//
+// The second one is checked on a second stream, opened once this test's Session exists.
+// Sampling the first stream's baseline would make the check depend on whether the node's
+// resident host happened to have a Session in memory, which is exactly what a restart
+// clears — measured: after a plugin switch the node's own baseline is legitimately empty.
 const baselines = control.frames
   .slice(0, controlBefore)
   .filter(frame => frame.value?.type === 'baseline')
 check(baselines.length === 1, 'the client receives exactly one control baseline',
   String(baselines.length))
-const blocks = Object.keys(baselines[0]?.value?.value?.projections ?? {})
-check(blocks.some(key => key.startsWith('fleet_')),
-  'the control baseline carries remote projection blocks',
-  `${String(blocks.filter(key => key.startsWith('fleet_')).length)} of ${String(blocks.length)}`)
 
 // Now a change made on the node has to arrive as a projection frame. A rename is
 // the cheapest projection the node can move on its own.
@@ -177,6 +178,20 @@ const seenTitle = () => control.frames
     && (frame.changes ?? []).some(change => change.key === 'title' && change.val === title))
 while (Date.now() < projected && !seenTitle()) await sleep(300)
 check(seenTitle(), 'a title the node writes reaches the browser as a projection frame', title)
+
+// ---- 2b. a client attaching now sees the node's Sessions ------------------
+// Opened after the Session exists, so the assertion is about the merge and not about the
+// node's memory. This is the "second browser window" case.
+const later = liveStream(carrier, 'session/control', {})
+const laterDeadline = Date.now() + 15_000
+const laterBlocks = () => Object.keys(
+  later.frames.find(frame => frame.value?.type === 'baseline')?.value?.value?.projections ?? {},
+)
+while (Date.now() < laterDeadline && !laterBlocks().includes(wrapped)) await sleep(300)
+check(laterBlocks().includes(wrapped),
+  'a client attaching later finds the node Session in its opening baseline',
+  `${String(laterBlocks().filter(key => key.startsWith('fleet_')).length)} remote of ${String(laterBlocks().length)}`)
+later.stop()
 const leaked = control.frames
   .slice(controlBefore)
   .filter(frame => /"sessionId":"session-[0-9a-f]{8}-/u.test(JSON.stringify(frame.value ?? null)))

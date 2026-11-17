@@ -193,13 +193,17 @@ check(String(row?.cwd ?? '') === String(remote.path),
 
 // ---- 7. the node really ran it: its own session log names this Session ---
 // The node keeps one log directory per Session under a cwd-mangled parent, so the
-// check is a find rather than a fixed path.
+// check is a find rather than a fixed path. The mangling is DSH's own: `/root/project`
+// becomes `--root-project--`, which is what has to be compared — matching a substring of
+// the plain path only worked while the workspace happened to be called `grouptest`.
+const mangle = path => `--${String(path).replace(/^\//u, '').replaceAll('/', '-')}--`
 const nodeLog = await nodeExec(
   `find ~/.dsh/sessions -maxdepth 2 -name 'session-${bare.replace(/^session-/u, '')}' 2>/dev/null | head -1`,
 )
 check(nodeLog.trim().length > 0, 'the node has a session log for it', nodeLog.trim())
-check(nodeLog.includes('grouptest') || nodeLog.includes(String(remote.path).replace(/^\//u, '')),
-  'and that log lives under the workspace path the Session reports', nodeLog.trim())
+check(nodeLog.includes(mangle(remote.path)),
+  'and that log lives under the workspace path the Session reports',
+  `${nodeLog.trim()} vs ${mangle(remote.path)}`)
 
 session.stop()
 followCarrier.close()

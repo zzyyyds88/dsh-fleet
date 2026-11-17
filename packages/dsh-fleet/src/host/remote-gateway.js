@@ -104,6 +104,8 @@ export class RemoteGateway {
     this.carrier = undefined
     /** @type {Promise<import('./ws.js').WebSocketClient> | undefined} */
     this.carrierPending = undefined
+    /** Bumped per carrier, so a late `close` from an old socket cannot clear the new one. */
+    this.generation = 0
     /** @type {Map<string, LogicalStream>} */
     this.streams = new Map()
     /** @type {Map<string, { resolve: Function, reject: Function, timer: NodeJS.Timeout }>} */
@@ -118,6 +120,9 @@ export class RemoteGateway {
   /** Drop cached auth and carrier state, e.g. after the node reconnects. */
   reset() {
     this.cookieValue = undefined
+    // Invalidate the carrier's generation first: its `close` handler must not clear the state
+    // this method is about to build for the next connection.
+    this.generation = (this.generation ?? 0) + 1
     const carrier = this.carrier
     this.carrier = undefined
     this.carrierPending = undefined
@@ -231,11 +236,63 @@ export class RemoteGateway {
   }
 
   /**
+   * Run `open` again shortly, for a stream whose carrier ended.
+   *
+   * A carrier ends whenever the resident host restarts — a plugin switch does exactly that —
+   * and a relay that does not come back stays dead until something else touches the fleet.
+   * Measured, that is not a cosmetic gap: after one plugin switch the node's Session rows
+   * stopped producing events, its projection blocks vanished from the sidebar's control
+   * baseline, and an approval card was answered here while the node never heard the answer.
+   *
+   * The pause is part of the fix. Reconnecting in the same tick reaches a host that is still
+   * shutting down, fails, and there is then no second attempt. The attempts are bounded on
+   * purpose: a node that is really gone must not keep a timer alive for ever.
+   * @param {() => void | Promise<void>} open
+   * @param {{ delayMs?: number, attempts?: number }} [options]
+   */
+  revive(open, options = {}) {
+    const delayMs = options.delayMs ?? 1_000
+    let left = options.attempts ?? 8
+    const attempt = () => {
+      if (left <= 0) return
+      left -= 1
+      if (this.serving() === undefined) return
+      try {
+        void open()
+      } catch { /* the relay reports its own failure */ }
+      if (left > 0) schedule()
+    }
+    const schedule = () => {
+      const timer = setTimeout(attempt, delayMs)
+      timer.unref?.()
+    }
+    schedule()
+  }
+
+  /**
+   * Whether the cached carrier can still carry frames.
+   *
+   * A socket can be dead before its `close` event is delivered — the node's resident host
+   * going away is exactly that case. Sending into it returns a write nobody reads, and the
+   * logical stream opened on it then produces no frames at all: measured, `tool-parity` saw
+   * `0 frames` for a Session that ran to completion right after a plugin switch restarted
+   * the node's host.
+   * @returns {boolean}
+   */
+  #carrierUsable() {
+    const carrier = this.carrier
+    if (carrier === undefined || carrier.closed) return false
+    const stream = carrier.stream
+    if (stream === null || typeof stream !== 'object') return true
+    return stream.destroyed !== true && stream.writable !== false
+  }
+
+  /**
    * The live stream carrier, opening it on first use.
    * @returns {Promise<import('./ws.js').WebSocketClient>}
    */
   async carrierClient() {
-    if (this.carrier !== undefined && !this.carrier.closed) return this.carrier
+    if (this.#carrierUsable()) return this.carrier
     if (this.carrierPending !== undefined) return this.carrierPending
     this.carrierPending = this.#openCarrier()
     try {
@@ -250,25 +307,49 @@ export class RemoteGateway {
     if (serving === undefined) {
       throw Object.assign(new Error('this node is not serving yet'), { code: GATEWAY_FAILURE.OFFLINE })
     }
-    const cookie = await this.cookie()
-    const channel = await openChannel(this.connection, serving.port)
-    const client = await upgradeWebSocket(channel.stream, {
-      host: `127.0.0.1:${String(serving.port)}`,
-      path: '/api/remote.mux',
-      origin: `http://127.0.0.1:${String(serving.port)}`,
-      cookie,
-    }, {
-      onText: text => this.#onCarrierText(text),
-      onClose: () => {
-        this.carrier = undefined
-        for (const stream of [...this.streams.values()]) {
-          try { stream.close() } catch { /* closing anyway */ }
+    // Two attempts, the second one with a freshly minted cookie. A resident host that
+    // restarted (a plugin switch does it) rejects the previous cookie with HTTP 401 on the
+    // upgrade, and one retry is all the difference between "the node's streams came back"
+    // and "this Host believes the node has no event bus".
+    let lastError
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const cookie = await this.cookie(attempt > 0)
+      const channel = await openChannel(this.connection, serving.port)
+      let client
+      // Generation guard: a carrier that closes late must not tear down the one that replaced
+      // it. Without this, the corpse of a previous socket reports `close` after the retry has
+      // already opened a new carrier, clears `this.carrier`, and closes every stream that the
+      // new carrier was carrying — a restart then takes two carriers to settle, or never does.
+      const generation = (this.generation = (this.generation ?? 0) + 1)
+      try {
+        client = await upgradeWebSocket(channel.stream, {
+          host: `127.0.0.1:${String(serving.port)}`,
+          path: '/api/remote.mux',
+          origin: `http://127.0.0.1:${String(serving.port)}`,
+          cookie,
+        }, {
+          onText: text => this.#onCarrierText(text),
+          onClose: () => {
+            if (this.generation !== generation) return
+            this.carrier = undefined
+            for (const stream of [...this.streams.values()]) {
+              try { stream.close() } catch { /* closing anyway */ }
+            }
+            this.streams.clear()
+          },
+        })
+      } catch (error) {
+        lastError = error
+        if (Reflect.get(error ?? {}, 'status') === 401) {
+          this.cookieValue = undefined
+          continue
         }
-        this.streams.clear()
-      },
-    })
-    this.carrier = client
-    return client
+        throw error
+      }
+      this.carrier = client
+      return client
+    }
+    throw lastError ?? Object.assign(new Error('the stream carrier could not be opened'), { code: GATEWAY_FAILURE.CARRIER })
   }
 
   /** Fan one carrier frame out to the logical stream it belongs to. */
@@ -309,22 +390,31 @@ export class RemoteGateway {
    * @returns {Promise<{ close: () => void, send: (value: unknown) => boolean, endUplink: () => void }>}
    */
   async openStream(endpoint, args, handlers) {
-    const carrier = await this.carrierClient()
-    const stream = new LogicalStream(endpoint, handlers, carrier)
-    this.streams.set(stream.id, stream)
-    const sent = carrier.send(JSON.stringify({ type: 'open', streamId: stream.id, endpoint, payload: { args } }))
-    if (!sent) {
+    // One retry on a fresh carrier: a socket that looked writable can still be the corpse of
+    // the connection to a host that has since gone away, and the failure mode there is a
+    // silently empty stream rather than an error. Reopening costs one round trip and turns
+    // "this Session shows nothing" into "it shows everything".
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const carrier = await this.carrierClient()
+      const stream = new LogicalStream(endpoint, handlers, carrier)
+      this.streams.set(stream.id, stream)
+      const sent = carrier.send(JSON.stringify({ type: 'open', streamId: stream.id, endpoint, payload: { args } }))
+      if (sent) {
+        return {
+          close: () => {
+            if (!this.streams.has(stream.id)) return
+            this.streams.delete(stream.id)
+            stream.close()
+          },
+          send: value => stream.send(value),
+          endUplink: () => stream.endUplink(),
+        }
+      }
       this.streams.delete(stream.id)
-      throw Object.assign(new Error('the stream carrier is not writable'), { code: GATEWAY_FAILURE.CARRIER })
+      // Drop the carrier that refused the write, so the next attempt opens a new one.
+      this.carrier = undefined
+      try { carrier.close() } catch { /* already gone */ }
     }
-    return {
-      close: () => {
-        if (!this.streams.has(stream.id)) return
-        this.streams.delete(stream.id)
-        stream.close()
-      },
-      send: value => stream.send(value),
-      endUplink: () => stream.endUplink(),
-    }
+    throw Object.assign(new Error('the stream carrier is not writable'), { code: GATEWAY_FAILURE.CARRIER })
   }
 }

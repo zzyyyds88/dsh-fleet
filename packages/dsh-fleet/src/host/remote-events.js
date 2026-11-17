@@ -74,16 +74,23 @@ class NodeEvents {  /**
     this.closed = false
   }
 
+  /** Whether this node's event carrier is up right now. */
+  get live() {
+    return this.stream !== undefined
+  }
+
   open() {
     if (this.stream !== undefined || this.opening !== undefined) return this.opening ?? Promise.resolve()
     this.opening = this.gateway.openStream(EVENT_STREAM_ENDPOINT, {}, {
       onFrame: value => this.#onFrame(value),
       onEnd: () => {
-        // The carrier ended. Stop attributing anything to the old client id;
-        // `sync()` reopens on the next fleet change.
+        // The carrier ended. Stop attributing anything to the old client id, and let the
+        // owner notice: a stream that died has to be reopened, or this node's Session rows
+        // freeze forever (no titles, no spinner, and approval cards never arrive).
         this.stream = undefined
         this.clientId = undefined
         this.waterfalls.close()
+        this.sink.ended?.()
       },
     }).then(stream => {
       this.stream = stream
@@ -205,8 +212,14 @@ export class RemoteEvents {
   /**
    * Bring the stream set in line with the fleet.
    *
-   * Idempotent and cheap: called on every fleet lifecycle change, it opens a
-   * stream for a node that just became routable and drops one that left.
+   * Idempotent and cheap: called on every fleet lifecycle change, it opens a stream for a
+   * node that just became routable and drops one that left.
+   *
+   * A node whose stream **ended** is reopened too, and that is not a micro-optimisation: a
+   * switch that restarts the node's resident host closes every carrier, and a map entry
+   * that survives the restart means the node never gets its stream back. Measured: after a
+   * plugin switch, `event-relay` saw no `api-session/*` for a Session created on the node,
+   * and `approval` waited 180 s for a card that could not arrive.
    */
   sync() {
     if (this.disposed) return
@@ -219,7 +232,12 @@ export class RemoteEvents {
     }
     for (const runtime of routable) {
       const nodeId = runtime.record.id
-      if (this.nodes.has(nodeId)) continue
+      const existing = this.nodes.get(nodeId)
+      if (existing !== undefined) {
+        // Same node, same gateway: only the carrier is missing.
+        if (!existing.live) void existing.open()
+        continue
+      }
       const node = new NodeEvents(
         nodeId,
         runtime.gateway,
@@ -230,11 +248,35 @@ export class RemoteEvents {
         {
           emit: (event, args) => this.#relay(nodeId, event, args),
           log: this.log,
+          ended: () => this.#reopen(nodeId),
         },
       )
       this.nodes.set(nodeId, node)
       void node.open()
     }
+  }
+
+  /**
+   * Reopen one node's event stream after its carrier ended.
+   *
+   * Delayed rather than immediate: a carrier that ended because the resident host is
+   * restarting will fail straight away if reconnected in the same tick, and then the node
+   * would sit streamless until something else happened. See `RemoteGateway#revive`.
+   * @param {string} nodeId
+   */
+  #reopen(nodeId) {
+    if (this.disposed) return
+    const node = this.nodes.get(nodeId)
+    if (node === undefined) return
+    const runtime = this.fleet.get(nodeId)
+    if (runtime === undefined) return
+    runtime.gateway.revive(() => {
+      const current = this.nodes.get(nodeId)
+      if (current === undefined || current.live) return
+      const live = this.fleet.get(nodeId)
+      if (live === undefined || !live.routable) return
+      void current.open()
+    })
   }
 
   /**

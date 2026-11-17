@@ -192,7 +192,12 @@ export function upgradeWebSocket(stream, options, handlers) {
       const status = /^HTTP\/1\.1 (\d{3})/u.exec(text)
       if (status === null) return fail(new Error('the carrier sent a malformed upgrade response'))
       if (status[1] !== '101') {
-        return fail(new Error(`the carrier refused the upgrade with HTTP ${status[1]}`))
+        // The status travels with the error: an upgrade refused with 401 is the ordinary
+        // way a restarted resident host answers with a cookie minted by the previous one,
+        // and the caller can only tell that case apart if it knows the number.
+        return fail(Object.assign(new Error(`the carrier refused the upgrade with HTTP ${status[1]}`), {
+          status: Number(status[1]),
+        }))
       }
       if (!/^upgrade:\s*websocket$/imu.test(text)) {
         return fail(new Error('the carrier answered 101 without a WebSocket upgrade'))

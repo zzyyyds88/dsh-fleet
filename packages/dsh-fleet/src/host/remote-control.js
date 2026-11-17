@@ -43,10 +43,20 @@ class NodeControl {
     this.closed = false
   }
 
+  /** Whether this node's control carrier is up right now. */
+  get live() {
+    return this.stream !== undefined
+  }
+
   async open() {
     if (this.stream !== undefined || this.closed) return
+    // The handle is only kept if this generation is still current: a carrier that dies while
+    // the upgrade is in flight calls `onEnd` first, and assigning the (already closed) handle
+    // afterwards would leave `live` true over a stream that delivers nothing — exactly the
+    // state a restart produces.
+    const token = (this.openingToken = (this.openingToken ?? 0) + 1)
     try {
-      this.stream = await this.gateway.openStream('session/control', {}, {
+      const stream = await this.gateway.openStream('session/control', {}, {
         onFrame: value => {
           if (this.closed) return
           const frame = value
@@ -60,17 +70,39 @@ class NodeControl {
             return
           }
           if (type === 'projection') {
+            // Fold the change into this node's block picture before passing it on.
+            //
+            // Without this, `projections` only ever held what the node's *opening* baseline
+            // contained: a Session created after the relay connected lives entirely in
+            // `projection` frames, so a client attaching later (a page reload, a second
+            // window) would get a merged baseline that does not name it at all. Upstream's
+            // client repairs that from `session/list`, which this Host cannot use for a
+            // remote row — the list is a snapshot taken on the node, not a per-Session block.
+            this.#absorb(frame)
             this.onFrame(this, frame)
           }
         },
         onEnd: () => {
           this.stream = undefined
+          // A carrier ends whenever the resident host restarts (a plugin switch does it).
+          // Without reopening, this node's projection blocks disappear from the merged
+          // baseline for good: the title, the spinner, the pending-input flags all freeze.
+          if (!this.closed) this.gateway.revive(() => { void this.open() })
         },
       })
+      if (this.openingToken !== token || this.closed) {
+        try { stream.close() } catch { /* already closing */ }
+        return
+      }
+      this.stream = stream
     } catch {
       // A node that cannot stream control contributes no projections; the list
-      // snapshot still carries whatever that node last reported.
+      // snapshot still carries whatever that node last reported. Retrying matters after a
+      // restart: the resident host refuses the first upgrade while it is still coming up,
+      // and a relay that gives up here leaves this node's blocks out of every merged
+      // baseline until something else touches the fleet.
       this.stream = undefined
+      if (!this.closed) this.gateway.revive(() => { void this.open() })
     }
   }
 
@@ -79,6 +111,37 @@ class NodeControl {
     try { this.stream?.close() } catch { /* already closing */ }
     this.stream = undefined
     this.projections = undefined
+  }
+
+  /**
+   * Fold one `projection` frame into this node's block picture.
+   *
+   * The node's control baseline lists every Session it currently has **live**, and a remote
+   * Session lives in the node's memory only while that Session is open — a restart, or
+   * simply time, empties it. So the relay keeps its own picture instead of forwarding the
+   * node's: a block is created on the first frame naming that Session, `asOfSeq` moves
+   * forward with the frame's `seq`, and `changes` are merged key by key exactly as upstream's
+   * client applies them. A date-less block is still useful — it is what makes the row's title
+   * and spinner survive a reload.
+   * @param {Record<string, unknown>} frame
+   */
+  #absorb(frame) {
+    const sessionId = Reflect.get(frame, 'sessionId')
+    const seq = Reflect.get(frame, 'seq')
+    const changes = Reflect.get(frame, 'changes')
+    if (typeof sessionId !== 'string' || !Array.isArray(changes)) return
+    const blocks = this.projections ?? (this.projections = {})
+    const previous = Reflect.get(blocks, sessionId)
+    const values = { ...(Reflect.get(previous ?? {}, 'values') ?? {}) }
+    for (const change of changes) {
+      const key = Reflect.get(change ?? {}, 'key')
+      if (typeof key !== 'string') continue
+      values[key] = Reflect.get(change, 'val')
+    }
+    blocks[sessionId] = {
+      asOfSeq: typeof seq === 'number' ? seq : Reflect.get(previous ?? {}, 'asOfSeq') ?? 0,
+      values,
+    }
   }
 }
 
@@ -101,6 +164,14 @@ export class RemoteControl {
   }
 
   /** Bring the node set in line with the fleet. */
+  /**
+   * Bring the node set in line with the fleet.
+   *
+   * A node whose control stream **ended** is reopened, not just kept in the map. The
+   * stream dies whenever the resident host restarts (a plugin switch does exactly that),
+   * and leaving the entry behind would mean that node's projections never come back: the
+   * spinner and the per-Session activity block are what the sidebar reads them for.
+   */
   sync() {
     if (this.disposed) return
     const routable = this.fleet.routable()
@@ -114,7 +185,11 @@ export class RemoteControl {
     }
     for (const runtime of routable) {
       const nodeId = runtime.record.id
-      if (this.nodes.has(nodeId)) continue
+      const existing = this.nodes.get(nodeId)
+      if (existing !== undefined) {
+        if (!existing.live) void existing.open()
+        continue
+      }
       const node = new NodeControl(nodeId, runtime.gateway, (owner, frame) => this.#onNodeFrame(owner, frame))
       this.nodes.set(nodeId, node)
       void node.open()

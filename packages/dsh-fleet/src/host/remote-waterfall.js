@@ -172,8 +172,17 @@ class NodeWaterfalls {
     this.closed = false
   }
 
-  /** Remember the node's client identity; a result is worthless without it. */
+  /**
+   * Remember the node's client identity; a result is worthless without it.
+   *
+   * `closed` is cleared here on purpose. A stream that ends (the resident host restarting
+   * is the ordinary cause — a plugin switch does it) calls {@link close}, and the reopened
+   * stream arrives as a new client generation through this same method. Leaving `closed`
+   * set meant every later answer was dropped after the browser had accepted it: measured,
+   * an approval card was answered and the node never recorded the outcome.
+   */
   ready(clientId) {
+    this.closed = false
     this.clientId = typeof clientId === 'string' ? clientId : undefined
   }
 
