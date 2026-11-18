@@ -1,17 +1,19 @@
 {
   "name": "@local/dsh-fleet",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Remote Linux machines as first-class DeepSeek Harness workspaces: the brain runs on the node (so bash, grep, git and read_image are native there), while its sessions and workspaces are merged into the local sidebar and the local Remote API, so the desktop app and ds-harness-remote both see one fleet.",
   "exports": {
     ".": "./src/index.js",
     "./client": "./src/client/client.js",
+    "./node-control": "./src/node-control/index.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
   "files": [
     "src",
+    "presets/*.patch.yml",
     "locale/*.json",
     "docs",
     "icon.svg",
@@ -20,7 +22,10 @@
   ],
   "dsh": {
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/node-control.patch.yml"
+      ]
     },
     "client": {
       "platform": "web",
@@ -34,12 +39,13 @@
     }
   },
   "scripts": {
-    "test": "node test/routing-unit.mjs && node test/multipart-unit.mjs",
+    "test": "node test/routing-unit.mjs && node test/multipart-unit.mjs && node test/picker-paths-unit.mjs && node test/install-unit.mjs",
     "test:gateway": "node test/gateway-smoke.mjs",
     "test:host": "node test/host-routing.mjs",
     "test:flow": "node test/workspace-flow.mjs",
     "test:tools": "node test/tool-parity.mjs && node test/tool-git-image.mjs",
-    "test:client": "node test/client-bundle.mjs"
+    "test:client": "node test/client-bundle.mjs",
+    "pack": "npm pack --pack-destination dist"
   },
   "dependencies": {
     "ssh2": "^1.17.0"
@@ -53,6 +59,7 @@
     }
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22",
+    "dsh": ">=0.2.2-rc.3 <0.3.0"
   }
 }

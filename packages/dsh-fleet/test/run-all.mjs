@@ -128,6 +128,22 @@ const SUITES = [
     proves: 'version gate branches, artefact URLs, install script, per-node layout, switch semantics',
   },
   {
+    name: 'picker-paths',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'picker-paths-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 60_000,
+    proves: 'the /@fleet namespace round-trips through both path normalisers, and the shadow cleanup cannot delete a directory with anything in it',
+  },
+  {
+    name: 'install',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'install-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 60_000,
+    proves: 'the manifest a bundle is installed from is self-consistent: every patch file exists, files covers every runtime artefact, the detail page is real',
+  },
+  {
     name: 'composition',
     layer: 'offline',
     file: ['packages', 'dsh-fleet-brain', 'scripts', 'check-composition.mjs'],

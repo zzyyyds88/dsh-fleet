@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "远程节点",
-    "description": "在另一台机器上跑一个完整的 DeepSeek Harness —— 大脑留在那台机器上，所以 bash、grep、git、read_image、终端、MCP 与 skills 都在它自己的进程里执行。它的工作区与会话直接混排进本地侧栏，点开就用，和本地工作区没有区别；因为这些会话是 session/list 里真实的行，手机端的 ds-harness-remote 也会照常看到它们。在「设置 › 远程节点」中添加节点。",
+    "description": "在另一台机器上跑一个完整的 DeepSeek Harness —— 大脑留在那台机器上，所以 bash、grep、git、read_image、终端、MCP 与 skills 都在它自己的进程里执行。它的工作区与会话直接混排进本地侧栏，点开就用，和本地工作区没有区别；因为这些会话是 session/list 里真实的行，手机端的 ds-harness-remote 也会照常看到它们，节点在手机里显示为 /@fleet/<节点> 下的一棵目录树。在「设置 › 远程节点」中添加节点。",
     "detail": "docs/DETAIL.zh.md"
   },
   "sidebar": {

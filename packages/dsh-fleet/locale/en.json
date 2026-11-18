@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Remote nodes",
-    "description": "Runs a complete DeepSeek Harness on another machine — the brain stays there, so bash, grep, git, read_image, the terminal, MCP servers and skills all execute in that machine's own processes. Its workspaces and sessions merge straight into the local sidebar and open like local ones; because those sessions are real rows in session/list, ds-harness-remote forwards them to a phone unchanged. Add a node in Settings › Remote nodes.",
+    "description": "Runs a complete DeepSeek Harness on another machine — the brain stays there, so bash, grep, git, read_image, the terminal, MCP servers and skills all execute in that machine's own processes. Its workspaces and sessions merge straight into the local sidebar and open like local ones; because those sessions are real rows in session/list, ds-harness-remote forwards them to a phone unchanged, where each node is a tree under /@fleet/<node>. Add a node in Settings › Remote nodes.",
     "detail": "docs/DETAIL.zh.md"
   },
   "sidebar": {
