@@ -189,7 +189,7 @@ at the official attach stream」），而 fleet 的 `terminal/attach`（`host/de
 | P0-4 | 手机的审批卡从节点到达 | 节点触发审批 → 手机弹出卡片 → 答复 → 节点继续 |
 | P0-5 | 手机的终端连到节点 PTY | 手机开终端 → 四跳接力 → 在节点 shell 里 `hostname` 得到节点的名字 |
 | P1-1 | **在 fleet 里**消掉 `ensureHostWorkspaceDirectory` 的 Windows 误伤（不需要 fork，见 ADR-0004 §三） | 手机用 `/@fleet/<id>/root/x` 建工区，桌面 `<盘>:\@fleet` **不存在**；节点上出现该工区 |
-| P1-2 | fleet 路由 A 类 22 条（按 §2.2 表） | 每条一个断言：手机拿到的是节点答案，不是桌面答案 |
+| P1-2 | fleet 路由 A 类端点（清单见 §六 A） | 每条一个断言：手机拿到的是节点答案，不是桌面答案；离线层有 `routing-extra-unit.mjs`，端到端在 `host-routing.mjs` |
 | P2-1 | 中转服务端版本钉住 | `docker inspect` 的镜像 tag 不再是 `latest`；重启后 DSH Go 仍能连 |
 | P2-2 | 失败可解释 | 故意停掉节点，手机端得到的文案能指向「节点离线」而不是协议错误 |
 
@@ -214,10 +214,13 @@ P0-4/P0-5 之所以升到 P0：它们是「手机能不能真用」的分水岭�
 逐行核对），所以手机给节点会话看到的**就是节点真在用的模型**。真正要补的是 `session/selectModel`
 （请求里带 `sessionId`），不路由的话给节点会话换模型会打到本地一个不存在的会话上。
 
-**可以修、只是还没接的（属于 A 类）**：goals 六个、messageFeedback 三个、
-`subagents/{prompt,interruptByParent}`、`commands/execute`、`fileReferences/list`、
-`sessionReferenceResolver/candidates`、`schedule/{catalog,list,history,view,edit,run,delete,create}`、
-`directoryPicker/list`、`pluginInventory/list`、`userQuestions/{answer,attachWait}`、`session/selectModel`。
+**A 类已经接完了。** 早前列为「可以修、只是还没接」的那批现在都有路由与断言：
+`goals/*`、`userQuestions/{answer,attachWait}`、`subagents/{prompt,interruptByUser}`、
+`commands/{list,execute}`、`messageFeedback/*`、`sessionReferenceResolver/candidates`、
+`fileReferences/list`、`session/selectModel`、`schedule/{catalog,list,view,edit,run,history,create,deleteInactive}`
+（`schedule` 的列表是**合并**，因为条目是 Host 级、不属于某个会话），以及
+`directoryPicker/list`（fleet **整体替换**，不是装饰）。`pluginInventory/list` 描述的是这台安装，仍在
+「保持本地」一侧。
 
 `schedule/update` 不在其中：手机在 0.2.2 上根本不走它（`usesTargetProtocol => target != null`，
 而 `create` 总会写入 target），上游也没有这个端点。
@@ -235,11 +238,11 @@ P0-4/P0-5 之所以升到 P0：它们是「手机能不能真用」的分水岭�
 可选方向：
 
 1. **接受现状**，把上表写进使用说明。手机定位为「发指令、看结果、答审批」，不做配置管理。
-2. **把 A 类 22 条补上路由**（其中有几条与桌面端共用的验收脚本可以直接复用），
-   模型目录单独讨论。需要动 DSH Go 的保持不做。
+2. **把 A 类补上路由**，模型目录单独讨论。需要动 DSH Go 的保持不做。
 3. **允许给 DSH Go 打最小 patch**，代价是要自己维护一份 Flutter 构建。
 
-推荐 **2**。
+**已按 2 执行**：见 §六 A 的清单，离线层 `routing-extra-unit.mjs` 逐形状断言，端到端在
+`host-routing.mjs` 里对真节点核对。`session/modelCatalog` 保持本地的理由见 §六 A。
 
 ### B. 中转插件 fork 与否
 

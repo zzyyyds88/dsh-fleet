@@ -134,22 +134,42 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 | `sessionQuery.readEvent` | **按 owner 转发** | Host 内部方法，没有 wire 端点，见下 |
 | `job/list`、`follow`、`kill` | **路由** | 按 Session id 找节点；`follow` 的 `sessionId` 是可选的（无主 job 谁都能看），没有它就不猜节点 |
 | `terminal/list`、`watch` | **路由** | 让侧栏能报告远程 Session 的终端 |
-| `terminal/create`、`attach` … | **保持本地** | 形参里是 `Agent` 对象，远程 Session 在本地没有 Agent |
-| `session/modelCatalog`、`agentPresets/*`、`settings/*`、`pluginManager/*` | **保持本地** | 描述的是**这个安装**的模型与配置，与节点无关 |
+| `terminal/create`、`attach` … | **路由** | 形参是 `Agent`，由 `overrideAgentLookup` 先给出占位对象，装饰器再用 `agent.id` 解出节点 |
+| `goals/{get,create,edit,pause,resume,complete,clear}` | **路由** | 身份是 `agent: Agent`。不路由的表现是目标条消失（本机注册表里没有那个 Session） |
+| `userQuestions/{answer,attachWait}` | **路由** | 同上；`attachWait` 是流，必须代理而不是 await，否则卡片的倒计时不启动 |
+| `subagents/{prompt,interruptByUser}` | **路由** | 子代理自己的 Session id 是裸 uuid，`request.childSessionId` / 第一个字符串形参都可能是它 |
+| `commands/{list,execute}` | **路由** | 斜杠命令是**节点那份组合**提供的，本机答案会列出不存在的命令 |
+| `messageFeedback/{list,put,delete}` | **路由** | 身份在 `request.sessionId`；不路由时点赞要么找不到会话，要么落到本机同形状的另一个会话上 |
+| `sessionReferenceResolver/candidates` | **路由** | `@` 提及的会话列表该是节点的 |
+| `fileReferences/list` | **路由** | 路径补全，答错最直观：远程会话里出现本机的 Windows 路径 |
+| `schedule/catalog`、`list` | **合并** | 条目是 Host 级的，只能合并：本机的行 + 每个节点的行，节点行的 `id` 包成 `fleet_<nodeId>_<id>`。分页在合并后的行上算 |
+| `schedule/{view,edit,run,history}` | **路由** | 按那个包裹 id 解回节点与它自己的条目 id |
+| `schedule/create` | **路由** | 身份在 `request.target.sessionId`：给远程会话建的任务必须建在节点上 |
+| `schedule/deleteInactive` | **本机 + 广播** | 无身份；不在节点上也清一遍，否则下次合并会显示「删不掉」的任务 |
+| `schedule/deliveryLimits`、`session/modelCatalog`、`agentPresets/*`、`settings/*`、`pluginManager/*` | **保持本地** | 描述的是**这个安装**的模型与配置，与节点无关 |
 
-### 还有哪些带身份的端点没路由
+### 判据：它读的状态在谁那儿
 
-上表是"已经决定的"。浏览器会调、fleet 没路由的端点还有一批 —— 它们不是被决定为本地，
-而是**还没被验收到**：`commands/list|execute`、`goals/*`、`skills/list`、`fileReferences/list`、
-`sessionReferenceResolver/candidates`、`messageFeedback/*`、`sessionFeedback/record`、
-`toolResults/watch`、`fileUploads/upload`、`agentPresets/*`、`userQuestions/answer|attachWait`、
-`subagents/prompt|interruptByUser`、`schedule/*`、`dynamicCordisRunner/*`。
+上表是「已经决定的」。判据不是「名字像不像远程」，而是**这条端点读的状态存在谁那儿**。
 
-判据不是"名字像不像远程"，而是**它读的状态在谁那儿**：`commands/list` 列的是节点上那份
-组合的命令，远程会话里应当问节点；`settings/*` 描述的是这台安装，应当保持本地。没有路由时
-的表现是**静默落到本地实现**：不报错、拿到的是一份"看起来合理但属于另一台机器"的答案。
-这正是子代理历史与智能体协作那两条 bug 的共同形态，所以下一轮验收要从这份清单里挑真正
-被界面调到的那些，逐条判定"该转发还是该保持本地"，而不是等用户遇到再说。
+没有路由时的表现是**静默落到本地实现**：不报错，拿到的是一份「看起来合理但属于另一台
+机器」的答案。这正是子代理历史与智能体协作那两条 bug 的共同形态，也是上面这批端点补
+路由的理由 —— `goals/get` 回答 `undefined` 不是错误，是「这个会话没有目标」，于是目标条
+就消失了。
+
+接入方式不是重复劳动：`router.js` 提供了四种形状的工厂，因为身份在这四类位置上出现，
+而且**只有一类能被通用处理**。
+
+| 身份在哪 | 工厂 | 注意 |
+|---|---|---|
+| `agent: Agent` 形参 | `agentEndpoint` | 网关在方法体之前按 `lookup` 解析这个形参，所以装饰器看到的已经是占位对象；转发时只把 `agentId` 换成节点自己的 id |
+| `request.*` 字段 | `fieldEndpoint` | 只解包这一个字段，request 里其它身份仍然保持包裹状态 |
+| 第一个字符串形参 | `firstArgEndpoint` | wire 字段名必须照 descriptor 写（`childSessionId`，不是 `sessionId`），否则报 `args fields do not match the descriptor` |
+| 没有身份（Host 级条目） | 手写合并 | `schedule` 是唯一一类：条目不属于某个会话，所以只能合并 + 把 id 包起来 |
+
+还有一个反复踩到的点：这些装饰器要装在**每个服务自己的 `ctx.inject`** 里，不是在
+`sessionController` 那个回调里 `scope.get(name)`。后者在服务晚挂载时永远看不到它，
+而且失败是静默的 —— 那个命名空间一直回答本机。
 
 `workspace/create` 的按路径路由有个现实理由：**本地目录选择器只能浏览本机**，永远选不到节点上的 `/root/project`。所以远程工作区从 `/fleet/api/workspaces` 加入（设置页节点行展开后的输入框），它在节点上 `workspace/create`，再把结果包装成本地身份还回来。
 
