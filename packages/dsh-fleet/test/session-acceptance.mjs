@@ -171,8 +171,14 @@ const content = await nodeExec(`cd ${remote.path} && cat '${file}'`)
 check(content.trim() === payload, 'and its bytes are exactly what the prompt asked for',
   JSON.stringify(content.trim()))
 const bytes = await nodeExec(`cd ${remote.path} && wc -c < '${file}'`)
-check(bytes.trim() === String(payload.length + 1),
-  'the shell reported the byte count a one-line file of that payload has', bytes.trim())
+// The `write` tool may or may not terminate the last line, so the byte count is the payload
+// length with an optional single trailing newline. Asserting `+ 1` unconditionally made this
+// test depend on a formatting choice the prompt never made: measured 19 bytes for a 19-char
+// payload in one run, which is correct and used to read as a failure.
+const written = Buffer.byteLength(payload, 'utf8')
+check(bytes.trim() === String(written) || bytes.trim() === String(written + 1),
+  'the file holds the payload and at most a trailing newline',
+  `${bytes.trim()} bytes for a ${String(written)}-char payload`)
 
 // The plugin must not have invented the answer: the tool result has to agree with
 // what the filesystem says.
