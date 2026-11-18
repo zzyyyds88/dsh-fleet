@@ -216,6 +216,15 @@ const SUITES = [
     proves: 'the folder dialog lists this machine and a node in one shape, and a picked node folder becomes a workspace',
   },
   {
+    name: 'picker-flow',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'picker-flow.mjs'],
+    runtime: 'node',
+    timeoutMs: 600_000,
+    needs: 'host',
+    proves: 'the phone\'s view of a node: /@fleet lists nodes, a node\'s folders come back spelled in the namespace, and the folder the relay created on this desktop is removed again',
+  },
+  {
     name: 'plugin-switch',
     layer: 'e2e',
     file: ['packages', 'dsh-fleet', 'test', 'plugin-switch.mjs'],
