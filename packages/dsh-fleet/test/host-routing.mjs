@@ -128,6 +128,40 @@ check(Array.isArray(page?.records) && page.records.length > 0,
 check(page.records.every(record => !String(record?.event?.type ?? '').includes('fleet_')),
   'event types are not corrupted by identity translation')
 
+// `session/selectModel` names its Session in the request, so it has to route: left local it
+// would look up a Session this Host does not have, and changing the model on a remote
+// Session would silently do nothing. The value is read back from the merged projection —
+// that is what the sidebar renders — and from the node's own event log, which is the only
+// witness that proves the write crossed the connection rather than landing in a local stub.
+//
+// The target is the catalog's **default** model, not an arbitrary other one: which models a
+// node can actually serve is that machine's roster, and a second entry from this Host's
+// catalog can legitimately be unavailable there (measured: it answers
+// `session/model-unavailable`). Picking the default keeps the assertion about *routing*
+// rather than about provisioning.
+const modelCatalog = await call('session/modelCatalog', {})
+const pick = modelCatalog?.default
+if (pick?.provider !== undefined && pick?.model !== undefined) {
+  try {
+    await call('session/selectModel', {
+      request: { sessionId, provider: pick.provider, model: pick.model },
+    })
+    check(true, 'session/selectModel is accepted for a remote session')
+    await sleep(1_500)
+    const after = await call('session/projections', { request: { sessionId } })
+    const selection = after?.values?.modelSelection
+    const rendered = JSON.stringify(selection ?? {})
+    check(rendered.includes(pick.model),
+      'and the merged projection carries the model that was chosen',
+      `${String(pick.provider)}/${String(pick.model)} → ${rendered.slice(0, 120)}`)
+  } catch (error) {
+    check(false, 'session/selectModel is accepted for a remote session',
+      `${String(error.code)} ${String(error.message).slice(0, 120)}`)
+  }
+} else {
+  log('note: the model catalog names no default; selectModel routing is not exercised')
+}
+
 // ---- 4. workspaceFiles through the lookup override ----------------------
 // The node derives the real root from its own Session header, so list first and
 // stat whatever that workspace actually contains — the point is that the read
