@@ -1,4 +1,4 @@
-# @local/dsh-fleet
+# @zzyyyds88/dsh-fleet
 
 Run DeepSeek Harness on another machine and use its workspaces as if they were
 local ones.
@@ -201,20 +201,33 @@ creating a workspace from it directly is refused.
 
 ## Installation
 
-As a bundle, the way DSH expects:
+```bash
+# from npm (recommended)
+dsh plugin --profile <profile> add -w @zzyyyds88/dsh-fleet
 
-```powershell
-# from a packed tarball
+# from a packed tarball (offline, or to pin an exact build)
 npm pack --pack-destination dist
-dsh plugin --profile <profile> add -w .\dist\local-dsh-fleet-<version>.tgz
+dsh plugin --profile <profile> add -w ./dist/zzyyyds88-dsh-fleet-<version>.tgz
 
 # or straight from this directory (a `link:` dependency; good for development)
 dsh plugin --profile <profile> add -w <absolute path to packages/dsh-fleet>
 ```
 
-Either way the profile's `dsh.profile.bundles` must list this package *after*
+Whichever form, the profile's `dsh.profile.bundles` must list this package *after*
 `@deepseek-ai/dsh-base` (and after `dsh-web-app` on a desktop). `engines.dsh` pins the
 runtime range, so an unsupported DSH refuses the install instead of composing half of it.
+
+**Upgrading from before 0.5.0.** The package was renamed from `@local/dsh-fleet`, because
+`@local` is another organisation's npm scope and `dsh-fleet` was already taken. Remove the
+old name, install the new one, and update the bundle list:
+
+```bash
+dsh plugin --profile <profile> remove @local/dsh-fleet
+dsh plugin --profile <profile> add -w @zzyyyds88/dsh-fleet
+```
+
+Nothing on a node needs to change: the node side is the embedded
+`@local/dsh-fleet-brain`, which keeps its name and never goes through a registry.
 
 ## Configuration
 

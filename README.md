@@ -118,6 +118,29 @@ DSH 的桌面端很好用，但它的**工具全部跑在本机**。当你需要
 这三条是**实现细节，不是公开契约**。所以有 `test/dispatch-seam.mjs`：
 DSH 升级后它先炸，而不是等你某天发现所有远端会话都点不开。
 
+### 3.2b 手机入口：节点路径挤进同一套语法
+
+手机端 `ds-harness-remote` 只会说「本机绝对路径」，节点路径必须有语法位置。用
+`/@fleet/<nodeId>/…` 前缀（取舍见 [ADR-0004](docs/adr-0004-node-control-and-picker.zh.md) §二）。
+两个硬理由：`fleet://` 在 win32 上过不了中转 dispatch 前的 `isAbsolute` 检查；
+而 `/@fleet` 让中转那次 `mkdir -p` 的落点集中到 `<盘>:\@fleet\` 之下，fleet 在工作区
+建好后自底向上 `rmdir` 空目录链 —— 能删的只会是刚被建出来的空链，不是启发式。
+
+同样是手机入口的一部分：`directoryPicker/list` 与 `createDirectory` 由 fleet
+**整体替换**而不是装饰 —— 桌面上 `directory-picker-auto` 解析成 native 后端，
+原生 `list` 会 `requireCapability("browse")` 抛错，中转随即改用自己那份实现，
+继承式的覆写永远调不到。
+
+### 3.2c 节点控制模式：一个只有一种能力的会话
+
+新会话可以选 `node-control` 预设。「除节点管理外一律拒绝」不是运行时判断，
+而是**组合属性**：web 那层 patch 把宿主面的 agent 工具行全部 disable，所以一个预设的
+`config.plugins` 就是那个会话的完整工具集，而这个预设只列了 `fleet_nodes` 一个工具。
+密钥只收引用、拒绝内联粘贴，因为工具参数会写进会话日志。
+
+被控节点不会得到这个能力：`NODE_NEVER_SYNC` 把本插件挡在节点之外（它是全开默认值里的
+硬排除项），所以节点不会变成第二个能管理节点的入口。
+
 ### 3.3 节点只当大脑 —— 定制组合，不是 fork
 
 节点上装的是一个**独立的 DSH 安装**，有自己的 `~/.dsh`。默认它装的是 Web 组合，
@@ -196,40 +219,92 @@ dsh-client-ui-* : 0
 web-runtime     : 0
 ```
 
-**测试矩阵**：14 项，分三层。
+**测试矩阵**：30 个套件，分三层，由 `test/run-all.mjs` 一次调度。
 
-| 层 | 脚本 |
-|---|---|
-| 纯逻辑 | `routing-unit`、`multipart-unit`、`provision-unit`、`check-composition` |
-| 契约缝隙（读 `app.asar`，需 Electron 的 Node） | `dispatch-seam`、`upstream-smoke` |
-| 端到端（要运行中的 Host + 连上的节点） | `gateway-smoke`、`host-routing`、`workspace-flow`、`tool-parity`、`tool-git-image`、`client-bundle`、`event-relay` |
+| 层 | 套件 | 需要什么 |
+|---|---|---|
+| 纯逻辑（9） | `routing`、`routing-extra`、`multipart`、`provision`、`waterfall`、`version`、`picker-paths`、`install`、`fleet-control` | 只要 Node 22 |
+| 组合与契约（5） | `composition`、`descriptor`、`dispatch`、`upstream` | 装好的 DSH（读 `app.asar`），必须用它的 Electron Node 跑 |
+| 端到端（16） | `gateway`、`host-routing`、`workspace-flow`、`workspace-browse`、`picker-flow`、`plugin-switch`、`tool-parity`、`tool-git-image`、`client-bundle`、`event-relay`、`session`、`terminal`、`multi-node`、`artefact`、`approval`、`node-control` | 运行中的 Host + SSH 可达的节点 |
+
+```bash
+node packages/dsh-fleet/test/run-all.mjs                     # 全部
+node packages/dsh-fleet/test/run-all.mjs --layer offline,contract   # 不需要节点的那两层
+```
+
+端到端层里 `artefact` 需要从公网下载一份 165 MiB 的节点运行时；网络受限时它以
+`ARTEFACT_UNAVAILABLE` 退出并被记成 SKIP，不算通过。`browser` 套件需要一个带
+`--remote-debugging-port` 的 Chrome，默认不跑。
 
 ---
 
 ## 五、怎么用
 
-插件通过 `link:` 装进 DSH profile：
+### 安装
 
-```json
-{
-  "dependencies": { "@local/dsh-fleet": "link:D:/path/to/packages/dsh-fleet" },
-  "dsh": { "profile": { "bundles": [ "@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "@local/dsh-fleet" ] } }
-}
+```bash
+# 1. 从 npm 装（推荐）
+dsh plugin --profile desktop add -w @zzyyyds88/dsh-fleet
+
+# 2. 或从打包好的 tarball 装（离线环境）
+npm pack --pack-destination dist        # 在 packages/dsh-fleet 下执行
+dsh plugin --profile desktop add -w ./dist/zzyyyds88-dsh-fleet-<version>.tgz
+
+# 3. 或从源码目录装（开发时用，pnpm 会记成 link:）
+dsh plugin --profile desktop add -w <本仓库的绝对路径>/packages/dsh-fleet
 ```
 
-然后在 DSH 的**设置 → Fleet** 里加节点（host / 端口 / 用户 / 密码或私钥），
-点连接。首次连接会自动在节点上装同版本 DSH、装大脑组合、下发模型与密钥、启动，
-然后验证 `session/list` 真的能答 —— 只有它成功才报 connected。
+三种形态都由 DSH 自己的安装器支持；安装后 profile 的 `dsh.profile.bundles` 里必须把
+本插件排在 `@deepseek-ai/dsh-base` 之后（桌面端还要排在 `dsh-web-app` 之后）。
+`engines.dsh` 钉住了运行时范围，DSH 版本不匹配时安装会被直接拒绝，而不是只组合一半。
+
+**从 0.5.0 之前的版本升级**：包名变了（`@local/dsh-fleet` → `@zzyyyds88/dsh-fleet`），
+旧名已无法安装也不会再更新。先 `dsh plugin --profile <p> remove @local/dsh-fleet`，
+再用新名安装，最后把 profile 的 `bundles` 里的旧名换掉。节点侧不需要做任何事。
+
+### 加节点
+
+在 DSH 的**设置 → Remote nodes**（或侧栏的 Remote nodes 面板）里加节点
+（host / 端口 / 用户 / 密码或私钥），点连接。首次连接会自动在节点上装同版本 DSH、
+装大脑组合、下发模型与密钥、启动，然后验证 `session/list` 真的能答 ——
+只有它成功才报 connected。
 
 节点要求：Node ≥ 22、有 npm、能 SSH 登录。别的都由插件准备。
 
-跑测试要自己给节点（源码里**没有默认 IP 和默认密码**，这是公开仓库）：
+### 在手机上用
+
+装 `ds-harness-remote`，手机端连到这台桌面 Host。远程会话就是普通的
+`session/list` 行，所以它们出现在同一个侧栏里；节点的文件系统挤进同一套路径语法：
+
+```
+/@fleet                       → 节点列表
+/@fleet/<nodeId>/             → 那台机器的文件系统根
+/@fleet/<nodeId>/root/proj    → 那台机器上的 /root/proj
+```
+
+`directoryPicker/list` 对两类机器都答，用这种路径调 `workspace/create` 会**在节点上**
+建工作区。这个前缀是节点的保留命名空间，直接拿它建工作区会被拒绝。
+
+手机端的 `harnessRemoteAllowlist` 是一份客户端常量，能发哪些端点由它决定 ——
+Host 侧放宽没有用。已知的一个缺口：它放行 `subagents/interruptByParent`，而
+0.2.2-rc.3 的真实端点是 `subagents/interruptByUser`，所以手机暂时无法中断子代理。
+
+### 节点控制模式
+
+新会话可以选 `node-control` 预设：那个预设的工具集只有 `fleet_nodes` 一个工具，
+没有文件、shell、搜索、网络、子代理。用它可以增删节点、连接、查状态；
+密钥只接受引用（`{"kind":"key","path":"~/.ssh/id_ed25519"}` 或 `{"kind":"password","env":"NAME"}`），
+不接受内联粘贴 —— 工具参数会写进会话日志。
+
+### 跑测试
+
+测试要自己给节点（源码里**没有默认 IP 和默认密码**，这是公开仓库）：
 
 ```bash
 export DSH_FLEET_TEST_HOST=192.0.2.10
 export DSH_FLEET_TEST_USER=root
 export DSH_FLEET_TEST_PASSWORD=...
-node packages/dsh-fleet/test/workspace-flow.mjs <hostBase> <launchToken>
+node packages/dsh-fleet/test/run-all.mjs --layer e2e
 ```
 
 ---
@@ -239,11 +314,16 @@ node packages/dsh-fleet/test/workspace-flow.mjs <hostBase> <launchToken>
 | 文档 | 内容 |
 |---|---|
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 路线取舍、三处缝隙、身份编码、为什么"不做镜像"是功能 |
+| [`docs/adr-0003-phone-control.zh.md`](docs/adr-0003-phone-control.zh.md) | 手机 → 中转 → 桌面 → 节点这条链路的调研与硬边界 |
+| [`docs/adr-0004-node-control-and-picker.zh.md`](docs/adr-0004-node-control-and-picker.zh.md) | `/@fleet` 命名空间、选择器接管、节点控制、安装形态 |
+| [`docs/adr-0005-release-and-maintenance.zh.md`](docs/adr-0005-release-and-maintenance.zh.md) | 包名依据、发布形态、三条升级链 |
 | [`packages/dsh-fleet/README.md`](packages/dsh-fleet/README.md) | 插件安装、接线、测试矩阵、已知限制 |
 | [`packages/dsh-fleet-brain/README.md`](packages/dsh-fleet-brain/README.md) | 节点组合：怎么从官方 web-app 减出"只当大脑"的一层 |
-| [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md) | DSH 升级后要重跑什么，每条上游契约由哪个测试守着 |
+| [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md) | DSH / 中转 / DSH Go 三条升级链各自要重跑什么 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么、谁受影响 |
 | [`AGENTS.md`](AGENTS.md) | 本仓库的协作规则与硬约束 |
 
 ## 七、许可
 
-插件代码 MIT。`reference/` 下的上游源码各归其原作者（DSH 是 MIT，ZCode 见其仓库）。
+[MIT](LICENSE)，Copyright (c) 2026 zzyyyds88。`reference/` 下的上游源码各归其原作者
+（DSH 是 MIT，ZCode 见其仓库）。

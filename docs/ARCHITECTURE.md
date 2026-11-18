@@ -560,17 +560,18 @@ profile 名也按 root 派生（`~/.dsh-fleet` 仍是 `fleet`，`~/.dsh-fleet-b`
 开关的单位是**插件（bundle）**，不是内部行。第一版把本机组合里的每一行都列成一行开关，实测 **207 行**：
 那描述的是组合，不是选择 —— 没人「安装」`tool-result-pruner`，人装的是一个插件。现在一行一个
 bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，`@deepseek-ai/*`、
-`@local/dsh-fleet`、`@local/dsh-fleet-brain` 排除（前两类是产品本身，后一个正是「节点成为大脑」）。
+`@zzyyyds88/dsh-fleet`、`@local/dsh-fleet-brain` 排除（前两类是产品本身，后一个正是「节点成为大脑」）。
 
 ### 默认全开，另有一份硬排除清单
 
 `dsh-base` 是节点的底座，大脑 bundle 是它的减法，二者不是选项。其余插件默认**下发**：这台机器装了、
-起了作用，节点就是同一个工作面的延伸。四个名字**永远不发**，写在 `NODE_NEVER_SYNC` 里而不是靠前缀
+起了作用，节点就是同一个工作面的延伸。五个名字**永远不发**，写在 `NODE_NEVER_SYNC` 里而不是靠前缀
 规则推断：
 
 | 名字 | 为什么 |
 |---|---|
-| `@local/dsh-fleet` | 桌面端插件；而且它的「节点控制」预设里是增删节点的工具 —— 被控节点能控制别的节点，正是明确否定过的形态 |
+| `@zzyyyds88/dsh-fleet` | 桌面端插件；而且它的「节点控制」预设里是增删节点的工具 —— 被控节点能控制别的节点，正是明确否定过的形态 |
+| `@local/dsh-fleet` | 同一个包在 0.5.0 之前的名字。就地升级过的 profile 仍然列着它，「这是我自己的旧拼法」不是把它送去节点的理由 |
 | `@local/dsh-fleet-brain` | 节点侧的减法本身，已经在列表里 |
 | `ds-harness-remote` | 会让节点变成第二个中转 Host，多开一个入口 |
 | `@dsh-remote/plugin` | 同上，旧包名 |
@@ -653,7 +654,7 @@ bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，
 | 部件 | 是什么 | 为什么这样切 |
 |---|---|---|
 | `fleetControl` 服务 | `ctx.provide('fleetControl', …)`，方法 `list / add / update / remove / connect / disconnect / status` | 注册表本来就存在，只是以前只挂在 `/fleet/api` 上；工具不该去摸 HTTP |
-| `fleet_nodes` 工具 | 新入口 `@local/dsh-fleet/node-control`，只注册这一个工具 | 预设的 `config.plugins` 会整包挂载，挂整个插件等于把装饰器、看门狗、设置 API 拖进 agent 作用域 |
+| `fleet_nodes` 工具 | 新入口 `@zzyyyds88/dsh-fleet/node-control`，只注册这一个工具 | 预设的 `config.plugins` 会整包挂载，挂整个插件等于把装饰器、看门狗、设置 API 拖进 agent 作用域 |
 | `preset-node-control` | `config.plugins` 只有 `persona` + `fleet-nodes` | 见下 |
 
 ### 「其他一律拒绝」为什么是构造保证
@@ -680,7 +681,7 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
 
 ### 被控节点永远不装这套
 
-`@local/dsh-fleet` 在 `NODE_NEVER_SYNC` 里（见 §六之五）：它带的就是这个预设，节点装上就等于「被控节点能
+`@zzyyyds88/dsh-fleet` 在 `NODE_NEVER_SYNC` 里（见 §六之五）：它带的就是这个预设，节点装上就等于「被控节点能
 控制别的节点」，正好是要避免的形态。`version-unit` 与 `plugin-switch` 各有一条断言守着。
 
 ## 七、测试
