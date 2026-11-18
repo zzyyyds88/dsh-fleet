@@ -586,12 +586,21 @@ bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，
    顺序组合，大脑 patch 必须压在上游之上）；
 3. bundle 列表变化是模块代码变化，常驻 host 必须重启，`syncConfig` 里就地重启并 `gateway.reset()`（旧 socket 看着可写，实则是尸体，不 reset 的话后续所有流都是空的）。
 
-### 两个踩过的坑
+### 三个踩过的坑
 
 **顺序**：`npm install` 会剪掉 profile `dependencies` 里没有的包，而大脑 bundle 是**拷进去**的
 （不是 npm 装的），所以它当时算「多余」。实测：打开一个插件后 `node_modules/@local/dsh-fleet-brain`
 被删，节点报 `cannot resolve profile bundle "@local/dsh-fleet-brain"`，常驻 host 起不来。因此
 `writeBrainBundle` 必须排在 npm **之后**，connect 与 sync 两条路径都一样。
+
+**peer 会把 DSH 自己拉进节点**：第三方 bundle 的 `peerDependencies` 写的是
+`@deepseek-ai/dsh-*` 的区间（`dsh-pet` 写 `^0.2.0-rc.1`，`dsh-whale-widget` 同样），npm 满足
+peer 的办法是**把那个包装进当前 profile**，而 profile 的 `node_modules/@deepseek-ai/` 在解析顺序上
+压过运行时树。实测（`0.2.2-rc.3` 运行时）：装一个插件之后节点 profile 里多出 32 个
+`@deepseek-ai/*`，其中 `dsh-session` / `dsh-agent` / `dsh-scope` 是 `0.2.0-rc.2`；常驻 host
+报 `2 required plugins did not activate`、一行 URL 都不打，`connect` 报的是日志尾巴而不是节点。
+所以 `installPlugins` 固定带 `--legacy-peer-deps`：**运行时树是这些包的唯一来源**，插件不许把
+DSH 一起带来。这条不是可选的兼容开关 —— 去掉它，任何节点只要打开过一个插件就起不来。
 
 **报告**：`npm install` 对一个列表是原子的，失败时无法安全地指认某一个包，所以失败就报「这一批都
 没确认装上 + npm 最后四行」，不编造单包诊断。`POST /fleet/api/plugins/:bundle` 同步执行完再返回

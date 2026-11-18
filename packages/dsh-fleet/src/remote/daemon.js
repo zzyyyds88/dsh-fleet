@@ -131,6 +131,36 @@ function profileNameFor(root) {
 /** The default node's layout, for callers that only have one node. */
 export const REMOTE_LAYOUT = remoteLayout()
 
+/**
+ * The shell that installs third-party bundles into a node's profile.
+ *
+ * `--legacy-peer-deps` is not a convenience flag here: without it this command bricks
+ * the node. Third-party bundles declare peers on `@deepseek-ai/dsh-*` with ranges such
+ * as `^0.2.0-rc.1` (dsh-pet, dsh-whale-widget, the hindsight bundle), and npm satisfies
+ * a peer by downloading that package — into *this* profile's
+ * `node_modules/@deepseek-ai/`, which resolves ahead of the runtime tree's own copy.
+ * Measured against 0.2.2-rc.3: one plugin install pulled `dsh-session@0.2.0-rc.2` and
+ * 31 more, the resident host then reported `2 required plugins did not activate`,
+ * printed no URL, and `connect` failed with a log tail instead of a node. A plugin must
+ * not drag DSH itself along: the runtime tree is the single source of those packages,
+ * so peers are never resolved from the registry here.
+ *
+ * @param {{ profile: string, profileName: string, targets: readonly string[] }} options
+ * @returns {string}
+ */
+export function pluginInstallScript({ profile, profileName, targets }) {
+  return `
+set -u
+mkdir -p ${profile}
+cd ${profile}
+if [ ! -f package.json ]; then
+  printf '{"name":"dsh-profile-${profileName}","private":true,"dependencies":{}}\\\\n' > package.json
+fi
+npm install --no-audit --no-fund --loglevel=error --legacy-peer-deps ${targets.map(target => `"${target}"`).join(' ')} 2>&1
+echo "FLEET_NPM_EXIT=$?"
+`.trim()
+}
+
 const PROBE_COMMAND = `
 set -u
 printf 'BEGIN\\n'
@@ -553,16 +583,11 @@ echo written
     })
     // One `npm install` for the whole list: it resolves the tree once, and a single
     // network round of failures is easier to report than several partial ones.
-    const script = `
-set -u
-mkdir -p ${this.layout.profile}
-cd ${this.layout.profile}
-if [ ! -f package.json ]; then
-  printf '{"name":"dsh-profile-${this.layout.profileName}","private":true,"dependencies":{}}\\\\n' > package.json
-fi
-npm install --no-audit --no-fund --loglevel=error ${lines.map(line => `"${line.target}"`).join(' ')} 2>&1
-echo "FLEET_NPM_EXIT=$?"
-`.trim()
+    const script = pluginInstallScript({
+      profile: this.layout.profile,
+      profileName: this.layout.profileName,
+      targets: lines.map(line => line.target),
+    })
     const result = await this.connection.exec({
       argv: ['sh', '-c', script],
       // A big plugin pulls its own dependency tree; the artefact install gets 15 minutes

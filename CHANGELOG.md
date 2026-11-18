@@ -11,6 +11,19 @@
 
 ## [未发布]
 
+### 修复
+
+- **节点上装插件时，npm 不再顺手把 DSH 自己拉下来。** 第三方 bundle 的
+  `peerDependencies` 写的是 `@deepseek-ai/dsh-*` 的区间（`^0.2.0-rc.1` 之类），
+  npm 满足 peer 的办法是把那个包**装进节点的 profile**，而 profile 的
+  `node_modules/@deepseek-ai/` 解析顺序在运行时树之前。实测：节点运行时是
+  `0.2.2-rc.3`，装一个插件后被塞进 `dsh-session@0.2.0-rc.2`、`dsh-agent@0.2.0-rc.2`
+  等 32 个包，常驻 host 报 `2 required plugins did not activate`、不打 URL，
+  `connect` 只报一段日志尾巴。`RemoteHost.installPlugins` 现在固定带
+  `--legacy-peer-deps`：运行时树是这些包的唯一来源，插件不许把 DSH 一起带来。
+  **受影响**：所有在节点上打开过插件的安装。已坏掉的节点重连一次即可自愈
+  （下一次 `npm install` 会把多出来的 `@deepseek-ai/*` 剪掉）。
+
 ## [0.5.1] — 2026-11-18
 
 **只改发布元数据，运行时行为与 0.5.0 相同。** 0.5.0 已经发到 registry，同号不能再发，

@@ -149,6 +149,7 @@ node test/event-relay.mjs     <base> <token>
 | 目录选择器的三个插槽（`sidebar.workspaces.directoryFlow` / `conversation.hero.workspace.directoryFlow` / `workspace.picker.directoryFlow`）与它的 `{open, onPicked, onCancel}` 约定 | `dsh-client-ui-workspace` + `dsh-client-ui-directory-picker-*` | 加工作区弹回原生选择框，或对话框弹不出来 | `client-bundle.mjs`（槽位注册）+ 手工验收 §7b |
 | 单实例插槽（`kind: single`）取 `entriesOfSlot(key)[0]`，按 `priority` 升序 | `dsh-client-ui-renderer` / `dsh-web-frontend` | 自家占用者排在壳自带的那一个后面，永远不生效 | 手工验收 §7b（对话框标题必须是「选择工作区文件夹」） |
 | profile 的 `dsh.profile.bundles` 顺序即组合顺序，`npm install` 会剪掉 `dependencies` 里没有的包 | `dsh-app-boot` / `dsh-client-modules` | 插件开关把大脑 bundle 剪掉，节点起不来 | `plugin-switch.mjs` |
+| 第三方 bundle 的 `peerDependencies` 写 `@deepseek-ai/dsh-*` 区间，npm 会把那个版本装进 profile，压过运行时树 | `dsh-app-boot` 的包解析顺序 + 各插件的 peer 声明 | 节点报 `N required plugins did not activate`、不打 URL，`connect` 只报日志尾巴 | `plugin-switch.mjs`；`installPlugins` 固定带 `--legacy-peer-deps` |
 | 子代理自己的 Session id 是**裸 uuid**（父 Session 才是 `session-<uuid>`） | `dsh-session` / `dsh-subagent` | 只按值匹配 `session-<uuid>` 的包装会漏掉子会话，历史打不开（`subagent/not-found`） | `routing-unit.mjs` |
 | 带 `Agent` 形参的端点（`agentTeams/setEnabled`）要求 `agents.get(caller.id) === caller` | `dsh-team`（`TeamService` → `ctx.subagents.rootOf`） | 用一个占位 Agent 调它 → `subagent tree access requires the exact live caller`，开关点了没反应 | 手工验收 §7c |
 | `sessionQuery.readEvent` 是 Host 内部方法（无 wire 端点），`/api/present.open` 靠它定位副产物文件 | `dsh-session-query` + `dsh-client-ui-deliverables` | 远程会话的那条路由 404，卡片说「无法在文件管理器中显示，请重试」——一句永远不可能成功的话 | 手工验收 §7c + `verify-reveal` |

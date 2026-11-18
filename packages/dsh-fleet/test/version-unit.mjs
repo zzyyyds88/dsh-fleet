@@ -30,7 +30,7 @@ import {
   platformTag,
   rollbackScript,
 } from '../src/remote/artefact.js'
-import { remoteLayout } from '../src/remote/daemon.js'
+import { pluginInstallScript, remoteLayout } from '../src/remote/daemon.js'
 import {
   installedPlugins,
   isLocalSpec,
@@ -175,6 +175,28 @@ const check = (ok, label, detail) => {
     'a failed install can be rolled back')
   check(rollback.includes('nothing-to-roll-back'),
     'and reports when there was nothing to roll back to')
+}
+
+// ---- the plugin install script: peers must not drag DSH onto the node -------
+// A third-party bundle's `peerDependencies` name `@deepseek-ai/dsh-*`, and npm satisfies
+// a peer by *installing* it into the profile, where it resolves ahead of the runtime
+// tree. Measured: one plugin install put `dsh-session@0.2.0-rc.2` beside a 0.2.2-rc.3
+// runtime, and the resident host then refused to activate rows and printed no URL — a
+// node that looks connected from the desktop and is dead on the machine.
+{
+  const script = pluginInstallScript({
+    profile: '/root/.dsh/profiles/fleet',
+    profileName: 'fleet',
+    targets: ['dsh-pet@^0.3.8', '@vectorize-io/hindsight-coding-agents@^0.8.7'],
+  })
+  check(script.includes('--legacy-peer-deps'),
+    'the install never resolves a peer from the registry, so no DSH copy lands in the profile')
+  check(script.includes('cd /root/.dsh/profiles/fleet'),
+    'it runs in the node profile, not in the runtime tree')
+  check(script.includes('"dsh-pet@^0.3.8"') && script.includes('"@vectorize-io/hindsight-coding-agents@^0.8.7"'),
+    'every target is quoted, so a spec with a range cannot be split by the shell')
+  check(script.includes('FLEET_NPM_EXIT=$?'),
+    'and the exit status is reported separately from npm output, which `2>&1` interleaves')
 }
 
 // ---- per-plugin switches ---------------------------------------------------
