@@ -102,7 +102,7 @@ at the official attach stream」），而 fleet 的 `terminal/attach`（`host/de
 └───────────────────────┬─────────────────────────────────────┘
                         │ WSS（端到端加密，中转只转发密文）
 ┌───────────────────────▼─────────────────────────────────────┐
-│ 中转 Server（自建于 192.168.3.91，公网 dsh.greatbaby.cc.cd） │
+│ 中转 Server（自建，局域网一台机器 + 公网入口）                      │
 └───────────────────────┬─────────────────────────────────────┘
                         │
 ┌───────────────────────▼─────────────────────────────────────┐
@@ -137,14 +137,14 @@ at the official attach stream」），而 fleet 的 `terminal/attach`（`host/de
 
 ### 4.3 中转：自建服务端 + 适配插件（本轮主要工作量）
 
-**服务端现状（2026-11-18 实测 192.168.3.91）**：
+**服务端现状（2026-11-18 实测，局域网一台机器 + 公网入口）**：
 
 | 项 | 实测值 |
 |---|---|
 | 容器 | `server-server-1`，镜像 `ghcr.io/liguobao/ds-harness-remote/server:latest`，构建于 2026-11-15T15:39Z |
 | 容器内版本 | `@dsh-remote/server` **0.5.21**（镜像 tag 是 `latest`，会漂） |
 | 前置 | `server-proxy-1`（`nginx:alpine`），`:6703 → 80`；nginx 把 `Origin` 归一化成公网域名 |
-| 公网地址 | `DSH_SERVER_PUBLIC_URL=https://dsh.greatbaby.cc.cd` |
+| 公网地址 | `DSH_SERVER_PUBLIC_URL=https://<公网域名>` |
 | 网络模式 | relay-only：`STUN_URLS` / `TURN_URLS` 全空，无 P2P 直连 |
 | 部署目录 | `/root/dsh-deploy/server/{compose.yaml,nginx.conf,.env}`，数据卷 `server-data` |
 | 已注册设备 | 5 个：桌面 host、桌面 client、安卓 client ×2、DSH App Android ×1（后者已 revoke） |

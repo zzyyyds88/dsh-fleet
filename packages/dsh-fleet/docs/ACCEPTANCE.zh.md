@@ -504,7 +504,7 @@ runner 自己的三条硬约束（都实测过会踩）：
 
 | 判据 | 实测 |
 |---|---|
-| 新建会话入口是「创建项目」，字段序 项目名称 → 设备 → 源文件夹 | 通过：`aria-label="创建项目"`，正文 `创建项目 \| 项目名称 \| 设备 \| 本机 \| probe-93 · 192.168.3.93 \| 添加远程设备… \| 源文件夹 \| 📁 选择文件夹 \| Harness 可以读取和编辑这些文件夹 \| 取消 \| 创建`（截图 `.scratch/final-project-form.png`） |
+| 新建会话入口是「创建项目」，字段序 项目名称 → 设备 → 源文件夹 | 通过：`aria-label="创建项目"`，正文 `创建项目 \| 项目名称 \| 设备 \| 本机 \| probe-93 · <node-host> \| 添加远程设备… \| 源文件夹 \| 📁 选择文件夹 \| Harness 可以读取和编辑这些文件夹 \| 取消 \| 创建`（截图 `.scratch/final-project-form.png`） |
 | 侧栏入口说「选择工作区文件夹 / 工作区名称 / 加入工作区」 | 通过：同一组件在 `sidebar.workspaces.directoryFlow` 下报另一套词（截图 `.scratch/form-sidebar.png`） |
 | 设备选节点后出现「这台设备上已有项目？添加到侧栏 ›」 | 通过：切到 `probe-93` 后该行出现 |
 | 点它能列出**那台机器上已有**的工作区 | 通过：`aria-label="添加到侧栏"` 的页里 8 行，与 `/fleet/api/workspaces` 的 8 条远程行一一对应（`验收项目`、`fleet-relay-mwkiidoo`、`SCIdream`、`111`、`FuDaiZuJian`、`grouptest`、`fleet-second`、`fleet-brain-test`） |
