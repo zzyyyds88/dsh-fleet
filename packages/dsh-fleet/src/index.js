@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url'
 import { apiError, describeFailure, readJsonBody, sendJson } from './core/http-error.js'
 import { decideGate } from './core/version.js'
 import { Fleet, BRAIN_BUNDLES } from './host/fleet.js'
+import { FleetControl } from './host/fleet-control.js'
 import {
   isPosixAbsolute,
   listLocal,
@@ -47,6 +48,7 @@ import { Router } from './host/router.js'
 import { SyncSwitches } from './host/sync-switches.js'
 import { overrideAgentLookup, overrideWorkspaceFileScope } from './host/lookups.js'
 import {
+  decorateDirectoryPickerController,
   decorateJobController,
   decorateSessionController,
   decorateSessionQuery,
@@ -144,6 +146,11 @@ export function apply(ctx, config = {}) {
   const control = new RemoteControl(fleet, router, log)
   /** @type {Array<() => void>} */
   const disposers = []
+  // The service a node-control agent session acts through. Narrow on purpose: it exposes
+  // the node registry and nothing else, so "this session may only manage nodes" is a
+  // property of the surface rather than a rule in a prompt. `ctx.provide` registers a
+  // fiber-owned effect, so unloading this plugin removes the service on its own.
+  ctx.provide('fleetControl', new FleetControl({ fleet, log }))
 
   /** One request handler over the management API, with uniform failures. */
   const guard = handler => async (req, res) => {
@@ -506,6 +513,21 @@ export function apply(ctx, config = {}) {
       try { undoAgent?.() } catch { /* already gone */ }
       workspaceController = undefined
     }, 'dsh-fleet: routing decorators')
+  })
+
+  // ---- Directory picking ------------------------------------------------------
+  // A Remote caller's in-app browser asks this Host for absolute paths, so a node has to
+  // be addressable inside that syntax (see `host/picker-paths.js`). The service is not
+  // guaranteed to be composed — a `--no-web` Host has no picker at all — so it is read
+  // optionally rather than added to `inject`, where its absence would fail the plugin.
+  ctx.inject(['directoryPickerController'], scope => {
+    const picker = scope.get('directoryPickerController')
+    if (picker === undefined) return
+    const undo = decorateDirectoryPickerController(picker, router)
+    log('fleet: routing directoryPicker (nodes are browsable as /@fleet/<nodeId>/…)')
+    scope.effect(() => () => {
+      try { undo() } catch { /* the instance may already be disposed */ }
+    }, 'dsh-fleet: directory picker')
   })
 
   // ---- Provisioning ---------------------------------------------------------

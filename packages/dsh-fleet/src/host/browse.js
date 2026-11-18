@@ -63,6 +63,41 @@ export async function makeLocalDirectory(parent, name) {
 }
 
 /**
+ * The ancestor chain of one directory, root first and the directory itself last.
+ *
+ * The picker's breadcrumbs are a list of jump targets the Host computes — a client
+ * never joins segments itself, and a Windows client cannot even spell a `D:\` root the
+ * way this machine does.
+ *
+ * @param {string} path - an absolute, already-resolved local directory.
+ * @returns {Array<{ name: string, path: string, hidden: false }>}
+ */
+export function localCrumbs(path) {
+  const drive = /^[A-Za-z]:[\\/]/u.exec(path)
+  if (drive !== null) {
+    // `D:\` is the crumb's own path *and* its label: that is what a Windows folder
+    // chooser shows at the top of a drive's tree.
+    const root = drive[0]
+    const crumbs = [{ name: root, path: root, hidden: false }]
+    let current = root
+    for (const segment of path.slice(root.length).split(/[\\/]+/u)) {
+      if (segment.length === 0) continue
+      current = join(current, segment)
+      crumbs.push({ name: segment, path: current, hidden: false })
+    }
+    return crumbs
+  }
+  const crumbs = [{ name: '/', path: '/', hidden: false }]
+  let current = '/'
+  for (const segment of path.split('/')) {
+    if (segment.length === 0) continue
+    current = current === '/' ? `/${segment}` : `${current}/${segment}`
+    crumbs.push({ name: segment, path: current, hidden: false })
+  }
+  return crumbs
+}
+
+/**
  * Reject a name that is not one usable directory segment.
  * @param {unknown} name
  * @returns {string}
@@ -146,6 +181,10 @@ export async function listLocal(path) {
     home: homedir(),
     ...(parent === undefined ? {} : { parent }),
     roots: await localRoots(),
+    // `crumbs` is additive: `/fleet/api/browse` and the plugin's own dialog read the
+    // fields above, while a Remote caller's in-app browser renders the ancestor row
+    // from this one.
+    crumbs: localCrumbs(target),
     entries,
     truncated,
   }
@@ -219,9 +258,26 @@ find . -mindepth 1 -maxdepth 1 -type d ! -name '.*' -print 2>/dev/null | LC_ALL=
     // A node has one tree, so the only root is `/`; the picker still needs to know so
     // it can offer the same "jump to a root" affordance on both sides.
     roots: ['/'],
+    crumbs: posixCrumbs(resolved),
     entries,
     truncated,
   }
+}
+
+/**
+ * POSIX ancestor chain, root first and the directory itself last.
+ * @param {string} path
+ * @returns {Array<{ name: string, path: string, hidden: false }>}
+ */
+function posixCrumbs(path) {
+  const crumbs = [{ name: '/', path: '/', hidden: false }]
+  let current = '/'
+  for (const segment of path.split('/')) {
+    if (segment.length === 0) continue
+    current = current === '/' ? `/${segment}` : `${current}/${segment}`
+    crumbs.push({ name: segment, path: current, hidden: false })
+  }
+  return crumbs
 }
 
 /**
@@ -266,4 +322,37 @@ export async function makeRemoteDirectory(connection, parent, name) {
  */
 export function isPosixAbsolute(path) {
   return typeof path === 'string' && path.startsWith('/')
+}
+
+/**
+ * Make sure one directory exists on a node, creating missing parents.
+ *
+ * `workspace/create` resolves its folder with `realpath` and fails before creating
+ * anything, so a folder the caller has not made yet has to be made here. `mkdir -p` and
+ * not `mkdir`: this path exists to make "open a project that is not there yet" work, and
+ * the picker's own "new folder" affordance is unavailable to a Remote caller
+ * (`directoryPicker/createDirectory` is not in the phone client's allowlist).
+ *
+ * Naming this path is safe precisely because it is absolute and the node owns it —
+ * a caller cannot use `.`/`..` to escape, and `--` stops a leading dash becoming a flag.
+ *
+ * @param {import('../ssh/connection.js').SshConnection} connection
+ * @param {string} path - absolute POSIX path.
+ * @returns {Promise<void>}
+ */
+export async function ensureRemoteDirectory(connection, path) {
+  if (!isPosixAbsolute(path)) {
+    throw Object.assign(new Error('a node path must be absolute'), { code: 'path-invalid' })
+  }
+  // `cd -P` is not needed: `mkdir -p` already treats the argument as a path, and
+  // resolving symlinks here would create the target of a link instead of the link.
+  const result = await connection.exec({
+    argv: ['sh', '-c', 'mkdir -p -- "$1"', 'sh', path],
+    timeoutMs: 30_000,
+    maxBytes: 64 * 1024,
+  })
+  if (result.code !== 0) {
+    const reason = `${result.stderr}`.trim() || `mkdir exited ${String(result.code)}`
+    throw Object.assign(new Error(`${path}: ${reason.slice(0, 300)}`), { code: 'create-failed' })
+  }
 }

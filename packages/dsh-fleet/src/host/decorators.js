@@ -14,6 +14,14 @@
  * @module @local/dsh-fleet/host/decorators
  */
 import { mergeControlStream } from './remote-control.js'
+import { ensureRemoteDirectory, listLocal, listRemote, makeLocalDirectory, makeRemoteDirectory } from './browse.js'
+import {
+  PICKER_PREFIX,
+  decodePickerPath,
+  encodePickerPath,
+  pruneShadow,
+  shadowRoot,
+} from './picker-paths.js'
 import { AsyncQueue, decodeRemoteId, decorateMethods, remoteIterable } from './routing.js'
 
 /** Read a nested request field without trusting its shape. */
@@ -217,8 +225,42 @@ export function decorateWorkspaceController(service, router, workspaces) {
 
     create: local => async function create(request, signal) {
       const path = request === null || typeof request !== 'object' ? undefined : Reflect.get(request, 'path')
-      // A remote path (an absolute POSIX path under a connected node) creates the
-      // workspace on that node: it is the only Host that can see that directory.
+      const target = decodePickerPath(path)
+      // `/@fleet/<id>/…` names one node unambiguously, so it never falls through to the
+      // others: a path on the wrong machine must fail as "that node is offline", not
+      // silently become a different machine's workspace.
+      if (target !== undefined && target.kind === 'node') {
+        try {
+          const runtime = router.node(target.nodeId)
+          // The node's `workspace/create` realpaths its folder and fails before making
+          // anything, so a folder that is not there yet is created here first. This is
+          // also the only way a Remote caller can open a new project: its own "new
+          // folder" affordance is not in the phone client's endpoint allowlist.
+          await ensureRemoteDirectory(runtime.connection, target.remotePath)
+          const value = await router.call(target.nodeId, 'workspace/create', {
+            request: { path: target.remotePath },
+          }, signal)
+          return router.toLocalWorkspace(value, target.nodeId)
+        } finally {
+          // The relay creates this directory on *this* machine before it dispatches
+          // (see picker-paths.js): remove the empty chain it just made, and nothing
+          // else. Failure is logged, never turned into a failed workspace.
+          const pruned = pruneShadow(path, message => console.warn(message))
+          if (pruned.removed.length > 0) {
+            console.log(`fleet: removed ${String(pruned.removed.length)} shadow director${pruned.removed.length === 1 ? 'y' : 'ies'} under ${shadowRoot()}`)
+          }
+        }
+      }
+      // `/@fleet` on its own is the node list, not a directory anywhere — a workspace
+      // cannot be created from it, and it must never fall through to a local `mkdir`.
+      if (target !== undefined && target.kind === 'nodes') {
+        throw Object.assign(
+          new Error(`${PICKER_PREFIX} lists nodes; pick one of them first`),
+          { code: 'fleet/path-reserved' },
+        )
+      }
+      // A bare absolute POSIX path (typed by hand) still tries each node in turn: that is
+      // the only meaning it can have, since this machine's own paths are not POSIX.
       if (typeof path === 'string' && path.startsWith('/')) {
         for (const runtime of router.nodes()) {
           const nodeId = runtime.record.id
@@ -750,4 +792,106 @@ export function decorateSessionQuery(service, router) {
       }
     },
   })
+}
+
+/**
+ * Install the `directoryPicker` router — by **replacement**, not decoration.
+ *
+ * The upstream controller delegates both verbs to `ctx.directoryPicker.capability()`.
+ * On a desktop with a display the auto backend resolves to `native`, whose capability
+ * has no `list`/`createDirectory` at all: the call raises `directory-picker-unavailable`
+ * and the relay falls back to *its own* `listRemoteDirectory`, so a decorated method is
+ * never reached. Replacing the two methods removes that dependency entirely — this Host
+ * answers for both machine kinds itself, and the OS chooser (`pick`) is left alone
+ * because it opens a dialog on this machine's screen, which is not what a Remote caller
+ * asked for.
+ *
+ * The node half is reached over the SSH connection rather than the node's Harness: a
+ * folder listing is a filesystem question, and asking a running Host would make a node
+ * have to be up before its own directories could be browsed.
+ *
+ * @param {object} service - the live upstream `DirectoryPickerController`.
+ * @param {import('./router.js').Router} router
+ * @returns {() => void}
+ */
+export function decorateDirectoryPickerController(service, router) {
+  return decorateMethods(service, {
+    /**
+     * One directory level, for a Remote caller's in-app browser.
+     *
+     * The shape is the upstream `DirectoryListing`: `path`, `home`, `crumbs`,
+     * `entries`, `truncated`. `home` is where the browser's breadcrumb row starts, so a
+     * node listing roots it at the namespace instead of the desktop's home.
+     */
+    list: local => async function list(path, signal) {
+      const target = decodePickerPath(path)
+      if (target === undefined) {
+        // Not ours: the desktop's own tree, answered from the filesystem directly so the
+        // result does not depend on which picker backend this composition resolved.
+        const listing = await listLocal(typeof path === 'string' ? path : undefined)
+        return {
+          path: listing.path,
+          home: listing.home,
+          crumbs: listing.crumbs,
+          entries: listing.entries.map(entry => ({ name: entry.name, path: entry.path, hidden: false })),
+          truncated: listing.truncated,
+        }
+      }
+      if (target.kind === 'nodes') return { ...nodeListing(router), home: PICKER_PREFIX }
+      const runtime = router.node(target.nodeId)
+      const listing = await listRemote(runtime.connection, target.remotePath)
+      const prefix = encodePickerPath(target.nodeId, '/')
+      // Every path this listing exposes names a node, so the browser's "open" and
+      // "choose" actions only ever hand back something this Host can decode again.
+      const spell = value => (value === '/' ? prefix : encodePickerPath(target.nodeId, value))
+      return {
+        path: spell(listing.path),
+        home: PICKER_PREFIX,
+        crumbs: [
+          { name: PICKER_PREFIX, path: PICKER_PREFIX, hidden: false },
+          ...listing.crumbs.map(crumb => ({ name: crumb.name, path: spell(crumb.path), hidden: false })),
+        ],
+        entries: listing.entries.map(entry => ({ name: entry.name, path: spell(entry.path), hidden: false })),
+        truncated: listing.truncated,
+      }
+    },
+
+    createDirectory: local => async function createDirectory(path, name) {
+      const target = decodePickerPath(path)
+      if (target === undefined) return await local(path, name)
+      if (target.kind === 'nodes') {
+        throw Object.assign(
+          new Error(`${PICKER_PREFIX} lists nodes; a folder cannot be created in it`),
+          { code: 'directory-create-failed', path: PICKER_PREFIX },
+        )
+      }
+      const runtime = router.node(target.nodeId)
+      const created = await makeRemoteDirectory(runtime.connection, target.remotePath, name)
+      return encodePickerPath(target.nodeId, created)
+    },
+  })
+}
+
+/**
+ * One row per connected node, addressed by its own namespace root.
+ *
+ * Only routable nodes are listed: an offline machine cannot be browsed, and showing it
+ * would turn "open a folder" into an error the caller cannot act on.
+ *
+ * @param {import('./router.js').Router} router
+ * @returns {{ path: string, crumbs: Array<{name: string, path: string, hidden: false}>, entries: Array<{name: string, path: string, hidden: false}>, truncated: false }}
+ */
+function nodeListing(router) {
+  const entries = router.nodes().map(runtime => ({
+    name: runtime.record.name,
+    path: encodePickerPath(runtime.record.id, '/'),
+    hidden: false,
+  }))
+  entries.sort((left, right) => left.name.localeCompare(right.name))
+  return {
+    path: PICKER_PREFIX,
+    crumbs: [{ name: PICKER_PREFIX, path: PICKER_PREFIX, hidden: false }],
+    entries,
+    truncated: false,
+  }
 }
