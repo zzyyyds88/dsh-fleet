@@ -82,17 +82,36 @@ if (remote.state !== 'connected') {
 }
 
 // ---- the switch list is about plugins, not internal rows --------------------
+// Start from the defaults. A previous run of this suite can leave a stored `false` behind
+// (that is what "switch it off" writes), and asserting on the defaults while a decision is
+// still recorded would make this test's first check depend on what ran before it. Clearing
+// is also the operation a person uses to undo a switch, so it is worth exercising.
 const listed = await get('/plugins')
 check(listed.status === 200, 'the plugin list answers', `HTTP ${String(listed.status)}`)
-const rows = listed.body.rows ?? []
+let rows = listed.body.rows ?? []
 check(rows.length > 0, 'it lists the plugins installed here', `${String(rows.length)} row(s)`)
+for (const row of rows.filter(entry => entry.source === 'explicit')) {
+  const cleared = await post(`/plugins/${encodeURIComponent(row.bundle)}`, { sync: true })
+  if (cleared.status !== 200) log(`could not clear the override on ${row.bundle}: HTTP ${String(cleared.status)}`)
+}
+rows = (await get('/plugins')).body.rows ?? []
 check(rows.every(row => typeof row.bundle === 'string' && row.bundle.length > 0),
   'each row is a bundle name')
 check(rows.every(row => !row.bundle.startsWith('@deepseek-ai/')),
   'no upstream bundle is offered as a choice')
 check(rows.every(row => row.bundle !== '@local/dsh-fleet-brain' && row.bundle !== '@local/dsh-fleet'),
   'neither the brain bundle nor this plugin itself is a choice')
-check(rows.every(row => row.sync === false), 'nothing is sent to a node by default')
+// Never-sync is a separate answer from "third party": the relay plugin is a plugin the
+// user installed, and it must still never be offered. Listing it would mean a node could
+// open a second way in.
+check(rows.every(row => row.bundle !== 'ds-harness-remote' && row.bundle !== '@dsh-remote/plugin'),
+  'the relay plugin is not offered either', rows.map(row => row.bundle).join(','))
+// The default is **on**: one installation, one working environment. The store only ever
+// records the exceptions, so a row nobody touched says `source: 'default'`.
+check(rows.every(row => row.sync === true), 'your plugins are sent to a node by default',
+  rows.map(row => `${row.bundle}=${String(row.sync)}/${row.source}`).join(','))
+check(rows.every(row => row.source === 'default'), 'and nothing has been overridden yet',
+  rows.map(row => `${row.bundle}=${row.source}`).join(','))
 
 // Pick one the node can actually install. The test must not depend on a particular
 // third-party plugin being installed on the desktop, so it takes the first candidate and
@@ -102,7 +121,7 @@ if (target === undefined) {
   log('no third-party plugin is installed on this desktop; nothing to switch')
   process.exit(3)
 }
-log(`switching ${target.bundle} (${String(target.spec || 'latest')}) onto ${remote.name}`)
+log(`switching ${target.bundle} (${String(target.spec || 'latest')}) on ${remote.name}`)
 
 const manifest = async () => (await nodeExec('cat ~/.dsh/profiles/fleet/package.json 2>/dev/null || echo {}')).trim()
 const bundleList = async () => {
@@ -182,21 +201,38 @@ let restored = false
 const restore = async () => {
   if (restored) return
   restored = true
-  const off = await post(`/plugins/${encodeURIComponent(target.bundle)}`, { sync: false }).catch(() => undefined)
-  if (off !== undefined && off.status !== 200) log(`could not restore ${target.bundle}: ${JSON.stringify(off.body).slice(0, 300)}`)
+  // The default is "sent", so putting the switch back means clearing the override.
+  const on = await post(`/plugins/${encodeURIComponent(target.bundle)}`, { sync: true }).catch(() => undefined)
+  if (on !== undefined && on.status !== 200) log(`could not restore ${target.bundle}: ${JSON.stringify(on.body).slice(0, 300)}`)
 }
 process.on('SIGINT', () => { void restore().finally(() => process.exit(130)) })
 process.on('SIGTERM', () => { void restore().finally(() => process.exit(143)) })
 process.on('uncaughtException', error => { log(`uncaught: ${error.message}`); void restore().finally(() => process.exit(1)) })
 
 try {
+  // ---- off ------------------------------------------------------------------
+  // Off is the exceptional state now, so the suite starts by creating it: everything a
+  // node receives by default has to be something a person can take away again, and the
+  // node has to survive the removal.
+  const off = await post(`/plugins/${encodeURIComponent(target.bundle)}`, { sync: false })
+  check(off.status === 200, 'switching a plugin off answers', `HTTP ${String(off.status)}`)
+  check(off.body.row?.sync === false && off.body.row?.source === 'explicit',
+    'the switch is recorded as a hand-made decision', JSON.stringify(off.body.row ?? {}).slice(0, 160))
+  const removed = await bundleList()
+  check(!removed.includes(target.bundle), 'the node no longer composes it', removed.join(','))
+  check(removed.includes('@local/dsh-fleet-brain'), 'and still composes the brain bundle', removed.join(','))
+  const removedAnswers = await nodeAnswers()
+  check(removedAnswers.ok, 'the node answers after the plugin is taken away')
+  check(removedAnswers.workspaces === beforeAnswers.workspaces,
+    'with its workspaces intact',
+    `${String(beforeAnswers.workspaces)} → ${String(removedAnswers.workspaces)}`)
+
   // ---- on -------------------------------------------------------------------
-  const on = await post(`/plugins/${encodeURIComponent(target.bundle)}`, { sync: true })
-  check(on.status === 200, 'switching a plugin on answers', `HTTP ${String(on.status)}`)
-  check(on.body.row?.sync === true && on.body.row?.source === 'explicit',
-    'the switch is recorded as a hand-made decision')
   // The reply has to report what the node did, not just "saved": installing over SSH can
   // fail on the node's own registry, and a silent success is the bug this catches.
+  const on = await post(`/plugins/${encodeURIComponent(target.bundle)}`, { sync: true })
+  check(on.status === 200, 'switching it back on answers', `HTTP ${String(on.status)}`)
+  check(on.body.row?.sync === true, 'the switch is on again', JSON.stringify(on.body.row ?? {}).slice(0, 120))
   const report = (on.body.nodes ?? []).find(node => node.id === remote.id)
   check(report !== undefined, 'the answer names the node it talked to')
   check(report?.error === undefined, 'the node took the change', report?.error)
@@ -227,16 +263,20 @@ try {
     'the Host still relays the node’s Session events after the restart',
     relayed.reason ?? `${String(relayed.hits)} event(s) for ${String(relayed.sessionId).slice(0, 40)}`)
 
-  // ---- off ------------------------------------------------------------------
-  const off = await post(`/plugins/${encodeURIComponent(target.bundle)}`, { sync: false })
+  // ---- back to the default --------------------------------------------------
+  // Clearing the override means "do what the default says", which is the same state the
+  // suite found. This is the path a person takes after trying a switch and changing
+  // their mind, and it must not leave a stored `false` behind.
+  const cleared = await post(`/plugins/${encodeURIComponent(target.bundle)}`, { sync: true })
   restored = true
-  check(off.status === 200, 'switching it back off answers', `HTTP ${String(off.status)}`)
-  check(off.body.row?.sync === false, 'the switch is off again')
+  check(cleared.status === 200, 'putting the switch back to its default answers', `HTTP ${String(cleared.status)}`)
+  check(cleared.body.row?.source === 'default', 'and the row reports the default, not a decision',
+    JSON.stringify(cleared.body.row ?? {}).slice(0, 160))
   const final = await bundleList()
-  check(!final.includes(target.bundle), 'the node no longer composes it', final.join(','))
+  check(final.includes(target.bundle), 'the node composes it again, because that is the default', final.join(','))
   check(final.includes('@local/dsh-fleet-brain'), 'the brain bundle survives the round trip', final.join(','))
   const finalAnswers = await nodeAnswers()
-  check(finalAnswers.ok, 'the node answers after the plugin is taken away')
+  check(finalAnswers.ok, 'the node answers at the end')
   check(finalAnswers.workspaces === beforeAnswers.workspaces,
     'with its workspaces intact',
     `${String(beforeAnswers.workspaces)} → ${String(finalAnswers.workspaces)}`)

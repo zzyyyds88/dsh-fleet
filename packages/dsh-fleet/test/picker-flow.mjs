@@ -219,8 +219,13 @@ try {
 check(reserved !== undefined, 'the namespace itself is not a workspace path',
   reserved === undefined ? 'it created one' : String(reserved.code))
 
-// Clean up the folder on the node; the workspace record is left behind on purpose,
-// because removing workspaces is a separate endpoint this test does not drive.
+// Clean up: the folder on the node and the workspace record this test made. Leaving either
+// behind pollutes every later suite that picks "the first remote workspace" — measured:
+// a leftover /tmp fixture became the workspace `approval` drove its prompts in, and its
+// first assertion failed for that reason alone.
+await call('workspace/delete', { request: { workspaceId } }).catch(error => {
+  log(`could not remove the workspace it created: ${String(error.code)} ${error.message}`)
+})
 await nodeExec(`rmdir /tmp/${folderName}`).catch(() => undefined)
 
 /** The `<drive>:\@fleet` root this machine's namespace resolves to. */
