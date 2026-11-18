@@ -25,11 +25,42 @@
 
 ```bash
 cd packages/dsh-fleet
-node test/routing-unit.mjs      # 身份编解码、流扇出、工作区合并
-node test/multipart-unit.mjs    # Gateway 二进制应答解码
+node test/routing-unit.mjs        # 身份编解码、流扇出、工作区合并
+node test/multipart-unit.mjs      # Gateway 二进制应答解码
+node test/picker-paths-unit.mjs   # /@fleet 命名空间编解码、影子目录清理
+node test/install-unit.mjs        # 安装清单自洽（patch 文件、files、engines.dsh、详情页）
+node test/fleet-control-unit.mjs  # 节点控制面：密钥只能引用不能粘贴
+```
+
+或者一条命令跑完这三层（它自己起隔离 profile 的 Host）：
+
+```bash
+node test/run-all.mjs --layer offline,contract
 ```
 
 `gateway-smoke.mjs` **不在这里** —— 它要一台真节点（见第 3 步）。
+
+### 1b. 安装形态变了之后：真的装一次
+
+清单正确不等于装得上。改过 `package.json` 的 `dsh.bundle.patch` / `files` / `exports` /
+`engines.dsh` 之后，**两种 target 各装一遍**，并确认第二个 patch 文件也组合成功：
+
+```powershell
+# 1. 打 tarball 并从它装
+npm pack --pack-destination dist
+& $exe $bin plugin --profile <干净profile> add -w .\dist\local-dsh-fleet-<version>.tgz
+
+# 2. 从本地目录装（link: 形态，开发时用）
+& $exe $bin plugin --profile <干净profile> add -w D:\ProjectHub\DSHpl\packages\dsh-fleet
+```
+
+装完起一次那个 profile 的 Host，检查三件事：`/fleet/api/nodes` 答得出、
+`agentPresets/list` 里有 `node-control`、`directoryPicker/list` 收到 `/@fleet` 会回节点列表。
+少任何一件都说明某个 patch 文件或 `files` 条目没进包 —— 而**只装不查是看不出来的**。
+
+两个坑：`file:<绝对路径>` 会被 pnpm 解析成相对 profile 的路径（报 `ENOENT`），
+给绝对路径时不要带 `file:`；一个 profile 的 `node_modules` 若是从别的 profile 拷来的，
+pnpm 会以 `ERR_PNPM_VIRTUAL_STORE_DIR_MAX_LENGTH_DIFF` 拒绝接管，用干净 profile 验证。
 
 ### 2. 重跑两条"缝隙"测试（必须用 DSH 自带的 Node，不是系统 Node）
 
@@ -210,14 +241,15 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 | 改的是 | 怎么生效 |
 |---|---|
 | `src/client/client.js`（浏览器半） | 桌面端**刷新页面**即可；若同时跑着 `pnpm run dev:web` 则热更 |
-| `src/index.js`、`src/host/**`、`src/ssh/**`、`src/remote/**`（Host 半） | 必须**重启桌面端** |
-| `cordis.patch.yml`（插件自己的 patch 层） | 重启桌面端 |
-| `locale/*.json`、`icon.svg` | 刷新页面 |
+| `src/index.js`、`src/host/**`、`src/node-control/**`、`src/ssh/**`、`src/remote/**`（Host 半） | 必须**重启桌面端** |
+| `cordis.patch.yml`、`presets/*.patch.yml`（插件自己的 patch 层） | 重启桌面端 |
+| `locale/*.json`、`icon.svg`、`docs/DETAIL*.md` | 刷新页面 |
 
 改完一个 Host 半的改动后，最小的验证是：
 
 ```bash
-node test/routing-unit.mjs && node test/multipart-unit.mjs
+node test/routing-unit.mjs && node test/multipart-unit.mjs && node test/picker-paths-unit.mjs
 ```
 
-然后再跑一个端到端（`host-routing.mjs` 或 `workspace-flow.mjs`）。
+然后再跑一个端到端（`host-routing.mjs` 或 `picker-flow.mjs`）。动过 `presets/` 或
+`package.json` 的清单字段，还要按 §1b 真的装一遍。
