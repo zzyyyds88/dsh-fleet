@@ -230,19 +230,24 @@ D:\ProjectHub\DSHpl\
 
 ```
 packages/dsh-fleet/
-  package.json          dsh.bundle.patch + dsh.client
+  package.json          dsh.bundle.patch（数组：插件行 + 预设行）+ dsh.client + engines.dsh
   cordis.patch.yml      insert: dsh-fleet（单行；不禁用任何上游行）
+  presets/
+    node-control.patch.yml  preset-node-control：persona + 一个 fleet_nodes 工具
   src/
-    core/               nodes.json 注册表、凭据、HTTP 错误
+    core/               nodes.json 注册表、凭据、HTTP 错误、每插件同步开关的语义
     ssh/                ssh2 连接池、exec、forwardOut、错误分类
     remote/             远端守护：probe / install / 节点 profile / 配置 / start / verify
+    node-control/       `./node-control` 入口：只注册 `fleet_nodes` 一个工具（预设挂它，不挂整个插件）
     host/
       ssh-http.js       把 SSH channel 当 socket 用，手写 HTTP/1.1
       ws.js             手写 RFC 6455 客户端（应答 ping、帧重组）
       remote-gateway.js cookie 铸造、unary call（401 自动重试一次）、逻辑流
       multipart.js      Gateway 的 multipart 应答解码（字节附件还原）
       provision.js      模型行复制、凭据下发、配置渲染
-      browse.js         选工作区时的目录浏览：本机 readdir / 节点 find，同一返回形状
+      browse.js         选工作区时的目录浏览：本机 readdir / 节点 find，同一返回形状（含 crumbs）
+      picker-paths.js   `/@fleet/<nodeId>/…` 命名空间：编解码、影子路径、精确清理
+      fleet-control.js  `fleetControl` 服务：节点增删改连断，工具唯一可及的面
       sync-switches.js  每插件开关：读本机 profile manifest、记住选择、算节点 bundle 列表
       brain-bundle.generated.js  节点组合（生成物，来自 dsh-fleet-brain）
       routing.js        身份编解码、AsyncQueue、ChangeSignal、own-property 覆写
@@ -250,12 +255,14 @@ packages/dsh-fleet/
       remote-workspaces.js  每节点一条 workspace/follow，baseline 缓存与合并
       remote-events.js  每节点一条 $events，把 api-session/* 中继进本机事件总线
       remote-control.js 每节点一条 session/control，投影块并流给每个客户端
-      decorators.js     五个命名空间的路由装饰器（session / workspace / workspaceFiles / job / terminal）+ 合并后的 control 流
+      decorators.js     五个命名空间的路由装饰器（session / workspace / workspaceFiles / job / terminal）
+                        + 合并后的 control 流 + directoryPicker 的**整体替换**
       lookups.js        workspaceFileScope lookup 覆写
       fleet.js          节点运行时状态机
     client/client.js    设置页 + 侧栏面板 + 主区页面 + 加工作区的目录选择对话框
-  locale/{en,zh}.json
-  icon.svg  docs/UPGRADE.zh.md  README.md
+  locale/{en,zh}.json  含 meta.detail 指向 docs/DETAIL*.md
+  docs/DETAIL.md  docs/DETAIL.zh.md  docs/preview.svg   插件详情页（会被安装清单检查）
+  icon.svg  README.md
   test/                  见下
 ```
 
@@ -618,6 +625,44 @@ bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，
 /fleet/api/workspaces` 再交接路径**，因为目录选择洞只回传 `path`，标题没有别的地方可放；`create`
 是幂等的，壳随后解析到的就是刚建的那一行。名称为空则走壳的廉价路径（标题由壳从文件夹名派生）。
 
+## 六之七、节点控制：一个只有一种能力的会话
+
+「节点控制模式」不是一个新会话类型，是一个 **agent preset**（`presets/node-control.patch.yml`）。
+三个部件：
+
+| 部件 | 是什么 | 为什么这样切 |
+|---|---|---|
+| `fleetControl` 服务 | `ctx.provide('fleetControl', …)`，方法 `list / add / update / remove / connect / disconnect / status` | 注册表本来就存在，只是以前只挂在 `/fleet/api` 上；工具不该去摸 HTTP |
+| `fleet_nodes` 工具 | 新入口 `@local/dsh-fleet/node-control`，只注册这一个工具 | 预设的 `config.plugins` 会整包挂载，挂整个插件等于把装饰器、看门狗、设置 API 拖进 agent 作用域 |
+| `preset-node-control` | `config.plugins` 只有 `persona` + `fleet-nodes` | 见下 |
+
+### 「其他一律拒绝」为什么是构造保证
+
+web-app 的 patch 把 host 平面上的 agent 工具行全部 `disabled: true`，所以**一个会话的工具集就是它自己那份
+preset 的 `config.plugins`**。本预设只列一个工具，这个会话就没有别的工具：没有 `bash`、没有 `read`、
+没有 web、没有子代理、没有工作流、没有 skills。不需要 `ctx.tools.restrict` —— 加了就是第二份清单，
+两份迟早不一致，而「preset 即能力全集」本来就是这套组合语义。
+
+preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么引导用户去对的地方），不负责实现它。
+
+### 密钥不能作为工具参数
+
+会话日志会原样记录工具参数。在聊天里贴密码等于把它写进历史文件，所以 `add` 只收两种**引用**：
+
+| 形式 | 含义 |
+|---|---|
+| `{ kind: 'key', path: '~/.ssh/id_ed25519' }` | 本机已存在的私钥文件 |
+| `{ kind: 'password', env: 'DSH_FLEET_NODE_PW' }` | 本机已设置的环境变量名 |
+| `{ kind: 'agent' }` | 本机 SSH agent（默认） |
+
+内联 `password` / `privateKey` 被显式拒绝（`auth-inline-refused`），并在错误里指出该去「设置 › 远程节点」。
+`readAuthReference` 读到的值直接写进 `ctx.credentials`，路径与内容都不回显。
+
+### 被控节点永远不装这套
+
+`@local/dsh-fleet` 在 `NODE_NEVER_SYNC` 里（见 §六之五）：它带的就是这个预设，节点装上就等于「被控节点能
+控制别的节点」，正好是要避免的形态。`version-unit` 与 `plugin-switch` 各有一条断言守着。
+
 ## 七、测试
 
 | 脚本 | 验证什么 | 依赖 |
@@ -640,12 +685,15 @@ bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，
 | `session-acceptance.mjs` | **像用户一样**：在远程工作区真实建 Session、真实下一条要让 agent 用 write/bash/grep 干活的指令、读回 `session/follow` 核对三条工具调用与结果、`turn/end` 是 `completed`、助手说 DONE；再用**独立 SSH 连接**读节点上的产物字节 | 运行中的 Host + 已连接节点 |
 | `terminal-acceptance.mjs` | 远程会话里的真 PTY：`environment`/`shells`/`create` 走路由后的 agent lookup、attach 首帧 snapshot、写入 `echo` 命令、读到输出与节点 ack、`close` 后从花名册消失 | 同上 |
 | `multi-node-acceptance.mjs` | 同时连两台（同一机器两个 `remoteRoot`）：侧栏两边的工区都在且 id 唯一、各自建的 Session 落到各自节点、合并列表里是两行、移除一台不影响另一台 | 同上 |
-| `artefact-acceptance.mjs` | 在真节点上跑真安装脚本：下载、校验 sha256、解压、替换、`--version`、二次安装、回滚；断言原生包是 `linux-x64` 而非 `win-x64` | 节点 + 已发布的 Release 制品 |
+| `artefact-acceptance.mjs` | 在真节点上跑真安装脚本：下载、校验 sha256、解压、替换、`--version`、二次安装、回滚；断言原生包是 `linux-x64` 而非 `win-x64`。脚本自己报 `ARTEFACT_UNAVAILABLE`（这台网络拿不到制品，exit 3）时记 **SKIP** 并打印原因 —— 实测这台节点连不上加速地址、直连只有 ~41 KiB/s，165 MiB 要 68 分钟，30 分钟上限正在起作用 | 节点 + 已发布的 Release 制品 |
 | `approval-acceptance.mjs` | **审批与提问真的走完一整圈**：节点 `approval/asked` → 本机 `$events` 上的 `waterfall` 帧（agentId 已包裹）→ 用 `$events/result` 答复 → 节点 `approval/decided` 记下所选值 → 文件真的写出；第二次改成拒绝，文件不存在；`ask_user_question` 用批量 `{answers:[{id,selected}]}` 往返 | 运行中的 Host + 已连接节点（节点需 `approval: ask`） |
 | `browser-acceptance.mjs` | 真 Chrome + CDP：渲染后的侧栏文本里**真的有**远程工区；插件自己的入口可达；截图留证。API 测试看不见"baseline 把远程行冲掉"这类问题 | 运行中的 Host + 带 `--remote-debugging-port` 的 Chrome |
-| `version-unit.mjs` | 版本闸门的每个分支（含 rc 排序）、制品 URL、安装脚本内容、每节点 layout 派生、插件开关语义（哪些 bundle 算第三方、默认关闭、节点列表顺序、状态文件容错） | 无 |
+| `version-unit.mjs` | 版本闸门的每个分支（含 rc 排序）、制品 URL、安装脚本内容、每节点 layout 派生、插件开关语义（哪些 bundle 算第三方、**默认全开**、硬排除清单、节点列表顺序、状态文件容错） | 无 |
 | `waterfall-unit.mjs` | 审批/提问中继：允许的 waterfall 才发到浏览器、拒绝与超时各自结算、节点断开时卡片被取消、问题按自己的名字转发 | 无 |
 | `workspace-browse.mjs` | 加工作区对话框背后的两个接口：本机与节点用同一形状回答、节点列的是节点的盘（`/` 没有上级、隐藏目录不列、不存在的目录报 shell 的原因）、选中的节点目录变成带包裹身份的工区 | 运行中的 Host + 已连接节点 |
+| `picker-flow.mjs` | **手机**看节点这条路由：`/@fleet` 列出节点、`/@fleet/<id>/` 列出那台机器真实的根、每个 entry 都拼回命名空间、面包屑不越界、没记过的 id 报 `fleet/node-unknown`；`workspace/create` 用这种路径把工区建在节点上，而中转 dispatch 前建在桌面盘上的那个目录被清掉，且同目录下别人放的文件不动 | 同上 |
+| `picker-paths-unit.mjs` | `/@fleet` 命名空间的编解码（两种路径规范化器都能过、大小写、盘符、重复分隔符、完整 segment 才匹配）；影子目录清理**删不掉**任何有内容的目录，也拒绝命名空间之外的路径 | 无 |
+| `install-unit.mjs` | 安装清单自洽：`dsh.bundle.patch` 每个文件都存在且已声明、`engines.dsh` 是合法范围、`files` 覆盖所有运行物、`meta.detail` 指向真实文件、打包文件里没有内网地址与私钥 | 无 |
 | `plugin-switch.mjs` | 单个插件的开关真的落到节点：包被安装或复制上去、节点自己的 bundle 列表里排在脑 bundle **之前**、常驻 host 重启后仍答得出、远程工区数量不变；关回去同样干净，异常退出也恢复开关 | 同上 |
 | 手工 §2b / §7c | 脚本走协议、用户走界面，两者都要过：真实 Chrome 里新建远程会话、敲字、发送、看到「已完成」；再看智能体协作开关、子代理历史、产物卡片的原生打开 | 运行中的 Host + 真实 Chrome |
 
