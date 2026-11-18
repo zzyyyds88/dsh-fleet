@@ -235,8 +235,8 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 
 ## 六、小改动怎么发
 
-插件是 `link:` 进 profile 的（`@local/dsh-fleet: link:D:/ProjectHub/DSHpl/packages/dsh-fleet`），
-所以改代码后：
+插件通常以两种形态之一装进 profile：npm 包（`@zzyyyds88/dsh-fleet`），或开发时的本地目录
+（`@zzyyyds88/dsh-fleet: link:D:/ProjectHub/DSHpl/packages/dsh-fleet`）。两种都改代码后：
 
 | 改的是 | 怎么生效 |
 |---|---|
@@ -248,8 +248,94 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 改完一个 Host 半的改动后，最小的验证是：
 
 ```bash
-node test/routing-unit.mjs && node test/multipart-unit.mjs && node test/picker-paths-unit.mjs
+node test/routing-unit.mjs && node test/routing-extra-unit.mjs && node test/multipart-unit.mjs \
+  && node test/picker-paths-unit.mjs && node test/install-unit.mjs
 ```
 
 然后再跑一个端到端（`host-routing.mjs` 或 `picker-flow.mjs`）。动过 `presets/` 或
 `package.json` 的清单字段，还要按 §1b 真的装一遍。
+
+### 发布一次
+
+包名是 `@zzyyyds88/dsh-fleet`，发布形态与理由见
+[ADR-0005](../../../docs/adr-0005-release-and-maintenance.zh.md)。
+
+```bash
+# 1. 版本与日志：改运行时行为 → minor，只改文档/元数据 → patch
+#    （同时改 package.json 的 version 与 CHANGELOG.md）
+# 2. 最低限度的验证（不需要节点）
+node test/run-all.mjs --layer offline --skip provision,composition
+# 3. 真装一次，两种形态都试（§1b）
+# 4. 发
+cd packages/dsh-fleet
+npm publish              # publishConfig.access 已经是 public
+npm pack --pack-destination dist   # 同时留一份 tarball 给无法访问 registry 的人
+# 5. 打 tag 与 Release，附上 tarball
+cd ../..
+git tag v<version> && git push origin main --tags
+gh release create v<version> packages/dsh-fleet/dist/*.tgz --notes "见 CHANGELOG.md"
+```
+
+**节点运行时制品与插件版本不是一回事。** 节点装的是 DSH 本身
+（`dsh-<dsh-version>-<platform>.tar.gz`），由 `scripts/publish-runtime.mjs` 产出，
+挂在以 **DSH 版本**命名的 release 下（已有一个 `v0.2.2-rc.3`）。插件升级不需要重发它；
+DSH 升级才需要。
+
+---
+
+## 七、中转插件（`ds-harness-remote`）升级后要看什么
+
+这条链此前是空白，而它**无声失效**：中转改一处行为，手机端某个功能就不响应，
+不报错、不打日志，现有端到端又全部走本机 `/api`，一条都测不到。
+
+fleet 有三处行为是**围着中转写的**，升级后逐一确认：
+
+| fleet 依赖的中转行为 | 在哪 | 变了会怎样 | 怎么确认 |
+|---|---|---|---|
+| dispatch 之前会 `mkdir -p` 传入的 workspace 路径 | `ensureHostWorkspaceDirectory` | `/@fleet` 命名空间存在的**唯一理由**就是把这个 `mkdir` 的落点关进 `<盘>:\@fleet\`。若中转改成不建目录或改建设在别处，影子清理要么多余、要么漏 | `picker-flow.mjs`：建完工作区后桌面 `\@fleet` 下没有残留；同时人工确认中转源码里那次 `mkdir` 还在 |
+| `directoryPicker/list` 被中转接管（原生后端 `requireCapability("browse")` 抛错后改用自己的实现） | 中转的 directory browser | fleet 是**整体替换**这两个方法而不是装饰。若中转改成直接调原生后端，替换仍然生效但中转那层会多绕一圈；若中转不再接管，视觉上无变化 | `workspace-browse.mjs` + `picker-flow.mjs`；人工确认中转仍在提供 `directoryPicker/list` |
+| `terminal-carrier-compat` 把 `follow`/`write`/`resize` 合成为 `terminal/attach` | 中转的 `TerminalCarrierCompat` | 手机开终端走的就是这条四跳接力。中转若改成直连别的端点，fleet 的 `attach` 代理就不再是必经之路 | `terminal.mjs`（本机 attach 全链路）+ 手机端实测；人工确认该兼容层仍在 |
+
+**判断依据不是「版本号变了」，而是这三处行为还在不在。** 中转没有声明 `engines.dsh`，
+只声明了一批 `@deepseek-ai/dsh-*` 的 peer range，所以 DSH 升级时它自己不会拒装 ——
+这也是为什么 `dispatch-seam` 那两条缝隙测试必须在**装了中转的同一个 profile** 里跑。
+
+## 八、DSH Go（安卓客户端）升级后要看什么
+
+手机能调什么，由客户端的 `harnessRemoteAllowlist` 决定，那是一份 `const Set`。
+不在表里的端点**手机连发都不发**，Host 侧放宽白名单没有任何用。所以 DSH Go 升级的风险
+不是「Host 坏了」，而是「Host 上的某个能力手机再也够不到」。
+
+**每次升级 DSH Go（或中转）之后跑一次：**
+
+```bash
+node packages/dsh-fleet/scripts/check-phone-allowlist.mjs --profile desktop
+```
+
+它把「中转放行集合」与「本机真实 wire 端点集」做双向差集。`--asar` 可指定别的安装，
+`--profile` 指定别的 profile（默认读 `DSH_PROFILE` 或 `desktop`）。
+
+**它是报告，不是断言，这是故意的。** 两个集合本来就会双向不同：放行集合里有本插件
+运行时才补上的端点、有本 profile 没组合的包；本机端点里绝大多数手机本来就不该调。
+0.2.2-rc.3 上的实测基线：
+
+```
+relay allowlist : 100
+served here     : 224  (221 from descriptors + 3 this plugin decorates)
+in allowlist, not served here : 11
+served here, phone may not call : 135
+```
+
+**已知的真实漂移（第一条记录，2026-11-18）：**
+
+| 端点 | 情况 |
+|---|---|
+| `subagents/interruptByParent` | 在中转放行集合里，本安装（0.2.2-rc.3）**不存在**。真实端点是 `subagents/interruptByUser`。**结果是手机完全无法中断子代理。** 硬边界：客户端 `const Set` 决定，Host 侧修不了 |
+| `subagents/list` | 同上，本安装不存在 —— 手机也读不到子代理列表 |
+| `schedule/update`、`schedule/delete` | 本安装不存在。手机在 0.2.2 上也不走它们（`usesTargetProtocol => target != null`），属无害遗留 |
+| `workspaceFiles/readAll`、`readRelated`、`officeToPdf/*`、`claudeCodeMods/*` | 本 profile 未组合对应包，非缺陷 |
+| `$events/result` | Gateway 内部端点，不对应任何 descriptor，应从此清单排除（脚本目前会列出它，读时忽略） |
+
+**发现新的漂移时**：先判断它是「上游改了名」还是「本 profile 没组合」，前者要评估
+是否能换用手机的另一个端点承载，后者在表里加一行即可。两条都写进上面这张表。与手机相关的
+硬边界另见 [ADR-0003](../../../docs/adr-0003-phone-control.zh.md) §六 A。
