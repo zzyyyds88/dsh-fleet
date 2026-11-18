@@ -33,6 +33,12 @@
 `gateway.dispatch`，而 fleet 把 override 装在同一批 service 实例上，所以**混排与路由对手机
 自动生效**，两个插件不需要互相知道对方存在。
 
+手机入口需要 fleet 额外做四件事，设计与取舍见 [ADR-0004](adr-0004-node-control-and-picker.zh.md)：
+节点路径用 `/@fleet/<nodeId>/…` 命名空间（于是中转 dispatch 前的 `mkdir` 落点被限制在一个可精确
+清理的位置）、`directoryPicker` 的 `list`/`createDirectory` 由 fleet **整体接管**（原生后端在桌面
+上是 `native`，装饰根本调不到）、一个只有 `fleet_nodes` 工具的「节点控制」预设、以及符合官方
+`install_bundle` 的清单形态。
+
 ---
 
 ## 二、形态
@@ -120,7 +126,8 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 | `session/control` | **合并** | Host 级、每连接一条，不是按 Session 路由：本地流 + 每个节点的投影块，并成一帧 baseline 再串增量 |
 | `$events`（网关自有端点） | **中继** | 节点的 `api-session/*` 事件重新在本机 emit，身份包成本地形式；同一流上的 waterfall 用 `next` 答掉 |
 | `workspace/follow` | **合并** | 一条流里同时推送本地 baseline 与每个节点 baseline；之后再串各自增量 |
-| `workspace/create` | **按路径路由** | 绝对 POSIX 路径逐节点尝试（节点侧 `realpath` 校验必须通过） |
+| `workspace/create` | **按路径路由** | `/@fleet/<nodeId>/…` 直接定节点（见下）；裸 POSIX 路径逐节点尝试（节点侧 `realpath` 校验必须通过）。成功后清理中转 dispatch 前 `mkdir` 出来的幽灵目录 |
+| `directoryPicker/list`、`createDirectory` | **整体替换，不是装饰** | 原生后端在桌面上解析成 `native`，`list` 会 `requireCapability("browse")` 抛错，中转随即改用自己那份实现 —— 只做装饰永远调不到。见下 |
 | `workspace/rename` 等变更 | **按 owner 转发** | 按 workspaceId 找节点 |
 | `workspaceFiles/{list,stat,read,…}` | **路由** | 靠缝隙二解析出节点，payload 用 `workspaceFileScopeId` |
 | `agentTeams/setEnabled` | **按 owner 转发** | 形参是 `Agent`，但装饰器先用 `agent.id` 解出节点再转发，见下 |
@@ -145,6 +152,28 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 被界面调到的那些，逐条判定"该转发还是该保持本地"，而不是等用户遇到再说。
 
 `workspace/create` 的按路径路由有个现实理由：**本地目录选择器只能浏览本机**，永远选不到节点上的 `/root/project`。所以远程工作区从 `/fleet/api/workspaces` 加入（设置页节点行展开后的输入框），它在节点上 `workspace/create`，再把结果包装成本地身份还回来。
+
+### 节点路径的语法位置：`/@fleet/<nodeId>/…`
+
+`ds-harness-remote` 的手机端只会说「本机绝对路径」，节点路径必须挤进同一套语法。用
+`/@fleet` 前缀（细节与取舍见 [ADR-0004](adr-0004-node-control-and-picker.zh.md) §二）：
+
+```
+/@fleet                       → 节点列表
+/@fleet/<nodeId>/             → 那台节点的文件系统根
+/@fleet/<nodeId>/root/proj    → 那台节点上的 /root/proj
+```
+
+三条理由，每条都能被否证：
+
+- `fleet://x` **不行**：win32 上 `isAbsolute` 为 false，中转 dispatch 之前的
+  `ensureHostWorkspaceDirectory` 会先抛 `INVALID_MESSAGE`，fleet 收不到请求；
+- 只做「逐节点试」不行：只能选已存在的目录，多台同名路径谁先谁得；
+- `/@fleet` 让中转那次 `mkdir` 的落点被限制在 `<盘>:\@fleet\` 之下 —— 于是清理是**精确的**
+  （自底向上 `rmdir`，`ENOTEMPTY` 就停），不是靠 mtime 或「目录为空」猜出来的。
+
+`browse.js` 的 `listLocal` 因此补了 `crumbs` 字段：手机端的面包屑要能读成「主目录 / 节点名 / root / proj」，
+而原生后端的 listing 形状里没有这一段。
 
 ### 形参里是 `Agent` 的两个例外
 
@@ -506,11 +535,23 @@ profile 名也按 root 派生（`~/.dsh-fleet` 仍是 `fleet`，`~/.dsh-fleet-b`
 bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，`@deepseek-ai/*`、
 `@local/dsh-fleet`、`@local/dsh-fleet-brain` 排除（前两类是产品本身，后一个正是「节点成为大脑」）。
 
-### 默认关闭，因为节点是另一台机器
+### 默认全开，另有一份硬排除清单
 
-`dsh-base` 是节点的底座，大脑 bundle 是它的减法，二者不是选项。其余插件默认 **不发**：一个插件带来
-自己的依赖树和副作用，仅仅因为本机装了就让每台节点都收到，等于没有决定。开关打开的含义是「它也
-在那台机器上运行」，这一条要求真正能落地：
+`dsh-base` 是节点的底座，大脑 bundle 是它的减法，二者不是选项。其余插件默认**下发**：这台机器装了、
+起了作用，节点就是同一个工作面的延伸。四个名字**永远不发**，写在 `NODE_NEVER_SYNC` 里而不是靠前缀
+规则推断：
+
+| 名字 | 为什么 |
+|---|---|
+| `@local/dsh-fleet` | 桌面端插件；而且它的「节点控制」预设里是增删节点的工具 —— 被控节点能控制别的节点，正是明确否定过的形态 |
+| `@local/dsh-fleet-brain` | 节点侧的减法本身，已经在列表里 |
+| `ds-harness-remote` | 会让节点变成第二个中转 Host，多开一个入口 |
+| `@dsh-remote/plugin` | 同上，旧包名 |
+
+`isThirdParty` 的 `@deepseek-ai/*` 规则仍然保留：它回答「这是不是产品本身」，
+和「这个不能进节点」是两件事。
+
+开关打开的含义是「它也在那台机器上运行」，这一条要求真正能落地：
 
 1. 在节点上 `npm install <name>@<本机 manifest 里的 spec>`（沿用本机的版本区间，两边同一个 release）；
 2. 再写节点的 `dsh.profile.bundles`，顺序是 **base → 你打开的插件 → 大脑 bundle**（bundle 按列表

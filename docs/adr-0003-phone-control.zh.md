@@ -154,16 +154,17 @@ at the official attach stream」），而 fleet 的 `terminal/attach`（`host/de
 
 1. **版本钉住**。`latest` 会在上游发版时静默变化，而客户端（DSH Go）是安装版、不可能跟着升。
    改成显式 tag（当前 `0.5.21`），并在升级前先看上游 `docs/compatibility.zh.md` 的 peer range。
-2. **适配插件**。理由不是扩白名单（见 §2.4），而是 Host 侧的语义正确性，至少三条：
+2. **适配插件。** 理由不是扩白名单（见 §2.4），而是 Host 侧的语义正确性，三条都已在 fleet 侧解决
+   （实现见 [ADR-0004](adr-0004-node-control-and-picker.zh.md)）：
    - **`workspace/create` 会在 Windows 上造出垃圾目录。** 中转插件的 `ensureHostWorkspaceDirectory`
-     在 dispatch 之前执行 `mkdir(path, {recursive:true})`。win32 实测：
-     `isAbsolute('/root/foo') → true`、`resolve('/root/foo') → D:\root\foo`、
-     `parse('/root/foo').root → '/'`，所以那道「非根目录」的检查拦不住。手机在节点工区里手输
-     `/root/foo` 建工区 → 桌面 D 盘真的多出 `\root\foo` → 之后 fleet 才把请求路由到节点。
-     功能看着正常，磁盘被污染。**只能在 fork 里修**，因为这段代码在 dispatch 之前，
-     fleet 的装饰器还没被调到。
-   - **`directoryPicker/list` 没被 fleet 路由**（下节）。手机在节点工区里浏览目录，看到的是桌面磁盘。
-   - **失败要能解释。** 中转插件的错误原样透传，`WORKSPACE_PATH_DENIED` 之类对手机用户没有意义。
+     在 dispatch 之前执行 `mkdir(path, {recursive:true})`，win32 实测
+     `isAbsolute('/root/foo') → true`、`resolve('/root/foo') → D:\root\foo`。
+     **解法是把路径形式换掉**：手机改用 `/@fleet/<nodeId>/<节点路径>`，落点被限制在
+     `<盘>:\@fleet\` 之下，fleet 在工作区建好后自底向上 `rmdir` 空目录链 —— 精确、非启发式。
+   - **`directoryPicker/list` 必须由 fleet 整体接管**（不是「装饰」）：桌面上 `directory-picker-auto`
+     解析成 native 后端，原生 `list` 会 `requireCapability("browse")` 抛错，中转随即改用自己那份
+     实现，fleet 的装饰根本调不到。fleet 覆盖 `list`/`createDirectory` 两个方法，自己用 SSH 列节点盘。
+   - **失败要能解释。** 节点离线返回 `fleet/node-offline`，而不是协议层的空列表。
 3. **是否 fork 成自有包**：见 §六 待决项 B。用户已定：**fork 研究**。
 
 ### 4.4 安卓端（结论：不拆 DSH Go）
@@ -187,7 +188,7 @@ at the official attach stream」），而 fleet 的 `terminal/attach`（`host/de
 | P0-3 | 手机在节点会话下发一条真指令 | 节点真的执行；独立 SSH 读到产物字节 |
 | P0-4 | 手机的审批卡从节点到达 | 节点触发审批 → 手机弹出卡片 → 答复 → 节点继续 |
 | P0-5 | 手机的终端连到节点 PTY | 手机开终端 → 四跳接力 → 在节点 shell 里 `hostname` 得到节点的名字 |
-| P1-1 | fork 中转插件，修 `ensureHostWorkspaceDirectory` 的 Windows 误伤 | 手机手输 `/root/x` 建工区，桌面磁盘**不**出现 `\root\x`；节点上出现该工区 |
+| P1-1 | **在 fleet 里**消掉 `ensureHostWorkspaceDirectory` 的 Windows 误伤（不需要 fork，见 ADR-0004 §三） | 手机用 `/@fleet/<id>/root/x` 建工区，桌面 `<盘>:\@fleet` **不存在**；节点上出现该工区 |
 | P1-2 | fleet 路由 A 类 22 条（按 §2.2 表） | 每条一个断言：手机拿到的是节点答案，不是桌面答案 |
 | P2-1 | 中转服务端版本钉住 | `docker inspect` 的镜像 tag 不再是 `latest`；重启后 DSH Go 仍能连 |
 | P2-2 | 失败可解释 | 故意停掉节点，手机端得到的文案能指向「节点离线」而不是协议错误 |
@@ -202,17 +203,24 @@ P0-4/P0-5 之所以升到 P0：它们是「手机能不能真用」的分水岭�
 
 **源码核实后的准确清单**（不是猜的，见 .scratch/research/FINDINGS.md）：
 
-真正做不到的只有 **2 项**：
+真正做不到的只有 **1 项**：
 
 | 能力 | 为什么做不到 |
 |---|---|
 | 手机上**新建**目录 | `directoryPicker/createDirectory` 不在 DSH Go 的 allowlist；`workspaces_api.dart:115` 的 `canCreateDirectories` 在 relay 上恒为 false，UI 直接隐藏入口 |
-| 节点专属**模型目录** | `session/modelCatalog` 的上游 descriptor 无身份参数（`parameters: []`），且 fleet 已注释决定保持本地；手机给节点会话列的是桌面模型 |
 
-**可以修、只是还没接的（22 条，属于 A 类）**：goals 六个、messageFeedback 三个、
+**节点专属模型目录不是缺陷。** 早前把 `session/modelCatalog` 列为硬边界是误判：provisioning 把
+桌面的 `llm-*` 行与 `agent-default-model` 复制成节点自己的 patch overlay，两侧名册同源（已在节点上
+逐行核对），所以手机给节点会话看到的**就是节点真在用的模型**。真正要补的是 `session/selectModel`
+（请求里带 `sessionId`），不路由的话给节点会话换模型会打到本地一个不存在的会话上。
+
+**可以修、只是还没接的（属于 A 类）**：goals 六个、messageFeedback 三个、
 `subagents/{prompt,interruptByParent}`、`commands/execute`、`fileReferences/list`、
-`sessionReferenceResolver/candidates`、`schedule/{catalog,history,update,delete}`、
-`directoryPicker/list`、`pluginInventory/list`、`userQuestions/{answer,attachWait}`。
+`sessionReferenceResolver/candidates`、`schedule/{catalog,list,history,view,edit,run,delete,create}`、
+`directoryPicker/list`、`pluginInventory/list`、`userQuestions/{answer,attachWait}`、`session/selectModel`。
+
+`schedule/update` 不在其中：手机在 0.2.2 上根本不走它（`usesTargetProtocol => target != null`，
+而 `create` 总会写入 target），上游也没有这个端点。
 
 **应当保持本地（18 条）**：`agentPresets/*`、`credentials/*`、`llm/listProviders`、
 `permissionPresets/catalog`、`pluginManager/*`、`settings/*`、`skills/list`、`officeToPdf/render` ——
@@ -239,10 +247,10 @@ P0-4/P0-5 之所以升到 P0：它们是「手机能不能真用」的分水岭�
 
 | 方案 | 代价 | 风险 |
 |---|---|---|
-| 保持官方 `ds-harness-remote@0.6.5`，把 Host 侧修正全放进 fleet | 不改第三方代码；但 §4.3 里三条属于中转插件的内部行为，fleet 拿不到执行点 | `ensureHostWorkspaceDirectory` 的 Windows 误伤**修不了**，只能靠文档提醒 |
-| Fork 成自有包（MIT 允许），只改必要的三处 | 多一个需要跟随上游升级的仓库 | 上游改协议时要做合并 |
+| 保持官方 `ds-harness-remote@0.6.5`，把 Host 侧修正全放进 fleet | 不改第三方代码 | 无 —— ADR-0004 §二/§三 已经把「幽灵目录」和「选择器被中转接管」两处都在 fleet 里解决掉（用 `/@fleet` 命名空间让 `mkdir` 落点集中，再精确 `rmdir`） |
 
 只 fork 插件、不动服务端（服务端协议与实现无关，用官方镜像 + 钉版本即可）。
+当前**不需要 fork**：原本以为只能在 fork 里修的那处，换一个路径形式就落进了 fleet 能管的位置。
 
 ### C. 是否同时支持「手机直连节点」
 
