@@ -10,7 +10,7 @@
  * Nothing here translates paths, mirrors files or synthesises results. Every
  * value crossing this boundary is the remote Host's own answer.
  *
- * @module @local/dsh-fleet/host/remote-gateway
+ * @module @zzyyyds88/dsh-fleet/host/remote-gateway
  */
 import { randomUUID } from 'node:crypto'
 import { decodeGatewayAnswer } from './multipart.js'

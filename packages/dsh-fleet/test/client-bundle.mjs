@@ -21,7 +21,7 @@ if (base === undefined || token === undefined) {
   process.exit(2)
 }
 
-const PLUGIN_ID = '@local/dsh-fleet/client.js'
+const PLUGIN_ID = '@zzyyyds88/dsh-fleet/client.js'
 const log = message => process.stderr.write(`[client-bundle] ${message}\n`)
 const failures = []
 const check = (ok, label, detail) => {
@@ -59,7 +59,7 @@ const sourcePath = fileURLToPath(new URL('../src/client/client.js', import.meta.
 const source = readFileSync(sourcePath, 'utf8')
 check(bundle.text.includes(source), 'the served bundle contains this plugin’s source verbatim',
   `${String(source.length)} characters`)
-check(bundle.text.includes(`id: '@local/dsh-fleet'`), 'the module declares its plugin id')
+check(bundle.text.includes(`id: '@zzyyyds88/dsh-fleet'`), 'the module declares its plugin id')
 
 // ---- 3. execute that module in a stub loader ----------------------------
 const registered = []
@@ -103,7 +103,7 @@ try {
   loadError = error
 }
 check(loadError === undefined, 'the client module evaluates', loadError?.message?.slice(0, 300))
-check(registered.includes('@local/dsh-fleet'), 'the module announces this plugin id',
+check(registered.includes('@zzyyyds88/dsh-fleet'), 'the module announces this plugin id',
   registered.join(','))
 
 if (typeof factory !== 'function') {

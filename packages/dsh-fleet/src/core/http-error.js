@@ -1,7 +1,7 @@
 /**
  * The error shape every `/nodes` route answers with, so a browser surface can
  * branch on `code` instead of parsing prose.
- * @module @local/dsh-fleet/core/http-error
+ * @module @zzyyyds88/dsh-fleet/core/http-error
  */
 
 /**

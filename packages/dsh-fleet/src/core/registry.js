@@ -5,7 +5,7 @@
  * remote node's data never mixes with local DSH sessions, credentials or
  * workspaces. Secrets never appear here — only the credential reference kind.
  *
- * @module @local/dsh-fleet/core/registry
+ * @module @zzyyyds88/dsh-fleet/core/registry
  */
 import { randomBytes } from 'node:crypto'
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'

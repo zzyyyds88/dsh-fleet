@@ -7,7 +7,7 @@
  * enough of the protocol for the carrier — text frames, ping/pong, close — and
  * nothing else. No extensions, no fragmentation on send, no permessage-deflate.
  *
- * @module @local/dsh-fleet/host/ws
+ * @module @zzyyyds88/dsh-fleet/host/ws
  */
 import { randomBytes } from 'node:crypto'
 

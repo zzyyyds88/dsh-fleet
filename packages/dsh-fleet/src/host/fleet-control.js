@@ -14,7 +14,7 @@
  * arguments are recorded verbatim in the session log, so accepting a pasted password
  * would mean writing it to disk.
  *
- * @module @local/dsh-fleet/host/fleet-control
+ * @module @zzyyyds88/dsh-fleet/host/fleet-control
  */
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'

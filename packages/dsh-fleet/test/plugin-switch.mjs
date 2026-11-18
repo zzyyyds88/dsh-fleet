@@ -99,7 +99,7 @@ check(rows.every(row => typeof row.bundle === 'string' && row.bundle.length > 0)
   'each row is a bundle name')
 check(rows.every(row => !row.bundle.startsWith('@deepseek-ai/')),
   'no upstream bundle is offered as a choice')
-check(rows.every(row => row.bundle !== '@local/dsh-fleet-brain' && row.bundle !== '@local/dsh-fleet'),
+check(rows.every(row => row.bundle !== '@local/dsh-fleet-brain' && row.bundle !== '@zzyyyds88/dsh-fleet'),
   'neither the brain bundle nor this plugin itself is a choice')
 // Never-sync is a separate answer from "third party": the relay plugin is a plugin the
 // user installed, and it must still never be offered. Listing it would mean a node could

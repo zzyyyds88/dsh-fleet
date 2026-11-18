@@ -9,7 +9,7 @@
  *     is exactly what makes a routing bug look like a transport bug.
  *   - Frames can arrive fragmented across TCP reads, so the decoder must buffer.
  *
- * @module @local/dsh-fleet/test/carrier
+ * @module @zzyyyds88/dsh-fleet/test/carrier
  */
 import { randomBytes } from 'node:crypto'
 import { connect as netConnect } from 'node:net'
@@ -213,7 +213,7 @@ export async function clientBundles(base, cookie) {
  * The client-plugin bundle that contains one plugin id.
  * @param {string} base
  * @param {string} cookie
- * @param {string} pluginId - e.g. `@local/dsh-fleet/client.js`.
+ * @param {string} pluginId - e.g. `@zzyyyds88/dsh-fleet/client.js`.
  * @returns {Promise<{ url: string, text: string } | undefined>}
  */
 export async function clientBundleFor(base, cookie, pluginId) {

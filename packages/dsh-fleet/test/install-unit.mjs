@@ -37,7 +37,27 @@ const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 
 ok(typeof manifest.name === 'string' && manifest.name.length > 0, 'the package has a name', manifest.name)
 ok(typeof manifest.version === 'string' && /^\d+\.\d+\.\d+(?:-[\w.]+)?$/u.test(manifest.version), 'the version is a real semver', manifest.version)
-ok(manifest.private === true, 'the package is private: it is distributed as a directory or a tarball, never published')
+// Published now, so the fields a registry page reads have to be there. `private` is the
+// one that matters most: it makes `npm publish` refuse outright.
+ok(manifest.private !== true, 'the package is publishable: `private` would make npm publish refuse',
+  String(manifest.private))
+ok(manifest.license === 'MIT', 'it declares the licence the README and LICENSE file state', String(manifest.license))
+for (const field of ['repository', 'homepage', 'bugs', 'author', 'keywords']) {
+  ok(manifest[field] !== undefined, `${field} is declared, so the registry page links back here`, JSON.stringify(manifest[field]))
+}
+ok(manifest.repository?.url?.includes('github.com/zzyyyds88/dsh-fleet'),
+  'the repository field names this repository', String(manifest.repository?.url))
+ok(manifest.publishConfig?.access === 'public',
+  'a scoped package defaults to restricted; access must be published explicitly',
+  JSON.stringify(manifest.publishConfig))
+// The name is the one npm can actually accept. `@local` looked like a convention but is
+// another organisation's scope, so installing from a registry could never work under it.
+ok(manifest.name === '@zzyyyds88/dsh-fleet' || !String(manifest.name).startsWith('@local/'),
+  'the name is inside a scope this project controls', manifest.name)
+ok(manifest.name === (readFileSync(join(root, 'src', 'client', 'client.js'), 'utf8')
+  .match(/id: '([^']+)',/u)?.[1] ?? ''),
+  'the client plugin id equals the package name, as DSH requires',
+  manifest.name)
 
 // ---- dsh.bundle.patch -----------------------------------------------------
 

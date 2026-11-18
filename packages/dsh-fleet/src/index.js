@@ -1,5 +1,5 @@
 /**
- * `@local/dsh-fleet` Host half: remote Linux machines as first-class workspaces.
+ * `@zzyyyds88/dsh-fleet` Host half: remote Linux machines as first-class workspaces.
  *
  * The architectural choice this plugin makes is the one that decides whether
  * remote tools work: **the brain stays on the node**. Each machine runs its own
@@ -23,7 +23,7 @@
  * resolves at dispatch time and ignores during discovery. Undecorated endpoints
  * keep their exact upstream behaviour.
  *
- * @module @local/dsh-fleet
+ * @module @zzyyyds88/dsh-fleet
  */
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'

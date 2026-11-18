@@ -21,7 +21,7 @@
  *     module can re-publish one whenever the node set changes — which is exactly
  *     what makes a node connecting mid-session appear without a page reload.
  *
- * @module @local/dsh-fleet/host/remote-control
+ * @module @zzyyyds88/dsh-fleet/host/remote-control
  */
 import { AsyncQueue, decodeRemoteId, encodeRemoteId } from './routing.js'
 

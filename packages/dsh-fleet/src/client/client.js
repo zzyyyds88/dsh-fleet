@@ -1,5 +1,5 @@
 /**
- * Browser half of `@local/dsh-fleet`.
+ * Browser half of `@zzyyyds88/dsh-fleet`.
  *
  * It adds two surfaces and nothing else:
  *
@@ -13,10 +13,11 @@
  * ordinary sidebar by the Host half, so opening a remote project is the same
  * gesture as opening a local one. This surface only manages the connections.
  *
- * @module @local/dsh-fleet/client
+ * @module @zzyyyds88/dsh-fleet/client
  */
 window.__ModuleLoader__.load({
-  id: '@local/dsh-fleet',
+  // DSH requires this id to equal the package name: the module table is keyed by it.
+  id: '@zzyyyds88/dsh-fleet',
   factory(require) {
     const React = require('react')
     const h = React.createElement

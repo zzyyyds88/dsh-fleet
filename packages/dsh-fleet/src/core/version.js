@@ -20,7 +20,7 @@
  *   that means somebody pointed an old desktop at a machine another (newer) desktop
  *   already provisioned, and the local side cannot know what rows it wrote.
  *
- * @module @local/dsh-fleet/core/version
+ * @module @zzyyyds88/dsh-fleet/core/version
  */
 
 /** One parsed version, with the pre-release fields kept for ordering. */

@@ -1,7 +1,7 @@
 /**
  * The one tool a node-control session has: `fleet_nodes`.
  *
- * This module is deliberately a **separate entry point** (`@local/dsh-fleet/node-control`)
+ * This module is deliberately a **separate entry point** (`@zzyyyds88/dsh-fleet/node-control`)
  * rather than part of the Host half. An agent preset's `config.plugins` names packages,
  * and a preset that mounted the whole fleet plugin would drag the routing decorators,
  * the SSH watchdog and the settings API into an agent scope — where they do not belong
@@ -14,7 +14,7 @@
  * plugin follows, and it is what keeps a preset working across an upstream patch
  * release that reorganises its type-only exports.
  *
- * @module @local/dsh-fleet/node-control
+ * @module @zzyyyds88/dsh-fleet/node-control
  */
 
 /** Stable Cordis plugin name. */

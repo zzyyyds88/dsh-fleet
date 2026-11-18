@@ -20,7 +20,7 @@
  * **without restarting it**. A `--patch` overlay is not watched (measured; see
  * `docs/adr-0001-node-config-carrier.zh.md`).
  *
- * @module @local/dsh-fleet/remote/daemon
+ * @module @zzyyyds88/dsh-fleet/remote/daemon
  */
 import { createHash } from 'node:crypto'
 import { SSH_FAILURE, toSshError } from '../ssh/connection.js'
@@ -661,7 +661,7 @@ echo "FLEET_NPM_EXIT=$?"
     // Ensure the patch exists before the first launch: the host reads it as a layer,
     // and an absent file would simply mean "no configuration yet".
     const ensure = await this.connection.exec({
-      argv: ['sh', '-c', `mkdir -p ${this.layout.profile} && [ -f ${this.layout.profilePatch} ] || printf '# owned by @local/dsh-fleet\\n[]\\n' > ${this.layout.profilePatch}`],
+      argv: ['sh', '-c', `mkdir -p ${this.layout.profile} && [ -f ${this.layout.profilePatch} ] || printf '# owned by @zzyyyds88/dsh-fleet\\n[]\\n' > ${this.layout.profilePatch}`],
       timeoutMs: 15_000,
     })
     if (ensure.code !== 0) {

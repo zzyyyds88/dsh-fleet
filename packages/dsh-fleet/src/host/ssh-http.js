@@ -6,7 +6,7 @@
  * connection; there is no second transport and no listening port on either
  * side.
  *
- * @module @local/dsh-fleet/host/ssh-http
+ * @module @zzyyyds88/dsh-fleet/host/ssh-http
  */
 import { request as httpRequest } from 'node:http'
 

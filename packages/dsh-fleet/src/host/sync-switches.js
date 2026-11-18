@@ -5,7 +5,7 @@
  * facts about this desktop (its profile manifest and its installed packages) and the file
  * that remembers the answers.
  *
- * @module @local/dsh-fleet/host/sync-switches
+ * @module @zzyyyds88/dsh-fleet/host/sync-switches
  */
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'

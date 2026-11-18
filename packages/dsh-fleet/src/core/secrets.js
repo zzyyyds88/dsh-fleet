@@ -7,7 +7,7 @@
  * service under a key owned by this plugin, so it is written through the same
  * durable, permission-guarded store the rest of the application uses.
  *
- * @module @local/dsh-fleet/core/secrets
+ * @module @zzyyyds88/dsh-fleet/core/secrets
  */
 
 /** Provider name this plugin registers its credential records under. */

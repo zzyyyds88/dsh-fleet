@@ -7,7 +7,7 @@
  * connection started by one path is visible to the others without a second
  * bookkeeping channel.
  *
- * @module @local/dsh-fleet/host/fleet
+ * @module @zzyyyds88/dsh-fleet/host/fleet
  */
 import { NodeRegistry } from '../core/registry.js'
 import { SecretStore, authFromSecret } from '../core/secrets.js'

@@ -9,7 +9,7 @@
  * nothing in common but their answer, and pretending otherwise is how a path separator
  * or a permission error ends up handled wrongly on one of the two sides.
  *
- * @module @local/dsh-fleet/host/browse
+ * @module @zzyyyds88/dsh-fleet/host/browse
  */
 import { mkdir, readdir, stat, realpath } from 'node:fs/promises'
 import { homedir } from 'node:os'

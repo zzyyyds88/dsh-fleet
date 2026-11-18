@@ -16,7 +16,7 @@
  * explicit: `workspaceFiles/readBytes` (an image preview, a PDF, any binary file)
  * answers this way, and every one of those has to work on a remote workspace.
  *
- * @module @local/dsh-fleet/host/multipart
+ * @module @zzyyyds88/dsh-fleet/host/multipart
  */
 
 /** The subset of an HTTP response this decoder needs. */
