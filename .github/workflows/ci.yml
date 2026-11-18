@@ -1,0 +1,51 @@
+name: CI
+
+# Only the suites that need nothing but Node.
+#
+# `run-all.mjs` has three layers. The offline layer splits again: `provision` and
+# `composition` read `app.asar` through Electron's patched `fs`, and the contract and e2e
+# layers need a running Host and an SSH-reachable node. Everything this workflow runs
+# imports only `node:` builtins and relative paths, so it needs no dependencies installed —
+# `ssh2` is imported by `src/ssh/connection.js` alone, and none of these suites reach it.
+#
+# Verified by moving `node_modules` aside and running all eight with plain Node 24.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    name: Offline suites (no DSH, no node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Deliberately no install step: if a suite starts needing a dependency this fails,
+      # and that is the signal to either vendor the dependency or move the suite out of
+      # this list. Installing `ssh2` here would hide that.
+      - name: Unit suites
+        working-directory: packages/dsh-fleet
+        run: |
+          set -e
+          node test/routing-unit.mjs
+          node test/routing-extra-unit.mjs
+          node test/multipart-unit.mjs
+          node test/waterfall-unit.mjs
+          node test/version-unit.mjs
+          node test/picker-paths-unit.mjs
+          node test/install-unit.mjs
+          node test/fleet-control-unit.mjs
+
+      - name: The manifest still packs
+        working-directory: packages/dsh-fleet
+        run: npm pack --dry-run
