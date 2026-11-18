@@ -653,8 +653,25 @@ let host
  *  node a dozen times and turn a fast run into a slow one for no extra proof. */
 async function ensureHost() {
   if (host !== undefined) return host
+  const { authenticate } = await import('./carrier.mjs')
   if (reuseHost !== undefined && reuseToken !== undefined) {
-    host = { base: reuseHost, token: reuseToken, stop: () => {}, reused: true }
+    // A reused Host still has to have its nodes up: `host-routing` and `workspace-flow`
+    // assert on merged remote rows, and a node left `idle` makes them fail with "0 of N
+    // rows" — a false failure that reads exactly like a routing regression. Measured:
+    // reusing a freshly launched Host without connecting first failed those two suites,
+    // and both passed on the same Host seconds later.
+    let reusedCookie
+    try {
+      reusedCookie = await authenticate(reuseHost, reuseToken)
+    } catch (error) {
+      host = { error: `the reused Host refused the launch token: ${String(error?.message ?? error)}` }
+      return host
+    }
+    const reusedProblem = await connectNodes(reuseHost, reusedCookie)
+    host = {
+      base: reuseHost, token: reuseToken, cookie: reusedCookie, stop: () => {}, reused: true,
+      ...(reusedProblem === undefined ? {} : { error: reusedProblem }),
+    }
     return host
   }
   const launched = await launchHost()
@@ -662,7 +679,6 @@ async function ensureHost() {
     host = { error: launched.error }
     return host
   }
-  const { authenticate } = await import('./carrier.mjs')
   let cookie
   try {
     cookie = await authenticate(launched.base, launched.token)
