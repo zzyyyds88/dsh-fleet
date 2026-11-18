@@ -50,16 +50,20 @@ export function nodeConfig() {
 }
 
 /**
- * Run one command on the node, bypassing DSH entirely.
+ * Run one command on the node, keeping its exit code and both streams.
  *
- * The tests use this as an independent witness: the plugin says a file was
- * written, and this reads it over a separate connection to prove it.
+ * `nodeExec` returns stdout only, which is enough when the command is a query and a silence
+ * means "no such file". It is **not** enough for a script: a shell that exits 3 having
+ * printed its reason to stderr looks exactly like a shell that succeeded and printed
+ * nothing, and the difference is the whole diagnosis.
+ *
  * @param {string} command
  * @param {object} [options]
+ * @param {number} [options.timeoutMs] - close the channel after this long.
  * @param {ReturnType<typeof nodeConfig>} [options.config] - reuse a resolved config.
- * @returns {Promise<string>}
+ * @returns {Promise<{ code: number | undefined, stdout: string, stderr: string, timedOut: boolean }>}
  */
-export async function nodeExec(command, options = {}) {
+export async function nodeRun(command, options = {}) {
   const client = new Client()
   const config = options.config ?? nodeConfig()
   await new Promise((resolve, reject) => {
@@ -70,11 +74,43 @@ export async function nodeExec(command, options = {}) {
       client.exec(command, (error, stream) => {
         if (error) return reject(error)
         const out = []
+        const err = []
+        let timedOut = false
+        const timer = options.timeoutMs === undefined
+          ? undefined
+          : setTimeout(() => { timedOut = true; stream.close() }, options.timeoutMs)
         stream.on('data', chunk => out.push(chunk))
-        stream.on('close', () => resolve(Buffer.concat(out).toString('utf8')))
+        stream.stderr.on('data', chunk => err.push(chunk))
+        stream.on('close', (code) => {
+          if (timer !== undefined) clearTimeout(timer)
+          resolve({
+            code: typeof code === 'number' ? code : undefined,
+            stdout: Buffer.concat(out).toString('utf8'),
+            stderr: Buffer.concat(err).toString('utf8'),
+            timedOut,
+          })
+        })
       })
     })
   } finally {
     client.end()
   }
+}
+
+/**
+ * Run one command on the node, bypassing DSH entirely, returning its stdout.
+ *
+ * The tests use this as an independent witness: the plugin says a file was written, and
+ * this reads it over a separate connection to prove it. Use {@link nodeRun} when the exit
+ * code or stderr matters.
+ *
+ * @param {string} command
+ * @param {object} [options]
+ * @param {number} [options.timeoutMs] - close the channel after this long.
+ * @param {ReturnType<typeof nodeConfig>} [options.config] - reuse a resolved config.
+ * @returns {Promise<string>}
+ */
+export async function nodeExec(command, options = {}) {
+  const result = await nodeRun(command, options)
+  return result.stdout
 }
