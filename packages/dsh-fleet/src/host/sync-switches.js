@@ -229,7 +229,8 @@ export class SyncSwitches {
    *
    * Setting a switch back to its default removes the override instead of storing the same
    * value twice — that keeps the file meaning "what I changed", so an upgrade that flips a
-   * default still reaches the user who never touched it.
+   * default still reaches the user who never touched it. The default is now **on**, so the
+   * value worth storing is the `false`.
    * @param {string} bundle
    * @param {boolean} sync
    */
@@ -240,7 +241,7 @@ export class SyncSwitches {
         { code: 'plugin-not-found' },
       )
     }
-    if (sync === false) delete this.overrides[bundle]
+    if (sync === true) delete this.overrides[bundle]
     else this.overrides[bundle] = { sync }
     this.#write()
     return this.list().find(row => row.bundle === bundle)

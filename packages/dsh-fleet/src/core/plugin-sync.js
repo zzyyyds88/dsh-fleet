@@ -29,11 +29,44 @@ export const UPSTREAM_BUNDLES = Object.freeze([
 export const BRAIN_PACKAGE = '@local/dsh-fleet-brain'
 
 /**
+ * Packages a node must never receive, whichever list they appear on.
+ *
+ * This is a **hard exclusion**, not a prefix rule: each name answers a different question
+ * and inferring them from a namespace would miss the next one DSH adds.
+ *
+ * - `@local/dsh-fleet` is the desktop half. Its preset holds the node-management tool, so
+ *   a node that mounted it could manage other nodes — the one shape of control a node must
+ *   not have.
+ * - `@local/dsh-fleet-brain` is the node-side subtraction itself, already in the list.
+ * - `ds-harness-remote` (and the older `@dsh-remote/plugin`) makes a Host reachable by a
+ *   phone relay. A node is reached *through* this desktop; a second relay entry point on a
+ *   node is exactly the surface nobody asked for.
+ */
+export const NODE_NEVER_SYNC = Object.freeze([
+  '@local/dsh-fleet',
+  '@local/dsh-fleet-brain',
+  'ds-harness-remote',
+  '@dsh-remote/plugin',
+])
+
+/**
+ * Whether a bundle has to stay off a node regardless of any switch.
+ * @param {string} name
+ * @returns {boolean}
+ */
+export function isNeverSynced(name) {
+  return typeof name === 'string' && NODE_NEVER_SYNC.includes(name)
+}
+
+/**
  * Whether a bundle is one a person installed rather than part of the product.
  *
  * The prefix rules are deliberate: `@deepseek-ai/*` is upstream, `@local/*` is what this
  * repository builds. Everything else — a scoped third party or a bare npm name — is a
  * plugin the user added, which is exactly the set that should be switchable.
+ *
+ * `NODE_NEVER_SYNC` is a separate question ("may this reach a node at all") and is applied
+ * where the list is built, not here: `isThirdParty` answers "is this part of the product".
  *
  * @param {string} name
  * @returns {boolean}
@@ -70,11 +103,11 @@ export function installedPlugins(manifest, rowsOf = () => []) {
     : []
   const names = []
   for (const name of bundles) {
-    if (isThirdParty(name) && !names.includes(name)) names.push(name)
+    if (isThirdParty(name) && !isNeverSynced(name) && !names.includes(name)) names.push(name)
   }
   // Installed-but-not-loaded goes after, so the list reads "what a node gets" first.
   for (const name of Object.keys(dependencies)) {
-    if (isThirdParty(name) && !names.includes(name)) names.push(name)
+    if (isThirdParty(name) && !isNeverSynced(name) && !names.includes(name)) names.push(name)
   }
   return names.map(bundle => ({
     bundle,
@@ -87,13 +120,14 @@ export function installedPlugins(manifest, rowsOf = () => []) {
 /**
  * Resolve every plugin's switch, and say where the answer came from.
  *
- * `source` matters in the UI: "you turned this on" and "this is on because it is one of
- * your plugins" are different facts, and only the first is something to undo.
+ * `source` matters in the UI: "you turned this off" and "this is off because a node must
+ * never run it" are different facts, and only the first is something to undo.
  *
- * The default is **off**. A node is a different machine with its own job, and a plugin
- * arrives with its own dependencies and side effects; sending it because it happens to be
- * installed here would mean every new plugin silently lands on every node. So the page
- * starts out sending nothing, and each switch is a deliberate yes.
+ * The default is **on**. A switch here means "this plugin also runs on that machine", and
+ * a person who installed a plugin on this desktop and connected a node is asking for one
+ * working environment, not for a second one that silently differs. `NODE_NEVER_SYNC` is
+ * filtered out before this list is built, so "on" can never mean "the desktop half of this
+ * plugin" or "a second relay entry point".
  *
  * @param {ReturnType<typeof installedPlugins>} plugins
  * @param {Record<string, { sync: boolean }>} overrides - persisted per-bundle choices.
@@ -112,10 +146,10 @@ export function resolvePlugins(plugins, overrides) {
     }
     return {
       ...plugin,
-      sync: false,
+      sync: true,
       source: 'default',
       reason: plugin.loaded
-        ? 'installed here; decide per node'
+        ? 'installed and loaded here; sent unless turned off'
         : 'installed here but not loaded by this desktop',
     }
   })

@@ -34,6 +34,7 @@ import { remoteLayout } from '../src/remote/daemon.js'
 import {
   installedPlugins,
   isLocalSpec,
+  isNeverSynced,
   isThirdParty,
   nodeBundles,
   parseSwitches,
@@ -212,6 +213,26 @@ const check = (ok, label, detail) => {
   check(!isThirdParty('@local/dsh-fleet'), 'and this desktop half is not something to send')
   check(!isThirdParty(''), 'an empty name is not a plugin')
 
+  // Never-sync is its own answer: it asks "may this reach a node at all", which the
+  // product/third-party question cannot decide. Each name is here for a different reason,
+  // so a prefix rule would be wrong in one direction or the other.
+  check(isNeverSynced('@local/dsh-fleet'),
+    'this desktop half holds the node-management tool: a node that ran it could manage other nodes')
+  check(isNeverSynced('ds-harness-remote'), 'a relay plugin on a node would open a second way in')
+  check(isNeverSynced('@dsh-remote/plugin'), 'and the older name for the same thing')
+  check(isNeverSynced('@local/dsh-fleet-brain'), 'the brain bundle is already the node side')
+  check(!isNeverSynced('dsh-pet'), 'an ordinary plugin is not on the list')
+  check(!isNeverSynced(undefined), 'and neither is a missing name')
+
+  // A desktop whose profile lists the relay must not offer it as a switch, and must not
+  // report it as "installed but not loaded" either: the name never becomes a row.
+  const relayed = installedPlugins({
+    dependencies: { 'dsh-pet': '^0.4.9', 'ds-harness-remote': '^0.6.5', '@local/dsh-fleet': 'link:packages/dsh-fleet' },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-pet', 'ds-harness-remote', '@local/dsh-fleet'] } },
+  })
+  check(relayed.map(row => row.bundle).join(',') === 'dsh-pet',
+    'the hard exclusions never reach the switch list', relayed.map(row => row.bundle).join(','))
+
   // Loaded bundles first, then installed-but-not-loaded: a person reads "what a node
   // gets" at the top, and a package that is downloaded but not loaded here keeps its row
   // instead of vanishing from the page.
@@ -225,22 +246,24 @@ const check = (ok, label, detail) => {
   check(plugins[2].loaded === false, 'a dependency that is not in the bundle list is not loaded here')
   check(plugins[2].rows.length === 0, 'and contributes no rows, because it was never read')
 
-  // The default is **off**: a node is a different machine, and a plugin arrives with its
-  // own dependency tree and side effects. Sending it because it happens to be installed
-  // here is how every new plugin silently lands on every node.
+  // The default is **on**. A switch means "this plugin also runs on that machine", and a
+  // person who installed a plugin here and connected a node asked for one working
+  // environment rather than a second one that silently differs. The exclusions above are
+  // what keep "on" from meaning "and so does the desktop half of this plugin".
   const defaults = resolvePlugins(plugins, {})
-  check(defaults.every(row => row.sync === false), 'nothing is sent by default')
+  check(defaults.every(row => row.sync === true), 'your plugins are sent by default')
   check(defaults.every(row => row.source === 'default'), 'with no overrides, every answer is a default')
-  check(defaults[0].reason.includes('installed here'), 'a loaded plugin explains why it is a candidate',
-    defaults[0].reason)
+  check(defaults[0].reason.includes('sent unless turned off'),
+    'a loaded plugin explains what happens by default', defaults[0].reason)
   check(defaults[2].reason.includes('not loaded'), 'an unloaded one says so', defaults[2].reason)
 
-  const chosen = resolvePlugins(plugins, { 'dsh-pet': { sync: true }, 'left-pad': { sync: true } })
-  check(chosen.find(row => row.bundle === 'dsh-pet')?.sync === true, 'an explicit on is honoured')
-  check(chosen.find(row => row.bundle === 'dsh-pet')?.source === 'explicit',
+  // Turning one off is the only thing to undo, exactly as turning one on used to be.
+  const chosen = resolvePlugins(plugins, { '@artenx/dshb': { sync: false } })
+  check(chosen.find(row => row.bundle === '@artenx/dshb')?.sync === false, 'an explicit off is honoured')
+  check(chosen.find(row => row.bundle === '@artenx/dshb')?.source === 'explicit',
     'and says the person decided it')
-  check(chosen.find(row => row.bundle === '@artenx/dshb')?.sync === false,
-    'a plugin nobody touched stays off')
+  check(chosen.find(row => row.bundle === 'dsh-pet')?.sync === true,
+    'a plugin nobody touched keeps the default')
 
   // The node's bundle list keeps the brain last: bundles compose in order and the brain
   // patch has to land over upstream's. The chosen plugins sit between them, so a plugin
@@ -249,8 +272,9 @@ const check = (ok, label, detail) => {
   check(JSON.stringify(list) === JSON.stringify([
     '@deepseek-ai/dsh-base', 'dsh-pet', 'left-pad', '@local/dsh-fleet-brain',
   ]), 'the node list is base, then your plugins, then the brain', JSON.stringify(list))
-  check(nodeBundles(['@deepseek-ai/dsh-base', '@local/dsh-fleet-brain'], defaults).length === 2,
-    'with nothing chosen a node is exactly the brain')
+  check(nodeBundles(['@deepseek-ai/dsh-base', '@local/dsh-fleet-brain'],
+    resolvePlugins([], {})).length === 2,
+  'with no plugins installed a node is exactly the brain')
 
   // A corrupt switches file means "no opinions yet", never "send everything".
   const parsed = parseSwitches({
