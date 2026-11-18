@@ -1,14 +1,18 @@
 name: CI
 
-# Only the suites that need nothing but Node.
+# Only the suites that need nothing but Node and this package's own dependency.
 #
 # `run-all.mjs` has three layers. The offline layer splits again: `provision` and
 # `composition` read `app.asar` through Electron's patched `fs`, and the contract and e2e
-# layers need a running Host and an SSH-reachable node. Everything this workflow runs
-# imports only `node:` builtins and relative paths, so it needs no dependencies installed —
-# `ssh2` is imported by `src/ssh/connection.js` alone, and none of these suites reach it.
+# layers need a running Host and an SSH-reachable node. What runs here needs neither.
 #
-# Verified by moving `node_modules` aside and running all eight with plain Node 24.
+# `ssh2` is the one real dependency (only `src/ssh/connection.js` imports it). Seven of the
+# eight suites below reach it not at all; `version-unit` does, through
+# `remote/daemon.js` → `ssh/connection.js` — measured by running all eight in a copy of the
+# package with no `node_modules`: only `version-unit` failed, with ERR_MODULE_NOT_FOUND for
+# `ssh2`. So dependencies are installed, but with `--ignore-scripts`: ssh2's optional native
+# helper (`cpu-features`) then never builds, and a suite that starts needing a build shows up
+# as a failure rather than being hidden by a working install.
 
 on:
   push:
@@ -30,9 +34,10 @@ jobs:
         with:
           node-version: '24'
 
-      # Deliberately no install step: if a suite starts needing a dependency this fails,
-      # and that is the signal to either vendor the dependency or move the suite out of
-      # this list. Installing `ssh2` here would hide that.
+      - name: Install the one runtime dependency, without build scripts
+        working-directory: packages/dsh-fleet
+        run: npm install --ignore-scripts --no-audit --no-fund
+
       - name: Unit suites
         working-directory: packages/dsh-fleet
         run: |
