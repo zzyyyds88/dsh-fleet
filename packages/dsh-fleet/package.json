@@ -1,9 +1,27 @@
 {
-  "name": "@local/dsh-fleet",
-  "version": "0.4.0",
-  "private": true,
+  "name": "@zzyyyds88/dsh-fleet",
+  "version": "0.5.0",
   "type": "module",
   "description": "Remote Linux machines as first-class DeepSeek Harness workspaces: the brain runs on the node (so bash, grep, git and read_image are native there), while its sessions and workspaces are merged into the local sidebar and the local Remote API, so the desktop app and ds-harness-remote both see one fleet.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-bundle",
+    "remote",
+    "ssh",
+    "workspace"
+  ],
+  "homepage": "https://github.com/zzyyyds88/dsh-fleet#readme",
+  "bugs": {
+    "url": "https://github.com/zzyyyds88/dsh-fleet/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zzyyyds88/dsh-fleet.git",
+    "directory": "packages/dsh-fleet"
+  },
+  "license": "MIT",
+  "author": "zzyyyds88",
   "exports": {
     ".": "./src/index.js",
     "./client": "./src/client/client.js",
@@ -37,6 +55,9 @@
         "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "test": "node test/routing-unit.mjs && node test/multipart-unit.mjs && node test/picker-paths-unit.mjs && node test/install-unit.mjs",

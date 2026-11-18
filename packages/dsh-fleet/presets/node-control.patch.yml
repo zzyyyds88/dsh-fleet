@@ -51,4 +51,4 @@
                 directly, point them at Settings > Remote nodes. Never print an authentication value
                 back, and never repeat what a credential reference pointed at.
           - id: fleet-nodes
-            name: '@local/dsh-fleet/node-control'
+            name: '@zzyyyds88/dsh-fleet/node-control'

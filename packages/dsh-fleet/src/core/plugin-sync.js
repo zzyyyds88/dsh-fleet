@@ -16,7 +16,7 @@
  * from. This plugin's own bundle is excluded too: it is how the node becomes a brain, not
  * something to switch off.
  *
- * @module @local/dsh-fleet/core/plugin-sync
+ * @module @zzyyyds88/dsh-fleet/core/plugin-sync
  */
 
 /** Bundles a node always composes, so they are never a choice. */
@@ -29,20 +29,34 @@ export const UPSTREAM_BUNDLES = Object.freeze([
 export const BRAIN_PACKAGE = '@local/dsh-fleet-brain'
 
 /**
+ * This plugin's own package name.
+ *
+ * The preset it ships holds the node-management tool, so a node must never mount it — and
+ * this is also the name a profile lists in `dsh.profile.bundles`. A constant rather than a
+ * `package.json` read: the comparison happens against bundle names that came from a profile
+ * manifest, and the two have to agree without a filesystem read at module load.
+ */
+export const FLEET_PACKAGE = '@zzyyyds88/dsh-fleet'
+
+/**
  * Packages a node must never receive, whichever list they appear on.
  *
  * This is a **hard exclusion**, not a prefix rule: each name answers a different question
  * and inferring them from a namespace would miss the next one DSH adds.
  *
- * - `@local/dsh-fleet` is the desktop half. Its preset holds the node-management tool, so
- *   a node that mounted it could manage other nodes — the one shape of control a node must
- *   not have.
+ * - `@zzyyyds88/dsh-fleet` is the desktop half. Its preset holds the node-management tool,
+ *   so a node that mounted it could manage other nodes — the one shape of control a node
+ *   must not have. `@local/dsh-fleet` is listed beside it because that is the same package
+ *   before 0.5.0: a profile upgraded in place still carries the old spelling, and "it is
+ *   the previous name of me" is not a reason to send it to a node.
  * - `@local/dsh-fleet-brain` is the node-side subtraction itself, already in the list.
  * - `ds-harness-remote` (and the older `@dsh-remote/plugin`) makes a Host reachable by a
  *   phone relay. A node is reached *through* this desktop; a second relay entry point on a
  *   node is exactly the surface nobody asked for.
  */
 export const NODE_NEVER_SYNC = Object.freeze([
+  FLEET_PACKAGE,
+  // The name this package had before 0.5.0.
   '@local/dsh-fleet',
   '@local/dsh-fleet-brain',
   'ds-harness-remote',
@@ -76,9 +90,9 @@ export function isThirdParty(name) {
   if (UPSTREAM_BUNDLES.includes(name)) return false
   if (name === BRAIN_PACKAGE) return false
   if (name.startsWith('@deepseek-ai/')) return false
-  // `@local/dsh-fleet` is the desktop half of this plugin, and `@local/dsh-fleet-brain` is
-  // handled above; any other `@local/*` package is a user's own local bundle.
-  if (name === '@local/dsh-fleet') return false
+  // This plugin's own two names: the current one, and the one it had before 0.5.0. Any
+  // other `@local/*` package is a user's own local bundle.
+  if (name === FLEET_PACKAGE || name === '@local/dsh-fleet') return false
   return true
 }
 
