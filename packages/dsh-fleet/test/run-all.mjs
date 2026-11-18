@@ -144,6 +144,14 @@ const SUITES = [
     proves: 'the manifest a bundle is installed from is self-consistent: every patch file exists, files covers every runtime artefact, the detail page is real',
   },
   {
+    name: 'fleet-control',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'fleet-control-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 60_000,
+    proves: 'the node-control surface: a pasted secret is refused, a reference is read locally, and a result can never carry authentication material',
+  },
+  {
     name: 'composition',
     layer: 'offline',
     file: ['packages', 'dsh-fleet-brain', 'scripts', 'check-composition.mjs'],
@@ -319,6 +327,16 @@ const SUITES = [
     timeoutMs: 900_000,
     needs: 'host',
     proves: 'a node approval reaches this Host as a waterfall, the answer resumes the remote turn, and a refusal is honoured',
+  },
+  {
+    name: 'node-control',
+    layer: 'e2e',
+    file: ['packages', 'dsh-fleet', 'test', 'node-control.mjs'],
+    runtime: 'node',
+    timeoutMs: 600_000,
+    needs: 'host',
+    // Its own `node_config` is not needed: this suite manages nodes, it does not drive one.
+    proves: 'the node-control preset is registered with two rows, a Session from it can call fleet_nodes and no other tool at all, and the answer is the real roster',
   },
   {
     name: 'browser',
