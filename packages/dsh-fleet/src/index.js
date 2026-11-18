@@ -57,6 +57,16 @@ import {
   decorateWorkspaceController,
   decorateWorkspaceFiles,
 } from './host/decorators.js'
+import {
+  decorateCommands,
+  decorateFileReferences,
+  decorateGoals,
+  decorateMessageFeedback,
+  decorateSchedule,
+  decorateSessionReferenceResolver,
+  decorateSubagents,
+  decorateUserQuestions,
+} from './host/decorators-extra.js'
 // `router.toLocalWorkspace` handles workspace identities; this import keeps the
 // management route honest about which identities it answers for.
 import { decodeRemoteId } from './host/routing.js'
@@ -504,6 +514,40 @@ export function apply(ctx, config = {}) {
     // `agentId` before the method runs, so `terminal/create|attach|close|…` fails for
     // a remote Session before its decorator can route anything.
     const undoAgent = overrideAgentLookup(scope)
+    // The remaining identity-carrying namespaces. Each one is installed from its **own**
+    // `ctx.inject`, not from a `scope.get` inside this block: a service the composition
+    // mounts later would never be seen here, and the failure mode is silent — the namespace
+    // keeps answering from this Host, which for a remote Session is a confidently wrong
+    // answer rather than an error.
+    for (const [name, decorate] of [
+      ['goals', decorateGoals],
+      ['userQuestions', decorateUserQuestions],
+      ['subagents', decorateSubagents],
+      ['commands', decorateCommands],
+      ['messageFeedback', decorateMessageFeedback],
+      ['sessionReferenceResolver', decorateSessionReferenceResolver],
+      ['sessionFileReferences', decorateFileReferences],
+      ['schedule', service => decorateSchedule(service, router, { log })],
+    ]) {
+      ctx.inject([name], inner => {
+        const service = inner.get(name)
+        if (service === undefined) {
+          console.log(`fleet: ${name} is not composed; it stays local`)
+          return
+        }
+        try {
+          const restore = decorate(service, router)
+          console.log(`fleet: routing ${name}`)
+          inner.effect(() => () => {
+            try { restore() } catch { /* the instance may already be disposed */ }
+          }, `dsh-fleet: ${name} routing`)
+        } catch (error) {
+          // Say so once, at load: a namespace that merely *looks* routed is the failure
+          // this whole module exists to prevent.
+          console.log(`fleet: could not route ${name}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      })
+    }
     log(`fleet: routing session, workspace, workspaceFiles${jobs === undefined ? '' : ', job'}${terminal === undefined ? '' : ', terminal'}`)
     scope.effect(() => () => {
       for (const restore of undo) {

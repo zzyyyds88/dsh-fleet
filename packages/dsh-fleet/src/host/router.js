@@ -320,6 +320,98 @@ export class Router {
   }
 
   /**
+   * Route one endpoint whose identity is an `agent: Agent` **first positional argument**.
+   *
+   * The Gateway resolves that argument from the wire's `agentId` before the body runs, and
+   * `host/lookups.js` already teaches it to hand back a placeholder for a wrapped Session
+   * identity — so by the time a decorator sees the call, `agent.id` decodes to the node and
+   * the node's own Session id. Forwarding is therefore just "rewrite `agentId`, keep the
+   * rest".
+   *
+   * `rest` names the remaining positional arguments in order, so the payload this builds is
+   * exactly what the node's descriptor expects. A method whose trailing argument is the
+   * caller's `AbortSignal` does not list it: the signal is forwarded out of band.
+   *
+   * @param {string} endpoint - the wire endpoint, e.g. `goals/edit`.
+   * @param {readonly string[]} rest - names of the remaining positional arguments.
+   * @param {(agent: object, ...rest: never[]) => unknown} local
+   * @param {{ wrapResult?: boolean }} [options] - `wrapResult:false` for a value that holds
+   *   no identities (a boolean, a plain descriptor list).
+   * @returns {(agent: object, ...rest: never[]) => unknown}
+   */
+  agentEndpoint(endpoint, rest, local, options = {}) {
+    const router = this
+    const wrap = options.wrapResult !== false
+    return async function routed(agent, ...args) {
+      const decoded = decodeRemoteId(agent?.id)
+      if (decoded === undefined) return await local(agent, ...args)
+      /** @type {Record<string, unknown>} */
+      const payload = { agentId: decoded.remoteId }
+      for (const [index, name] of rest.entries()) {
+        const value = args[index]
+        if (value === undefined) continue
+        payload[name] = name === 'request' ? router.toRemote(value, decoded.nodeId) : value
+      }
+      const value = await router.call(decoded.nodeId, endpoint, payload, args.at(-1))
+      return wrap ? router.toLocal(value, decoded.nodeId) : value
+    }
+  }
+
+  /**
+   * Route one endpoint whose identity is a request field, for a namespace other than
+   * `session`.
+   *
+   * `messageFeedback/*` and `subagents/*` name a Session in their request; `schedule/*`
+   * names a schedule entry, which this Host wraps in a local identity so the browser has
+   * one string per entry across every node.
+   *
+   * @param {string} endpoint - the wire endpoint, e.g. `messageFeedback/put`.
+   * @param {string} field - the request field that carries the identity.
+   * @param {(request: Record<string, unknown>, signal?: AbortSignal) => unknown} local
+   * @returns {(request: Record<string, unknown>, signal?: AbortSignal) => unknown}
+   */
+  fieldEndpoint(endpoint, field, local) {
+    const router = this
+    return async function routed(request, signal) {
+      const raw = request === null || typeof request !== 'object' ? undefined : Reflect.get(request, field)
+      const decoded = decodeRemoteId(typeof raw === 'string' ? raw : undefined)
+      if (decoded === undefined) return await local(request, signal)
+      const payload = router.toRemote({ request: request ?? {} }, decoded.nodeId)
+      // Only the identity this endpoint routes on is unwrapped; other identities inside the
+      // request stay wrapped, so a field this module never heard of still cannot leak a bare
+      // node id to the browser.
+      payload.request[field] = decoded.remoteId
+      return router.toLocal(
+        await router.call(decoded.nodeId, endpoint, payload, signal),
+        decoded.nodeId,
+      )
+    }
+  }
+
+  /**
+   * Route one endpoint whose identity is its **first positional argument**, as a plain string.
+   *
+   * `subagents/interruptByUser(childSessionId)` is the shape: the argument is the identity
+   * itself, not a request object and not an `Agent`. The wire field is named by the
+   * descriptor, so the caller passes it — guessing `sessionId` here produced
+   * `args fields do not match the descriptor: missing "childSessionId"`.
+   *
+   * @param {string} endpoint
+   * @param {string} field - the wire field the node's descriptor expects.
+   * @param {(id: string, ...rest: never[]) => unknown} local
+   * @returns {(id: string, ...rest: never[]) => unknown}
+   */
+  firstArgEndpoint(endpoint, field, local) {
+    const router = this
+    return async function routed(id, ...args) {
+      const decoded = decodeRemoteId(typeof id === 'string' ? id : undefined)
+      if (decoded === undefined) return await local(id, ...args)
+      const value = await router.call(decoded.nodeId, endpoint, { [field]: decoded.remoteId })
+      return router.toLocal(value, decoded.nodeId)
+    }
+  }
+
+  /**
    * Route one Session *stream* endpoint by proxying frames.
    * @param {string} endpoint
    * @param {(request: Record<string, unknown>, signal?: AbortSignal) => AsyncIterable<unknown>} local

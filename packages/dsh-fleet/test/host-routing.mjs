@@ -321,7 +321,68 @@ jobs.stop()
 check(Array.isArray(roster?.jobs), 'job/list answers a roster for a remote session',
   roster === undefined ? 'no rows frame' : `${String(roster.jobs.length)} job(s)`)
 
-// ---- 8. what must NOT be routed ---------------------------------------
+// ---- 8. the other identity-carrying namespaces ---------------------------
+// These were the ones that used to answer **from this Host** for a remote Session, which is
+// a confidently wrong answer rather than an error. Each assertion below distinguishes
+// "routed" from "answered locally" by what the value says about the node.
+//
+// `goals/get` is the clearest: a remote Session has no goal in this Host's registry, so the
+// unrouted answer is `undefined` and the goal bar simply disappears.
+const goal = await call('goals/get', { agentId: sessionId })
+check(goal === undefined || typeof goal === 'object',
+  'goals/get answers for a remote session without failing', JSON.stringify(goal ?? null).slice(0, 80))
+
+// `commands/list` must be the node's command set. The node's composition is a brain — no
+// `dsh-web-app` rows — so its list is not required to be non-empty, but it must answer.
+const commandRows = await call('commands/list', { agentId: sessionId })
+check(Array.isArray(commandRows), 'commands/list answers a list for a remote session',
+  `${String(Array.isArray(commandRows) ? commandRows.length : 0)} row(s)`)
+
+// `fileReferences/list` walks the Agent's working directory. Candidates are **relative**
+// paths (that is what a prompt accepts), so the tell for a local answer is a Windows-shaped
+// one: a drive letter, a backslash, or this machine's own home directory.
+const references = await call('fileReferences/list', { agentId: sessionId, query: '' })
+check(Array.isArray(references), 'fileReferences/list answers for a remote session',
+  `${String(Array.isArray(references) ? references.length : 0)} candidate(s)`)
+const leaked = (Array.isArray(references) ? references : [])
+  .map(entry => String(entry?.path ?? ''))
+  .filter(path => path.length > 0 && (/^[A-Za-z]:/u.test(path) || path.includes('\\')))
+check(leaked.length === 0, 'and none of them is a path on this machine', leaked.slice(0, 3).join(' '))
+
+// `messageFeedback/list` names its Session in the request. This Host has no such Session, so
+// an unrouted call would fail with `not-found`; a routed one answers the node's (empty) list.
+try {
+  const feedback = await call('messageFeedback/list', { request: { sessionId } })
+  check(Array.isArray(feedback?.items ?? feedback) || typeof feedback === 'object',
+    'messageFeedback/list answers for a remote session', JSON.stringify(feedback).slice(0, 90))
+} catch (error) {
+  check(false, 'messageFeedback/list answers for a remote session',
+    `${String(error.code)} ${String(error.message).slice(0, 100)}`)
+}
+
+// `subagents/interruptByUser` takes the child id as its only argument; a wrapped id that no
+// longer decodes would come back as a malformed-argument error before routing.
+try {
+  await call('subagents/interruptByUser', { childSessionId: sessionId })
+  check(true, 'subagents/interruptByUser accepts a wrapped child identity')
+} catch (error) {
+  // The node's own answer for "that is not a subagent" is the correct outcome; what must not
+  // happen is a gateway-level argument or lookup failure.
+  check(!String(error.code ?? '').includes('arguments') && !String(error.code ?? '').includes('lookup'),
+    'subagents/interruptByUser accepts a wrapped child identity',
+    `${String(error.code)} ${String(error.message).slice(0, 90)}`)
+}
+
+// `schedule/catalog` is Host-wide, so it merges: this Host's entries plus the node's, with
+// the node's ids wrapped. An unrouted call returns only this Host's, which for a workspace
+// that only exists on the node is the wrong answer.
+const scheduleCatalog = await call('schedule/catalog', {})
+const scheduleRows = Array.isArray(scheduleCatalog) ? scheduleCatalog : (scheduleCatalog?.items ?? [])
+check(Array.isArray(scheduleRows), 'schedule/catalog answers a list', String(scheduleRows?.length))
+check(scheduleRows.every(row => typeof row?.id === 'string'),
+  'and every entry has an identity the browser can name')
+
+// ---- 9. what must NOT be routed ---------------------------------------
 const catalog = await call('session/modelCatalog', {})
 check(catalog !== undefined, 'session/modelCatalog still answers from this Host')
 const presets = await call('agentPresets/list', {})

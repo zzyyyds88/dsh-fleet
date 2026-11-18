@@ -96,6 +96,14 @@ const SUITES = [
     proves: 'identity round-trip, stream fan-out, workspace merge, local passthrough, job endpoints',
   },
   {
+    name: 'routing-extra',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'routing-extra-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 120_000,
+    proves: 'the remaining identity-carrying namespaces route by their own shape: goals/userQuestions by Agent, feedback by request field, subagents by child uuid, and schedule merges while its per-entry verbs route',
+  },
+  {
     name: 'multipart',
     layer: 'offline',
     file: ['packages', 'dsh-fleet', 'test', 'multipart-unit.mjs'],
