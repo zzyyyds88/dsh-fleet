@@ -235,8 +235,8 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 
 ## 六、小改动怎么发
 
-插件通常以两种形态之一装进 profile：npm 包（`@zzyyyds88/dsh-fleet`），或开发时的本地目录
-（`@zzyyyds88/dsh-fleet: link:D:/ProjectHub/DSHpl/packages/dsh-fleet`）。两种都改代码后：
+插件通常以两种形态之一装进 profile：npm 包（`@greatbaby/dsh-fleet`），或开发时的本地目录
+（`@greatbaby/dsh-fleet: link:D:/ProjectHub/DSHpl/packages/dsh-fleet`）。两种都改代码后：
 
 | 改的是 | 怎么生效 |
 |---|---|
@@ -257,7 +257,7 @@ node test/routing-unit.mjs && node test/routing-extra-unit.mjs && node test/mult
 
 ### 发布一次
 
-包名是 `@zzyyyds88/dsh-fleet`，发布形态与理由见
+包名是 `@greatbaby/dsh-fleet`，发布形态与理由见
 [ADR-0005](../../../docs/adr-0005-release-and-maintenance.zh.md)。
 
 ```bash

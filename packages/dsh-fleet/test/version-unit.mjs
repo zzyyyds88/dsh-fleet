@@ -210,13 +210,13 @@ const check = (ok, label, detail) => {
   check(!isThirdParty('@deepseek-ai/dsh-base'), 'an upstream bundle is not a choice')
   check(!isThirdParty('@deepseek-ai/dsh-web-app'), 'a node is a subtraction from dsh-web-app')
   check(!isThirdParty('@local/dsh-fleet-brain'), 'the brain bundle is how a node becomes one')
-  check(!isThirdParty('@zzyyyds88/dsh-fleet'), 'and this desktop half is not something to send')
+  check(!isThirdParty('@greatbaby/dsh-fleet'), 'and this desktop half is not something to send')
   check(!isThirdParty(''), 'an empty name is not a plugin')
 
   // Never-sync is its own answer: it asks "may this reach a node at all", which the
   // product/third-party question cannot decide. Each name is here for a different reason,
   // so a prefix rule would be wrong in one direction or the other.
-  check(isNeverSynced('@zzyyyds88/dsh-fleet'),
+  check(isNeverSynced('@greatbaby/dsh-fleet'),
     'this desktop half holds the node-management tool: a node that ran it could manage other nodes')
   // A profile installed before 0.5.0 lists the old spelling until it is reinstalled, and
   // "the previous name of me" is not a reason to send this plugin's preset to a node.
@@ -231,8 +231,8 @@ const check = (ok, label, detail) => {
   // A desktop whose profile lists the relay must not offer it as a switch, and must not
   // report it as "installed but not loaded" either: the name never becomes a row.
   const relayed = installedPlugins({
-    dependencies: { 'dsh-pet': '^0.4.9', 'ds-harness-remote': '^0.6.5', '@zzyyyds88/dsh-fleet': 'link:packages/dsh-fleet' },
-    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-pet', 'ds-harness-remote', '@zzyyyds88/dsh-fleet'] } },
+    dependencies: { 'dsh-pet': '^0.4.9', 'ds-harness-remote': '^0.6.5', '@greatbaby/dsh-fleet': 'link:packages/dsh-fleet' },
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-pet', 'ds-harness-remote', '@greatbaby/dsh-fleet'] } },
   })
   check(relayed.map(row => row.bundle).join(',') === 'dsh-pet',
     'the hard exclusions never reach the switch list', relayed.map(row => row.bundle).join(','))

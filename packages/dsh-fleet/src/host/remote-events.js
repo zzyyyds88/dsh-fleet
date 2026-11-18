@@ -25,7 +25,7 @@
  * Agent scope for the wrapped identity, renders the ordinary approval / question
  * card, and its answer settles the node's waterfall through `$events/result`.
  *
- * @module @zzyyyds88/dsh-fleet/host/remote-events
+ * @module @greatbaby/dsh-fleet/host/remote-events
  */
 
 /**

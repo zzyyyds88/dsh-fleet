@@ -8,7 +8,7 @@
  * decoding it names the node and the remote identity behind one local id, and no
  * separate registry can drift out of sync with what the UI holds.
  *
- * @module @zzyyyds88/dsh-fleet/host/routing
+ * @module @greatbaby/dsh-fleet/host/routing
  */
 
 /** Prefix every remote identity carries locally. */

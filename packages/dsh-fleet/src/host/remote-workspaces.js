@@ -14,7 +14,7 @@
  * Workspace and Session identities are wrapped (`fleet_<node>_<id>`) so they can
  * never collide with a local one.
  *
- * @module @zzyyyds88/dsh-fleet/host/remote-workspaces
+ * @module @greatbaby/dsh-fleet/host/remote-workspaces
  */
 import { isRemoteId, remapIds } from './routing.js'
 

@@ -16,7 +16,7 @@
  * from. This plugin's own bundle is excluded too: it is how the node becomes a brain, not
  * something to switch off.
  *
- * @module @zzyyyds88/dsh-fleet/core/plugin-sync
+ * @module @greatbaby/dsh-fleet/core/plugin-sync
  */
 
 /** Bundles a node always composes, so they are never a choice. */
@@ -36,7 +36,7 @@ export const BRAIN_PACKAGE = '@local/dsh-fleet-brain'
  * `package.json` read: the comparison happens against bundle names that came from a profile
  * manifest, and the two have to agree without a filesystem read at module load.
  */
-export const FLEET_PACKAGE = '@zzyyyds88/dsh-fleet'
+export const FLEET_PACKAGE = '@greatbaby/dsh-fleet'
 
 /**
  * Packages a node must never receive, whichever list they appear on.
@@ -44,7 +44,7 @@ export const FLEET_PACKAGE = '@zzyyyds88/dsh-fleet'
  * This is a **hard exclusion**, not a prefix rule: each name answers a different question
  * and inferring them from a namespace would miss the next one DSH adds.
  *
- * - `@zzyyyds88/dsh-fleet` is the desktop half. Its preset holds the node-management tool,
+ * - `@greatbaby/dsh-fleet` is the desktop half. Its preset holds the node-management tool,
  *   so a node that mounted it could manage other nodes — the one shape of control a node
  *   must not have. `@local/dsh-fleet` is listed beside it because that is the same package
  *   before 0.5.0: a profile upgraded in place still carries the old spelling, and "it is

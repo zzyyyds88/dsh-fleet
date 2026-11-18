@@ -153,7 +153,7 @@ const plan = {
   version: '0.2.2-rc.3',
 }
 const text = renderBrainPatch(plan)
-check(text.includes('Managed by @zzyyyds88/dsh-fleet'), 'the overlay says who owns it')
+check(text.includes('Managed by @greatbaby/dsh-fleet'), 'the overlay says who owns it')
 check(text.includes('0.2.2-rc.3'), 'and which version it targets')
 check(!/disabled: true/u.test(text),
   'with no per-plugin switches set, nothing is disabled')

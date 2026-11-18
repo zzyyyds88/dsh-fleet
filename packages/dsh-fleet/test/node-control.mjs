@@ -52,7 +52,7 @@ check(ids.includes('node-control'), 'the node-control preset is registered', ids
 const document = await call('agentPresets/read', { agentPreset: 'node-control' })
   .catch(error => ({ error: `${String(error.code)} ${error.message}` }))
 const content = String(document?.content ?? '')
-check(content.includes('@zzyyyds88/dsh-fleet/node-control'),
+check(content.includes('@greatbaby/dsh-fleet/node-control'),
   'and it mounts this plugin\'s own tool entry point',
   content.length === 0 ? String(document?.error) : 'declared')
 check(!/@deepseek-ai\/dsh-tool-/u.test(content),

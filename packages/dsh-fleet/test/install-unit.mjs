@@ -50,10 +50,12 @@ ok(manifest.repository?.url?.includes('github.com/zzyyyds88/dsh-fleet'),
 ok(manifest.publishConfig?.access === 'public',
   'a scoped package defaults to restricted; access must be published explicitly',
   JSON.stringify(manifest.publishConfig))
-// The name is the one npm can actually accept. `@local` looked like a convention but is
-// another organisation's scope, so installing from a registry could never work under it.
-ok(manifest.name === '@zzyyyds88/dsh-fleet' || !String(manifest.name).startsWith('@local/'),
-  'the name is inside a scope this project controls', manifest.name)
+// The name has to be one npm can actually accept from this account. Two names were tried and
+// both are blocked: `@local` is another organisation's scope, and the plain `dsh-fleet` was
+// taken. `@greatbaby` is the publishing account's own scope, which needs no organisation and
+// cannot be claimed by anyone else.
+ok(manifest.name === '@greatbaby/dsh-fleet',
+  'the name is inside the publishing account own scope', manifest.name)
 ok(manifest.name === (readFileSync(join(root, 'src', 'client', 'client.js'), 'utf8')
   .match(/id: '([^']+)',/u)?.[1] ?? ''),
   'the client plugin id equals the package name, as DSH requires',

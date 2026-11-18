@@ -15,7 +15,7 @@
 # 而不是通过在 UI 上再开一个面板。
 - insert:
     - id: dsh-fleet
-      name: '@zzyyyds88/dsh-fleet'
+      name: '@greatbaby/dsh-fleet'
       config:
         enabled: true
         autoConnect: true

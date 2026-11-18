@@ -7,7 +7,7 @@
  *   cd packages/dsh-fleet-brain
  *   node scripts/sync-from-upstream.mjs && node scripts/embed-into-fleet.mjs
  *
- * @module @zzyyyds88/dsh-fleet/host/brain-bundle.generated
+ * @module @greatbaby/dsh-fleet/host/brain-bundle.generated
  */
 
 /** Package name the node profile lists in `dsh.profile.bundles`. */

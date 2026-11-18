@@ -21,7 +21,7 @@
  *      plugins are dead weight there. The list is derived from the installed
  *      DSH's own composed tree, so it follows an upgrade instead of going stale.
  *
- * @module @zzyyyds88/dsh-fleet/host/provision
+ * @module @greatbaby/dsh-fleet/host/provision
  */
 import { randomUUID } from 'node:crypto'
 
@@ -142,7 +142,7 @@ export function credentialRefsOf(rows) {
  */
 export function renderBrainPatch({ rows, version }) {
   const lines = [
-    '# Managed by @zzyyyds88/dsh-fleet. Rewritten on every connect — edits are lost.',
+    '# Managed by @greatbaby/dsh-fleet. Rewritten on every connect — edits are lost.',
     `# Written for DSH ${version}. A version change rewrites this file.`,
     '#',
     '# This profile exists so the desktop app can use this machine as a remote',

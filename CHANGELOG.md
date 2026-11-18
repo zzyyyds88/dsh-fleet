@@ -11,16 +11,35 @@
 
 ## [未发布]
 
+## [0.5.1] — 2026-11-18
+
+**只改发布元数据，运行时行为与 0.5.0 相同。** 0.5.0 已经发到 registry，同号不能再发，
+所以命名空间更正随这个 patch 版本出。
+
+### 修复
+
+- **包名从 `@zzyyyds88/dsh-fleet` 改为 `@greatbaby/dsh-fleet`。** 原计划的 scope
+  是照着 GitHub 用户名取的，但 npm 的 scope 只认**账号名或组织名**，而发布账号叫
+  `greatbaby`：`npm access list packages '@zzyyyds88'` 返回 `404 Scope not found`，
+  发布时报 403。`@greatbaby` 是账号自己的 scope，注册即得，不必另建组织。
+  GitHub 仓库地址（`github.com/zzyyyds88/dsh-fleet`）不受影响，那是另一件事。
+
+### 说明
+
+- 0.5.0 在 registry 上是一个**未被引用的历史版本**（发布时名字还叫 `@zzyyyds88/...`，
+  而那个 scope 不属于本账号，所以它从未真正可安装）。以 0.5.1 为准。
+- registry 上还有一个 `0.0.0-stage` 占位版本，是 npm 暂存发布流程自动建的，不是本项目发的。
+
 ## [0.5.0] — 2026-11-18
 
 **发布形态变更，已安装的用户要重装一次。** 包名从 `@local/dsh-fleet` 改为
-`@zzyyyds88/dsh-fleet`：`local` 这个 npm 作用域属于他人的组织，`dsh-fleet` 这个包名
+`@greatbaby/dsh-fleet`：`local` 这个 npm 作用域属于他人的组织，`dsh-fleet` 这个包名
 已被人占用。旧名已无法安装，也不会有更新。替换命令见下。
 
 ### 变更
 
-- **包名改为 `@zzyyyds88/dsh-fleet`**，并发布到 npm。安装不再需要先 clone 仓库：
-  `dsh plugin --profile <p> add -w @zzyyyds88/dsh-fleet`。
+- **包名改为 `@greatbaby/dsh-fleet`**，并发布到 npm。安装不再需要先 clone 仓库：
+  `dsh plugin --profile <p> add -w @greatbaby/dsh-fleet`。
   从旧名迁移：先 `dsh plugin --profile <p> remove @local/dsh-fleet`，再用新名安装，
   最后把 profile 的 `dsh.profile.bundles` 里的旧名换成新名。
 - 客户端插件 id 与包名同步（DSH 要求二者相等），因此浏览器半会重新注册一次。

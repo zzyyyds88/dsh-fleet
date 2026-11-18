@@ -32,7 +32,7 @@
  *
  * Exit codes: 0 report written, 2 the relay plugin or the installation was not found.
  *
- * @module @zzyyyds88/dsh-fleet/scripts/check-phone-allowlist
+ * @module @greatbaby/dsh-fleet/scripts/check-phone-allowlist
  */
 import { closeSync, existsSync, openSync, readFileSync, readSync } from 'node:fs'
 import { homedir } from 'node:os'

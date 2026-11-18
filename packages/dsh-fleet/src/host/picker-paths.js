@@ -16,7 +16,7 @@
  *     `<drive>:\@fleet\…`, one tree this plugin owns and can therefore clean up
  *     exactly.
  *
- * @module @zzyyyds88/dsh-fleet/host/picker-paths
+ * @module @greatbaby/dsh-fleet/host/picker-paths
  */
 import { rmdirSync, statSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'

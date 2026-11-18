@@ -1,6 +1,6 @@
 {
-  "name": "@zzyyyds88/dsh-fleet",
-  "version": "0.5.0",
+  "name": "@greatbaby/dsh-fleet",
+  "version": "0.5.1",
   "type": "module",
   "description": "Remote Linux machines as first-class DeepSeek Harness workspaces: the brain runs on the node (so bash, grep, git and read_image are native there), while its sessions and workspaces are merged into the local sidebar and the local Remote API, so the desktop app and ds-harness-remote both see one fleet.",
   "keywords": [

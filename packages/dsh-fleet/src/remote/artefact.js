@@ -31,7 +31,7 @@
  *   then renamed into place, so a failure leaves the previous runtime intact rather
  *   than a mixture of two releases.
  *
- * @module @zzyyyds88/dsh-fleet/remote/artefact
+ * @module @greatbaby/dsh-fleet/remote/artefact
  */
 
 /** Default accelerator; overridable so a fork or a private mirror can be used. */

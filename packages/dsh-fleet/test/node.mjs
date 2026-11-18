@@ -13,7 +13,7 @@
  * export DSH_FLEET_TEST_PASSWORD=...         # or DSH_FLEET_TEST_KEY_FILE=<path>
  * ```
  *
- * @module @zzyyyds88/dsh-fleet/test/node
+ * @module @greatbaby/dsh-fleet/test/node
  */
 import { readFileSync } from 'node:fs'
 import { Client } from 'ssh2'

@@ -18,11 +18,11 @@
 
 ### 决策
 
-**`@zzyyyds88/dsh-fleet`**（用户已确认）。
+**`@greatbaby/dsh-fleet`**（用户已确认）。
 
 ### 为什么必须改，不是偏好问题
 
-两条独立的硬阻塞，都实测过：
+三条独立的硬阻塞，都实测过：
 
 1. **`@local` 这个 scope 不是本项目的。**
    `GET https://registry.npmjs.org/-/org/local/user` 返回 **200 `{"local":"owner"}`**，
@@ -37,14 +37,24 @@
    主题与本项目**高度重叠**（都是 DSH 多机），只是路线不同（算力池 vs 远程工作区）。
    同名既发不上去，也会让用户把两个项目搞混。
 
+3. **曾被选中的 `@zzyyyds88` 也不行 —— 那个 scope 不存在。**
+   这一条是实际发布时才暴露的：GitHub 账号叫 `zzyyyds88`，但 npm 账号叫
+   `greatbaby`（`npm whoami` 实测），而 npm 的 scope 只认**账号名或组织名**，
+   不认 GitHub 用户名。`npm access list packages '@zzyyyds88'` 返回
+   `404 Scope not found`，`@greatbaby` 则正常。于是 `npm publish` 报 403；
+   同一份 403 里还叠了一条「发布需要 2FA」。
+
+   **教训**：选包名前要先跑 `npm whoami` 确认登录的是哪个账号，而不是照着
+   GitHub 用户名拼 scope。
+
 ### 为什么选作用域名而不是再找一个无作用域名
 
 `dsh-fleet-remote`、`dsh-node-fleet` 实测都可用。但：
 
 - 无作用域名与 GitHub 仓库名不一致，日后**任何名字都可能被别人先注册**；
-- 作用域名 `@zzyyyds88/*` 与仓库 owner 一一对应，用户看一眼安装命令就知道对应哪个仓库。
+- 作用域名 `@greatbaby/*` 属于发布账号本人，注册即得，不必先建组织。
 
-### 代价：改名波及 28 处，且 client id 必须一起改
+### 代价：改名波及 52 个文件，且 client id 必须一起改
 
 官方 `dsh-doc` 的 `references/ui-plugin.md` 原话：
 
@@ -65,13 +75,16 @@
 连接时按文件写入节点的 profile `node_modules`，**从来不走 registry**。
 给它改名没有任何收益，只会多一处不一致。
 
+**`repository`、`homepage`、`bugs` 里的 `github.com/zzyyyds88` 不改。** 那是仓库地址，
+与 npm scope 是两件不同的事；改名只针对 `@zzyyyds88/` 这个 npm scope（52 个文件、78 处）。
+
 ## 三、发布形态：npm 为主，tarball 与本地目录为备
 
 ### 决策
 
 | 形态 | 用途 | 命令 |
 |---|---|---|
-| **npm（主）** | 用户安装 | `dsh plugin --profile <p> add -w @zzyyyds88/dsh-fleet` |
+| **npm（主）** | 用户安装 | `dsh plugin --profile <p> add -w @greatbaby/dsh-fleet` |
 | tarball | 离线环境、无法访问 registry | `dsh plugin ... add -w ./dsh-fleet-x.y.z.tgz` |
 | 本地目录 | 开发（`link:`） | `dsh plugin ... add -w <绝对路径>` |
 

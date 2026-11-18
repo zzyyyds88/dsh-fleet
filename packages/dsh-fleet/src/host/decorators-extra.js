@@ -18,7 +18,7 @@
  * The shapes are not uniform, which is why each group has its own factory — the file is long
  * because the surface is, not because it does one thing twice.
  *
- * @module @zzyyyds88/dsh-fleet/host/decorators-extra
+ * @module @greatbaby/dsh-fleet/host/decorators-extra
  */
 import { decodeRemoteId, decorateMethods, encodeRemoteId, remoteIterable } from './routing.js'
 

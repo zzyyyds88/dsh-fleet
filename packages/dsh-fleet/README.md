@@ -1,4 +1,4 @@
-# @zzyyyds88/dsh-fleet
+# @greatbaby/dsh-fleet
 
 Run DeepSeek Harness on another machine and use its workspaces as if they were
 local ones.
@@ -203,11 +203,11 @@ creating a workspace from it directly is refused.
 
 ```bash
 # from npm (recommended)
-dsh plugin --profile <profile> add -w @zzyyyds88/dsh-fleet
+dsh plugin --profile <profile> add -w @greatbaby/dsh-fleet
 
 # from a packed tarball (offline, or to pin an exact build)
 npm pack --pack-destination dist
-dsh plugin --profile <profile> add -w ./dist/zzyyyds88-dsh-fleet-<version>.tgz
+dsh plugin --profile <profile> add -w ./dist/greatbaby-dsh-fleet-<version>.tgz
 
 # or straight from this directory (a `link:` dependency; good for development)
 dsh plugin --profile <profile> add -w <absolute path to packages/dsh-fleet>
@@ -218,12 +218,13 @@ Whichever form, the profile's `dsh.profile.bundles` must list this package *afte
 runtime range, so an unsupported DSH refuses the install instead of composing half of it.
 
 **Upgrading from before 0.5.0.** The package was renamed from `@local/dsh-fleet`, because
-`@local` is another organisation's npm scope and `dsh-fleet` was already taken. Remove the
+`@local` is another organisation's npm scope and `dsh-fleet` was already taken. The npm
+scope `@greatbaby` is the publishing account's own, which needs no organisation. Remove the
 old name, install the new one, and update the bundle list:
 
 ```bash
 dsh plugin --profile <profile> remove @local/dsh-fleet
-dsh plugin --profile <profile> add -w @zzyyyds88/dsh-fleet
+dsh plugin --profile <profile> add -w @greatbaby/dsh-fleet
 ```
 
 Nothing on a node needs to change: the node side is the embedded

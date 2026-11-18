@@ -13,7 +13,7 @@
  * `fleet_<nodeId>_<remoteId>`, so one string answers all three questions a router
  * asks: is this remote, which node, and what is it called there.
  *
- * @module @zzyyyds88/dsh-fleet/host/router
+ * @module @greatbaby/dsh-fleet/host/router
  */
 import {
   AsyncQueue,

@@ -44,7 +44,7 @@
  *   the failure this module exists to remove. So an unanswered Host asks the node
  *   for its own default immediately, and a stuck request expires on a timer.
  *
- * @module @zzyyyds88/dsh-fleet/host/remote-waterfall
+ * @module @greatbaby/dsh-fleet/host/remote-waterfall
  */
 
 /** Waterfalls the node may ask this Host to answer. */

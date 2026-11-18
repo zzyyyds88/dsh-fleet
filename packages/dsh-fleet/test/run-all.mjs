@@ -35,7 +35,7 @@
  * that fails prints its own last lines, because the interesting part of a failure is
  * almost never the exit code.
  *
- * @module @zzyyyds88/dsh-fleet/test/run-all
+ * @module @greatbaby/dsh-fleet/test/run-all
  */
 import { spawn } from 'node:child_process'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'

@@ -11,7 +11,7 @@
  * upstream method. A remote call is translated into the node's own identities,
  * dispatched, and translated back.
  *
- * @module @zzyyyds88/dsh-fleet/host/decorators
+ * @module @greatbaby/dsh-fleet/host/decorators
  */
 import { mergeControlStream } from './remote-control.js'
 import { ensureRemoteDirectory, listLocal, listRemote, makeLocalDirectory, makeRemoteDirectory } from './browse.js'

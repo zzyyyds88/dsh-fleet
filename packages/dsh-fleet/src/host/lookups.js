@@ -13,7 +13,7 @@
  * behaviour changes: an unknown local id still resolves to `undefined`, which the
  * Gateway reports exactly as it does today.
  *
- * @module @zzyyyds88/dsh-fleet/host/lookups
+ * @module @greatbaby/dsh-fleet/host/lookups
  */
 import { decodeRemoteId } from './routing.js'
 

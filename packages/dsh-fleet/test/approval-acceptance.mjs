@@ -32,7 +32,7 @@
  *
  * Usage: node test/approval-acceptance.mjs <hostBase> <launchToken>
  *
- * @module @zzyyyds88/dsh-fleet/test/approval-acceptance
+ * @module @greatbaby/dsh-fleet/test/approval-acceptance
  */
 import { authenticate, call, liveStream, openCarrier } from './carrier.mjs'
 import { nodeExec } from './node.mjs'

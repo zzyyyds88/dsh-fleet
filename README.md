@@ -244,11 +244,11 @@ node packages/dsh-fleet/test/run-all.mjs --layer offline,contract   # 不需要�
 
 ```bash
 # 1. 从 npm 装（推荐）
-dsh plugin --profile desktop add -w @zzyyyds88/dsh-fleet
+dsh plugin --profile desktop add -w @greatbaby/dsh-fleet
 
 # 2. 或从打包好的 tarball 装（离线环境）
 npm pack --pack-destination dist        # 在 packages/dsh-fleet 下执行
-dsh plugin --profile desktop add -w ./dist/zzyyyds88-dsh-fleet-<version>.tgz
+dsh plugin --profile desktop add -w ./dist/greatbaby-dsh-fleet-<version>.tgz
 
 # 3. 或从源码目录装（开发时用，pnpm 会记成 link:）
 dsh plugin --profile desktop add -w <本仓库的绝对路径>/packages/dsh-fleet
@@ -258,7 +258,7 @@ dsh plugin --profile desktop add -w <本仓库的绝对路径>/packages/dsh-flee
 本插件排在 `@deepseek-ai/dsh-base` 之后（桌面端还要排在 `dsh-web-app` 之后）。
 `engines.dsh` 钉住了运行时范围，DSH 版本不匹配时安装会被直接拒绝，而不是只组合一半。
 
-**从 0.5.0 之前的版本升级**：包名变了（`@local/dsh-fleet` → `@zzyyyds88/dsh-fleet`），
+**从 0.5.0 之前的版本升级**：包名变了（`@local/dsh-fleet` → `@greatbaby/dsh-fleet`），
 旧名已无法安装也不会再更新。先 `dsh plugin --profile <p> remove @local/dsh-fleet`，
 再用新名安装，最后把 profile 的 `bundles` 里的旧名换掉。节点侧不需要做任何事。
 

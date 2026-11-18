@@ -7,7 +7,7 @@
  * tool call must never pay a handshake, and a forwarded HTTP request must be
  * able to ride the connection that is already warm.
  *
- * @module @zzyyyds88/dsh-fleet/ssh/connection
+ * @module @greatbaby/dsh-fleet/ssh/connection
  */
 import { createHash } from 'node:crypto'
 import { Client } from 'ssh2'
