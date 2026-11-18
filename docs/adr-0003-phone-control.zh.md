@@ -57,15 +57,42 @@ dsh-fleet 把节点行并进 `session/list`、`workspace/follow`、`session/cont
 
 ### 2.4 手机上「加新能力」的硬边界
 
-DSH Go 的 allowlist 是客户端里的 `const Set`。不在那 99 条里的端点，手机连发都不会发，
+DSH Go 的 allowlist 是客户端里的 `const Set`（`tunnel_carrier.dart:24`），强制点只有两处：
+unary `call` 之前（`:450`）和 `mux.open` 之前（`:944`）。不在那 99 条里的端点，手机连发都不发，
 **Host 侧无论怎么改都到不了手机**。因此给手机加能力只有两条路：
 
-- 用**已有的 99 个端点承载新语义**（例如 `workspace/create` 在 Host 侧本来就有 `mkdir -p`
+- 用**已有的端点承载新语义**（例如 `workspace/create` 在 Host 侧本来就有 `mkdir -p`
   语义，可以顺带承担「手机上建目录」）；
 - 或者放弃这个能力。
 
 这也直接否定了一条看似合理的投入：**扩中转插件的 allowlist 对手机端无效**。用户界面调不到
 的端点，放宽 Host 白名单没有意义。这条要写在这里，避免后续有人把时间花在错的地方。
+
+### 2.5 三条链条已经通了（源码级确认，不是推断）
+
+**终端。** 0.2.2-rc.3 的 terminal 控制器**只有** `terminal/attach`（duplex），没有
+`follow`/`write`/`resize`。手机在无 uplink 的 carrier 上要后者三个
+（`terminal_api.dart:552-562`）。中转插件用 `TerminalCarrierCompat` 把它们合成 `attach`
+（`terminal-carrier-compat.ts:133` 原话：「Existing Remote follow/write/resize calls terminate
+at the official attach stream」），而 fleet 的 `terminal/attach`（`host/decorators.js:571`）
+已经把 duplex 流的 uplink 一并转给节点的 `attach`。于是：
+
+```
+手机 terminal/follow → 中转 TerminalCarrierCompat → 本机 terminal/attach
+                    → fleet 装饰器 → 节点 terminal/attach
+```
+
+四跳接力，fleet 这一环已实现并有测试。**这是整条链路能成立的最强证据** —— 中转的兼容层
+正好落在 fleet 的 attach 上。
+
+**审批与提问。** 节点 `approval/request` 作为 waterfall 从节点的 `$events` 出来 → fleet 的
+`remote-events.js` 在本机 `pendingRemoteEvents` 里造 pending → 本机 `ctx.emit` →
+`api-remotes` 转发 → 本机 `$events` 流。手机经中转连上后开 `$events`，
+`api-gateway/lib/index.js:1042` 的 `answers: peer.principal.kind === "owner"` 为真，收到帧；
+手机 `respondApproval` 走 `$events/result`，正中 fleet 手工插的那条 pending，结算节点 waterfall。
+`remote-waterfall.js:220` 的「无活 owner client 就回 next」保护在手机连上时不触发。
+
+**混排。** 见 §2.3。
 
 ## 三、形态
 
@@ -129,12 +156,15 @@ DSH Go 的 allowlist 是客户端里的 `const Set`。不在那 99 条里的端�
    改成显式 tag（当前 `0.5.21`），并在升级前先看上游 `docs/compatibility.zh.md` 的 peer range。
 2. **适配插件**。理由不是扩白名单（见 §2.4），而是 Host 侧的语义正确性，至少三条：
    - **`workspace/create` 会在 Windows 上造出垃圾目录。** 中转插件的 `ensureHostWorkspaceDirectory`
-     在 dispatch 之前执行 `mkdir(path, {recursive:true})`，而 `path.isAbsolute('/root/foo')` 在
-     win32 上为真（指向当前盘根）。手机在节点工区里手输 `/root/foo` 建工区 → 桌面 D 盘真的多出
-     `\root\foo` → 之后 fleet 才把请求路由到节点。功能看着正常，磁盘被污染。
+     在 dispatch 之前执行 `mkdir(path, {recursive:true})`。win32 实测：
+     `isAbsolute('/root/foo') → true`、`resolve('/root/foo') → D:\root\foo`、
+     `parse('/root/foo').root → '/'`，所以那道「非根目录」的检查拦不住。手机在节点工区里手输
+     `/root/foo` 建工区 → 桌面 D 盘真的多出 `\root\foo` → 之后 fleet 才把请求路由到节点。
+     功能看着正常，磁盘被污染。**只能在 fork 里修**，因为这段代码在 dispatch 之前，
+     fleet 的装饰器还没被调到。
    - **`directoryPicker/list` 没被 fleet 路由**（下节）。手机在节点工区里浏览目录，看到的是桌面磁盘。
    - **失败要能解释。** 中转插件的错误原样透传，`WORKSPACE_PATH_DENIED` 之类对手机用户没有意义。
-3. **是否 fork 成自有包**：见 §六 待决项 B。
+3. **是否 fork 成自有包**：见 §六 待决项 B。用户已定：**fork 研究**。
 
 ### 4.4 安卓端（结论：不拆 DSH Go）
 
@@ -152,51 +182,95 @@ DSH Go 的 allowlist 是客户端里的 `const Set`。不在那 99 条里的端�
 
 | 序 | 事项 | 验收 |
 |---|---|---|
-| P0-1 | **验证地基：中转 host 与 fleet 共存于同一个 profile** | 同一个 Host 里两个插件都激活；中转 dispatch 的 `session/list` 经过 fleet 装饰器（日志/返回值里能看到节点行） |
+| P0-1 | **验证地基：中转 host 与 fleet 共存于同一个 profile** | 同一个 Host 里两个插件都激活；中转 dispatch 的 `session/list` 经过 fleet 装饰器（返回值里能看到节点行） |
 | P0-2 | 用 DSH Go 真机（或模拟器）连到这台 Host，读侧栏 | 手机工区列表里**同时**有桌面本地工区和节点工区；打开节点会话能看到历史 |
 | P0-3 | 手机在节点会话下发一条真指令 | 节点真的执行；独立 SSH 读到产物字节 |
-| P1-1 | 修 `ensureHostWorkspaceDirectory` 的 Windows 误伤 | 手机手输一个节点路径建工区，桌面磁盘**不**出现同名目录；节点上出现该工区 |
-| P1-2 | fleet 路由 `directoryPicker/list` | 手机在节点工区浏览目录，列的是节点磁盘；桌面本地工区仍列本机 |
+| P0-4 | 手机的审批卡从节点到达 | 节点触发审批 → 手机弹出卡片 → 答复 → 节点继续 |
+| P0-5 | 手机的终端连到节点 PTY | 手机开终端 → 四跳接力 → 在节点 shell 里 `hostname` 得到节点的名字 |
+| P1-1 | fork 中转插件，修 `ensureHostWorkspaceDirectory` 的 Windows 误伤 | 手机手输 `/root/x` 建工区，桌面磁盘**不**出现 `\root\x`；节点上出现该工区 |
+| P1-2 | fleet 路由 A 类 22 条（按 §2.2 表） | 每条一个断言：手机拿到的是节点答案，不是桌面答案 |
 | P2-1 | 中转服务端版本钉住 | `docker inspect` 的镜像 tag 不再是 `latest`；重启后 DSH Go 仍能连 |
 | P2-2 | 失败可解释 | 故意停掉节点，手机端得到的文案能指向「节点离线」而不是协议错误 |
 
 P0 全部通过之前不写实现代码 —— 地基不成立的话，后面的修正都是白做。
+P0-4/P0-5 之所以升到 P0：它们是「手机能不能真用」的分水岭，源码上已确认链路通（§2.5），
+但**没跑过就不算过**。
 
 ## 六、待决项（需要用户选择）
 
 ### A. 「不改 DSH Go」的硬边界怎么处理
 
-不改手机的代价是有些能力手机上**永远**没有（不是没做好，是物理上到不了）：
+**源码核实后的准确清单**（不是猜的，见 .scratch/research/FINDINGS.md）：
 
-| 能力 | 为什么手机上没有 |
+真正做不到的只有 **2 项**：
+
+| 能力 | 为什么做不到 |
 |---|---|
-| 智能体协作开关 | `agentTeams/setEnabled` 不在 DSH Go 的 allowlist 里；它只读 `session/projections` 里的 `agentTeam` 快照 |
-| 在节点上新建文件夹 | `directoryPicker/createDirectory` 不在 DSH Go 的隧道 allowlist 里（只有 `list`） |
-| 节点上浏览目录 | fleet 未路由 `directoryPicker/list`；**这条可以修**（P1-2） |
-| 节点模型目录 | `session/modelCatalog` 按设计保持本地；手机上会给节点会话列出桌面的模型 |
-| goals / commands / skills 列表 | fleet 未路由；手机会拿到桌面的答案 |
+| 手机上**新建**目录 | `directoryPicker/createDirectory` 不在 DSH Go 的 allowlist；`workspaces_api.dart:115` 的 `canCreateDirectories` 在 relay 上恒为 false，UI 直接隐藏入口 |
+| 节点专属**模型目录** | `session/modelCatalog` 的上游 descriptor 无身份参数（`parameters: []`），且 fleet 已注释决定保持本地；手机给节点会话列的是桌面模型 |
+
+**可以修、只是还没接的（22 条，属于 A 类）**：goals 六个、messageFeedback 三个、
+`subagents/{prompt,interruptByParent}`、`commands/execute`、`fileReferences/list`、
+`sessionReferenceResolver/candidates`、`schedule/{catalog,history,update,delete}`、
+`directoryPicker/list`、`pluginInventory/list`、`userQuestions/{answer,attachWait}`。
+
+**应当保持本地（18 条）**：`agentPresets/*`、`credentials/*`、`llm/listProviders`、
+`permissionPresets/catalog`、`pluginManager/*`、`settings/*`、`skills/list`、`officeToPdf/render` ——
+它们描述的是**这台桌面安装**，路由到节点反而是错的。
+
+**智能体协作不需要 `agentTeams/setEnabled`。** 早前担心它是硬边界，源码核实后是误判：
+手机端的开关走的是 **bundle 开关** `pluginManager/setBundleEnabled`（`installed_plugins.dart:420`、
+`agents_state.dart:285` 的 `agentTeamBundleProvider`），读的是 `session/projections` 里的
+`agentTeam` 快照。这俩都在 allowlist 里、也都已路由/应保持本地。手机团队页读成员消息用的是
+`session/follow` 快照（`agents_state.dart:420` 的 `_recentEvents`），也已路由。
 
 可选方向：
 
 1. **接受现状**，把上表写进使用说明。手机定位为「发指令、看结果、答审批」，不做配置管理。
-2. **只在 fleet 侧能修的修**（P1-2、模型目录路由），需要动 DSH Go 的保持不做。
-3. **允许给 DSH Go 打最小 patch**（比如只加 allowlist 几条），代价是要自己维护一份 Flutter 构建。
+2. **把 A 类 22 条补上路由**（其中有几条与桌面端共用的验收脚本可以直接复用），
+   模型目录单独讨论。需要动 DSH Go 的保持不做。
+3. **允许给 DSH Go 打最小 patch**，代价是要自己维护一份 Flutter 构建。
 
 推荐 **2**。
 
 ### B. 中转插件 fork 与否
+
+**用户已定：fork，只做研究用途。**
 
 | 方案 | 代价 | 风险 |
 |---|---|---|
 | 保持官方 `ds-harness-remote@0.6.5`，把 Host 侧修正全放进 fleet | 不改第三方代码；但 §4.3 里三条属于中转插件的内部行为，fleet 拿不到执行点 | `ensureHostWorkspaceDirectory` 的 Windows 误伤**修不了**，只能靠文档提醒 |
 | Fork 成自有包（MIT 允许），只改必要的三处 | 多一个需要跟随上游升级的仓库 | 上游改协议时要做合并 |
 
-推荐 **fork**，但只 fork 插件、不动服务端（服务端协议无关，用官方镜像 + 钉版本即可）。
+只 fork 插件、不动服务端（服务端协议与实现无关，用官方镜像 + 钉版本即可）。
 
 ### C. 是否同时支持「手机直连节点」
 
-节点上也能装中转 host（Linux、Node 22、有 `@roamhq/wrtc` 原生包），手机就能在**桌面不开机**时
-直接连节点。代价是手机上多一个 Host 条目，而且看到的是节点原生工区（没有 fleet 混排）。
+**用户已明确：不需要。** 保持「手机只能经桌面 Host 进入」这一条路径，节点上不装中转 host。
+好处是手机上只有一个 Host 条目，看到的永远是混排后的统一视图。
 
-这不在用户描述的流程里，但成本很低。默认**不做**，留作可选。
+## 七、调研方式（可复现）
+
+两份源码都是拉下来读的，不是靠文档推断：
+
+```powershell
+git -c http.proxy= -c https.proxy= clone --depth 1 `
+  https://git.yylx.win/https://github.com/liguobao/ds-harness-remote.git .scratch/research/remote
+git -c http.proxy= -c https.proxy= clone --depth 1 `
+  https://git.yylx.win/https://github.com/ccch1mneyyy/dsh-go.git .scratch/research/dshgo
+```
+
+关键文件：
+
+| 文件 | 读它做什么 |
+|---|---|
+| `dshgo/packages/dsh_remote/lib/src/carrier/tunnel_carrier.dart` | 手机的 allowlist 与强制点 |
+| `dshgo/packages/dsh_client/lib/src/carrier.dart` | `allowsEndpoint` 契约 |
+| `dshgo/packages/dsh_client/lib/src/workspaces_api.dart` | `canCreateDirectories` 为什么在 relay 上恒 false |
+| `remote/packages/plugin/src/harness-remote-bridge.ts:114` | 中转的 allowlist |
+| `remote/packages/plugin/src/remote-directory-browser.js` | Windows 误伤那一处 |
+| `remote/packages/plugin/src/terminal-carrier-compat.ts` | 终端四跳接力的中间那一跳 |
+| `dshgo/app/lib/state/agents_state.dart` / `ui/agents/team_page.dart` | 手机「智能体协作」真正走 bundle 开关 |
+
+完整证据与逐条比对在 `.scratch/research/FINDINGS.md`（不进版本管理）。
 
