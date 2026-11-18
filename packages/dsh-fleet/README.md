@@ -144,12 +144,16 @@ decision is which machine the folder is on.
 
 A node is a separate machine, so it composes only what you send it. **Settings ›
 Remote nodes › Plugin sync** lists the plugins *you* installed here — one row per
-bundle, with its version and what it contributes — and each switch decides whether a
-node gets it. Everything starts off: a plugin arrives with its own dependencies and
-side effects, and sending it just because it is installed here would mean every plugin
-silently lands on every node.
+bundle, with its version and what it contributes.
 
-Switching one on really installs it there, and the reply reports what each node did:
+They are **sent by default**: one installation, one working environment. Switch one off
+and it stays on this machine only. Four names are never sent, whichever list they are on:
+this plugin itself (its preset holds the node-management tool, and a node that could
+manage other nodes is the one shape of control a node must not have), the brain bundle,
+and the two names of the relay plugin (a node that opened a second way in is a surface
+nobody asked for).
+
+Switching really installs it there, and the reply reports what each node did:
 
 - a **published** plugin is installed by the node's own npm at this desktop's version
   spec, so both sides run the same release;
@@ -161,6 +165,56 @@ Switching one on really installs it there, and the reply reports what each node 
 
 Nothing else changes: local sessions, local workspaces and local tools behave
 exactly as before.
+
+### Node control: a session that can only do one thing
+
+The same plugin ships an agent preset called **node control**. A session created from it
+can list, add, update, remove, connect and disconnect nodes — and nothing else.
+
+That is not a prompt asking the model to behave: the preset's declared plugin list *is*
+the session's tool set, and it declares one tool. There is no shell, no file editor, no
+web access, no subagent, no workflow. Ask it to read a file and it answers that this
+session only manages nodes, and points you at the node's own workspace — where the brain
+runs, so the tools run there for real.
+
+Credentials are the one place it deliberately cannot help. Tool arguments are written into
+the session log, so the tool refuses a pasted password and accepts a *reference* instead:
+a private-key file that already exists on this machine (`{"kind":"key","path":"~/.ssh/id_ed25519"}`)
+or the name of an environment variable (`{"kind":"password","env":"DSH_FLEET_NODE_PW"}`).
+To paste a secret directly, use Settings › Remote nodes.
+
+## Phones
+
+`ds-harness-remote` forwards this Host's `session/*` and `workspace/*` endpoints to a
+phone, and remote sessions are real rows in `session/list`, so they appear there too. A
+node's filesystem is addressable inside the one path syntax that client speaks:
+
+```
+/@fleet                       → the node list
+/@fleet/<nodeId>/             → that machine's filesystem root
+/@fleet/<nodeId>/root/proj    → /root/proj on that machine
+```
+
+`directoryPicker/list` answers for both kinds of machine, and `workspace/create` with a
+path like that creates the workspace **on the node**. The prefix is reserved for nodes;
+creating a workspace from it directly is refused.
+
+## Installation
+
+As a bundle, the way DSH expects:
+
+```powershell
+# from a packed tarball
+npm pack --pack-destination dist
+dsh plugin --profile <profile> add -w .\dist\local-dsh-fleet-<version>.tgz
+
+# or straight from this directory (a `link:` dependency; good for development)
+dsh plugin --profile <profile> add -w <absolute path to packages/dsh-fleet>
+```
+
+Either way the profile's `dsh.profile.bundles` must list this package *after*
+`@deepseek-ai/dsh-base` (and after `dsh-web-app` on a desktop). `engines.dsh` pins the
+runtime range, so an unsupported DSH refuses the install instead of composing half of it.
 
 ## Configuration
 
@@ -195,7 +249,12 @@ exactly as before.
 | `node test/host-routing.mjs <base> <token>` | Every routed endpoint through the local `/api`, plus the ones that must stay local — including a **binary** read (what a remote image preview depends on) and the job roster (whose node-side `job/not-found` is the only way to tell routing from a silent local answer). |
 | `node test/workspace-flow.mjs <base> <token>` | The end-to-end gesture: add a remote workspace, create a Session in it, prompt it, watch the node's `bash` output arrive, and confirm the file it wrote exists on the node. |
 | `node test/workspace-browse.mjs <base> <token>` | Choosing a workspace folder the way the dialog does: this machine and a node answer in the same shape, the node listing is really the node's (`/` is not this machine's home, hidden folders are hidden, a missing folder reports the shell's reason), and a picked node folder becomes a workspace with the node wrapped into its id. |
-| `node test/plugin-switch.mjs <base> <token>` | A per-plugin switch really lands on the node: the package is installed or copied there, the node names it in its own bundle list **before** the brain bundle, the resident host restarts, and the node still lists the same remote workspaces. Switching it back off leaves the same node working, and the switch is restored on every exit path. |
+| `node test/plugin-switch.mjs <base> <token>` | A per-plugin switch really lands on the node: the package is installed or copied there, the node names it in its own bundle list **before** the brain bundle, the resident host restarts, and the node still lists the same remote workspaces. Switching it off removes it again, switching it back restores the default, and the switch is restored on every exit path. |
+| `node test/picker-flow.mjs <base> <token>` | The phone's view of a node: `/@fleet` lists the nodes, `/@fleet/<id>/` lists that machine's real folders with every entry spelled back inside the namespace, the breadcrumbs never go above it, and an identity this Host does not record fails by name instead of answering an empty level. Then `workspace/create` by such a path creates the workspace **on the node**, and the directory the relay made on this machine before dispatching is gone — while a file somebody put there survives. |
+| `node test/picker-paths-unit.mjs` | The `/@fleet` namespace round-trips through both path normalisers (drive letter, backslashes, repeated separators, case), a malformed identity never half-matches, and the shadow cleanup cannot remove a directory with anything in it. |
+| `node test/node-control.mjs <base> <token>` | The node-control preset: two declared rows, a Session created from it reports that preset, and a real turn calls `fleet_nodes` and **no other tool at all** — the observable form of "this session can only manage nodes". |
+| `node test/fleet-control-unit.mjs` | The surface behind that tool: a pasted password or private key is refused (tool arguments are logged; the refusal is the feature), a reference is read on this machine, a result can never carry authentication material, and an unknown identity is a named failure rather than an empty list. |
+| `node test/install-unit.mjs` | The manifest a bundle is installed from is self-consistent: every `dsh.bundle.patch` file exists and is declared, `engines.dsh` is a range npm understands, `files` covers every runtime artefact, `locale.meta.detail` names a file that is really there, and no shipped file carries a LAN address or a private key. |
 | `node test/tool-parity.mjs <base> <token>` | The check the mirror-based approach could not pass: the agent's own `read` / `write` / `edit` / `grep` / `glob` run against the node's real paths, with no path failure and no Windows path anywhere in the transcript. |
 | `node test/tool-git-image.mjs <base> <token>` | `git` on a real repository, `read_image` on a real PNG, and `grep` over real files — the three tools that returned `code=127` or `ENOENT` when the tools ran locally against a mirror. |
 | `node test/client-bundle.mjs <base> <token>` | The shell serves this plugin's client module; its three own slots plus the three folder-picker slots register and render. |
