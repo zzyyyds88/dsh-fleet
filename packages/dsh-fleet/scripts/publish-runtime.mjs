@@ -20,14 +20,20 @@
  * properties that matter — same release, correct natives — and drops the one that never
  * held (same bytes).
  *
+ * **This is a convenience, not a prerequisite.** A node with no artefact available resolves
+ * the release itself (`npmInstallScript` in `src/remote/artefact.js`), so publishing here is
+ * what turns a slow connect into a fast one — it is not what makes an upgrade possible.
+ *
  * Usage:
- *   node packages/dsh-fleet/scripts/publish-runtime.mjs [--platform linux-x64] [--out dist] [--publish]
+ *   node packages/dsh-fleet/scripts/publish-runtime.mjs [--platform linux-x64[(-musl)]] [--out dist] [--publish]
  *
  * `--platform` accepts the tag form the plugin uses (`linux-x64`, `linux-arm64`,
- * `darwin-arm64`). Nothing is published unless `--publish` is given.
+ * `linux-musl-arm64`, `darwin-arm64`). Nothing is published unless `--publish` is given.
+ * CI runs this per platform (`.github/workflows/release-runtime.yml`) so following an
+ * upstream release does not require anyone's laptop.
  */
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,14 +53,21 @@ const shouldPublish = flag('publish')
 const tag = value('tag', undefined)
 const registry = value('registry', 'https://registry.npmmirror.com')
 
-/** `linux-x64` → npm's `--os linux --cpu x64`, plus libc for the Linux split. */
+/**
+ * `linux-x64` → npm's `--os linux --cpu x64`, plus libc for the Linux split.
+ *
+ * The libc suffix is optional (`linux-x64-musl`). Without one, Linux resolves as glibc,
+ * which is what the nodes in service run; a musl node needs a musl artefact, and both
+ * `sharp` and `sherpa-onnx` publish one. Measured: `ldd --version` on the test node reports
+ * `Ubuntu GLIBC 2.35-0ubuntu3.18`, and `@koromix/koffi-linux-x64` ships both `linux_x64` and
+ * `musl_x64` — asking npm for the wrong half installs a library that cannot be loaded.
+ */
 function npmPlatform(tagName) {
-  const [os, cpu] = tagName.split('-')
+  const [os, cpu, libc] = String(tagName).split('-')
   if (!os || !cpu) throw new Error(`--platform wants a tag like linux-x64, got "${tagName}"`)
   const flags = [`--os=${os}`, `--cpu=${cpu}`]
-  // sharp and sherpa-onnx publish glibc and musl variants; glibc is the default these
-  // nodes run, and being explicit stops npm from picking the host's answer.
-  if (os === 'linux') flags.push('--libc=glibc')
+  if (os === 'linux') flags.push(`--libc=${libc ?? 'glibc'}`)
+  else if (libc !== undefined) throw new Error(`only Linux splits by libc, and "${tagName}" is not Linux`)
   return flags
 }
 
@@ -158,10 +171,25 @@ writeFileSync(join(staging, 'package.json'), `${JSON.stringify({
 }, undefined, 2)}\n`, 'utf8')
 
 process.stdout.write(`resolving @deepseek-ai/dsh ${version} for ${platform}\n`)
+// `--ignore-scripts` is load-bearing, not a speed-up. A package's `install` script runs with
+// **this** machine's `process.platform`, so koffi's `cnoke` compiles for Windows even when
+// npm was asked to resolve `--os=linux --cpu=x64`. Measured on the rc.5 archive built the old
+// way: 48 `.exe`/`.cmd`/`.dll`/`.lib` files and 147 `koffi/build/win32_x64/**` entries inside
+// a `linux-x64` artefact, and the packer's own `koffi/build` shadowed the resolved
+// `@koromix/koffi-linux-x64` (which `koffi`'s loader checks *first*, so it kept working —
+// on a tree that was 0.9 MB larger and wrong).
+//
+// Nothing is lost by skipping them: every native dependency in this tree ships a prebuilt
+// platform package (`@koromix/koffi-linux-x64`, `@img/sharp-linux-x64`,
+// `sherpa-onnx-linux-x64`, `node-pty/prebuilds/linux-x64/pty.node`). Measured both ways:
+// with scripts 968.2 MiB / 94106 files, without 957.3 MiB and all four native modules
+// present. The one script that does real work is `dsh-subprocess-local`'s, which restores
+// `+x` on a helper — and the node fixes modes itself when it unpacks (see `installScript`).
 const install = spawnSync('npm', [
   'install',
   '--prefix', staging,
   '--no-audit', '--no-fund', '--loglevel=error',
+  '--ignore-scripts',
   '--registry', registry,
   ...npmPlatform(platform),
 ], { stdio: 'inherit', shell: process.platform === 'win32' })
@@ -179,6 +207,29 @@ for (const scratch of ['package.json', 'package-lock.json', 'node_modules/.packa
 const before = measure(staging)
 const stripped = strip(staging)
 const after = measure(staging)
+
+// Restore the executable bit — but only where the packer has POSIX modes to restore.
+//
+// Measured, and worse than expected: bsdtar on Windows writes `-rw-rw-rw-` for **every**
+// entry, `chmodSync` is a no-op there (Windows has no exec bit), and no `tar` flag changes
+// it — `--owner=0 --group=0` is accepted and changes nothing. So on a Windows packer the
+// archive *cannot* carry modes at all, which is why the load-bearing fix is the `chmod` in
+// `installScript` on the node (it also repairs archives already published). This step still
+// matters for the CI matrix, where the same script runs on ubuntu and macos runners and the
+// modes it sets are the modes that ship.
+let chmodded = 0
+const restore = dir => {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) { restore(full); continue }
+    if (entry.name !== 'spawn-helper' && !entry.name.endsWith('.node')) continue
+    try {
+      chmodSync(full, 0o755)
+      chmodded += 1
+    } catch { /* the node fixes it on unpack */ }
+  }
+}
+restore(staging)
 
 const archive = join(outDir, name)
 rmSync(archive, { force: true })
@@ -198,6 +249,7 @@ process.stdout.write(
   + `  archive  ${mib(bytes.length)} MiB\n`
   + `  unpacked ${after.files} files, ${mib(after.bytes)} MiB`
   + ` (${mib(stripped)} MiB stripped from ${before.files})\n`
+  + `  modes    ${String(chmodded)} files marked 0755\n`
   + `  sha256   ${sha256}\n`,
 )
 

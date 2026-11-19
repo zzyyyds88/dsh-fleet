@@ -373,6 +373,13 @@ if [ ! -f "$staging/node_modules/@deepseek-ai/dsh/lib/bin.js" ]; then
   echo "ARTEFACT_SHAPE_UNEXPECTED" >&2
   exit 5
 fi
+# tar on a Windows packer writes 0666 for every entry — measured on the rc.5 archive:
+# 51500 files at -rw-rw-rw-, and the only 20 entries carrying +x were Windows .exe/.cmd.
+# On a Darwin node that turns node-pty/prebuilds/*/spawn-helper into a file the terminal
+# can read but not execute, so the PTY fails at first use — later and further from the
+# cause than any install failure. Restoring the bit here rather than only in the packer
+# keeps archives that are already published working.
+find "$staging" -type f -name 'spawn-helper' -exec chmod 0755 {} + 2>/dev/null || true
 
 rm -rf "$previous"
 if [ -d "$runtime" ]; then mv "$runtime" "$previous"; fi
