@@ -22,6 +22,32 @@ const CHANNEL_RETRIES = 4
 /** How long each wait grows: 250, 500, 750, 1000 ms. */
 const CHANNEL_BACKOFF_MS = 250
 
+/**
+ * The longest command line this layer will send, in bytes.
+ *
+ * OpenSSH's `PACKET_MAX_SIZE` is 256 KiB, and ssh2 writes an `exec` request as **one** packet
+ * however long the command is (`Protocol.js:1273`, `alloc(1 + 4 + 4 + 4 + 1 + 4 + cmdLen)`).
+ * A command over the server's ceiling is therefore not "a large exec", it is a packet the server
+ * rejects — and it rejects it *after* accepting the bytes, so its stream position is wrong from
+ * then on and every later packet is read as garbage.
+ *
+ * **Measured on a real node** (single connection, node's own `auth.log` counters):
+ *
+ *   command line 240,000 bytes → +0 connections, +0 corrupted
+ *   command line 262,000 bytes → +0 connections, +0 corrupted
+ *   command line 262,200 bytes → +6 connections, +6 corrupted
+ *   command line 300,000 bytes → +6 connections, +6 corrupted
+ *
+ * That is the whole cause of the `Bad packet length 7923616.` / `Connection corrupted` bursts
+ * this plugin used to produce: `writePluginBundle` built one command line containing an entire
+ * plugin tree as base64, and 7,923,616 is that command's size for `dsh-whale-widget` to within
+ * its script tail. Payloads belong on stdin (channel-data packets honour the negotiated
+ * `packetSize`); see `writeBrainBundle`/`writePluginBundle`.
+ *
+ * The margin under 256 KiB is for the `cd … && exec …` prefix `posixCommand` may add.
+ */
+export const MAX_COMMAND_BYTES = 128 * 1024
+
 /** Stable failure categories a caller can branch on without parsing text. */
 export const SSH_FAILURE = Object.freeze({
   AUTH: 'auth',
@@ -48,6 +74,13 @@ export const SSH_FAILURE = Object.freeze({
    * the user as a bare "Unable to exec".
    */
   CHANNEL: 'channel',
+  /**
+   * A request this layer refused to send because it would break the protocol.
+   *
+   * Not retryable and not a network fault: the caller asked for something no server can accept,
+   * and the only fix is at the call site. See `MAX_COMMAND_BYTES`.
+   */
+  PROTOCOL: 'protocol',
   UNKNOWN: 'unknown',
 })
 
@@ -206,6 +239,18 @@ export class SshConnection {
    */
   async exec(request) {
     const command = posixCommand(request.argv, request.cwd)
+    const commandBytes = Buffer.byteLength(command, 'utf8')
+    // Refuse here rather than on the server. Over the ceiling the server does not answer with an
+    // error, it loses packet alignment and drops the connection — measured, see
+    // `MAX_COMMAND_BYTES`. A local throw is the only outcome a caller can act on.
+    if (commandBytes > MAX_COMMAND_BYTES) {
+      throw toSshError(new Error(
+        `ssh: the command line is ${String(commandBytes)} bytes, over the `
+        + `${String(MAX_COMMAND_BYTES)}-byte ceiling (one exec request is one SSH packet, and `
+        + 'OpenSSH rejects anything over 256 KiB by corrupting the stream); send the payload on '
+        + 'stdin instead',
+      ), SSH_FAILURE.PROTOCOL)
+    }
     const maxBytes = request.maxBytes ?? 4 * 1024 * 1024
     const channel = await this.#openSession(command)
     return await new Promise((resolve, reject) => {

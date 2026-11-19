@@ -600,6 +600,13 @@ rm -f ${this.layout.legacyPatch}
    * for the whole tree beats a dozen SFTP round trips on a slow link, and the runtime
    * is already a directory this plugin owns.
    *
+   * **The tree travels on stdin, never on the command line.** ssh2 writes an `exec`
+   * request as one SSH packet whatever its length, and OpenSSH's `PACKET_MAX_SIZE` is
+   * 256 KiB — so a command line carrying a tree is not a large exec, it is a packet the
+   * server rejects *after* reading it, leaving its stream misaligned. Measured on a real
+   * node: a 262,200-byte command line produced six corrupted connections; the same bytes
+   * on stdin produced none, at any size. See `MAX_COMMAND_BYTES` in `ssh/connection.js`.
+   *
    * @param {Record<string, string>} files - package-relative path → contents.
    * @param {string} packageName - the bundle's package name.
    * @returns {Promise<{ changed: boolean, files: number }>}
@@ -633,14 +640,15 @@ cd "$target"
 while IFS='\t' read -r rel data; do
   mkdir -p "$(dirname "$rel")"
   printf '%s' "$data" | base64 -d > "$rel"
-done <<'FLEET_BRAIN_FILES_EOF'
-${payload.map(file => `${file.path}\t${file.data}`).join('\n')}
-FLEET_BRAIN_FILES_EOF
+done
 printf '%s' "${wanted}" > "$stamp"
 echo written
 `.trim()
     const result = await this.connection.exec({
       argv: ['sh', '-c', script],
+      // One `path<TAB>base64` line per file, and `read` needs a final newline to return
+      // the last one.
+      stdin: `${payload.map(file => `${file.path}\t${file.data}`).join('\n')}\n`,
       timeoutMs: 120_000,
       // The script echoes nothing but its verdict, so a small cap is enough.
       maxBytes: 64 * 1024,
@@ -664,6 +672,14 @@ echo written
    *
    * Base64 per file rather than a heredoc: the payload can contain anything, and a plugin
    * source file is not the place to discover that a `$` in a string was eaten by a shell.
+   *
+   * The payload travels on **stdin**, and that is not a style choice. ssh2 writes an `exec`
+   * request as one SSH packet however long the command is, and OpenSSH's `PACKET_MAX_SIZE` is
+   * 256 KiB; a plugin tree on the command line therefore crosses the ceiling and the server
+   * drops the connection with `Bad packet length …` / `Connection corrupted`. Measured on the
+   * reference node with a single connection: a 262,200-byte command line → six corrupted
+   * connections, while the same 7.9 MB on stdin → none. The 7,923,616 in that log was this
+   * function's command line for `dsh-whale-widget`, to within its script tail.
    *
    * @param {Record<string, string>} files - relative path → base64 of the raw bytes.
    * @param {string} packageName
@@ -690,14 +706,15 @@ cd "$target"
 while IFS='\t' read -r rel data; do
   mkdir -p "$(dirname "$rel")"
   printf '%s' "$data" | base64 -d > "$rel"
-done <<'FLEET_PLUGIN_FILES_EOF'
-${payload}
-FLEET_PLUGIN_FILES_EOF
+done
 printf '%s' "${wanted}" > "$stamp"
 echo written
 `.trim()
     const result = await this.connection.exec({
       argv: ['sh', '-c', script],
+      // One `path<TAB>base64` line per file, and `read` needs a final newline to return
+      // the last one.
+      stdin: `${payload}\n`,
       timeoutMs: 180_000,
       maxBytes: 256 * 1024,
     })

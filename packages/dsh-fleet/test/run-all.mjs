@@ -191,6 +191,14 @@ const SUITES = [
     timeoutMs: 180_000,
     proves: 'the node composition is still a brain: Remote controllers in, no client-UI rows, YAML parses',
   },
+  {
+    name: 'packet',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'packet-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 60_000,
+    proves: 'no payload rides a command line: one exec request is one SSH packet, and OpenSSH drops the connection over 256 KiB',
+  },
 
   // ---- contract seams: must run under Electron's Node ---------------------
   {
