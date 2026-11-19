@@ -44,7 +44,7 @@ node packages/dsh-fleet/test/run-all.mjs --host <base> --token <t>   # 复用已
 | 项 | 要求 |
 |---|---|
 | 桌面端 | 用 `--profile fleettest` 启动的 Host，不是你正在用的那个 profile |
-| 节点 | 一台 Linux 机器，Node ≥ 22，SSH 可达，能从 `DEFAULT_MIRRORS` 里的任一加速站下载（**不回退直连 GitHub**，直连只有 ~27 KB/s） |
+| 节点 | 一台 Linux 机器，Node ≥ 22，SSH 可达，能从 `DEFAULT_MIRRORS` 里的任一加速站下载（源列表与「不回退直连」的理由见 [ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六之四） |
 | 凭据 | 只从环境变量读：`DSH_FLEET_TEST_HOST/USER/PASSWORD/KEY_FILE/PORT` |
 | 加速 | 节点侧确认 `curl -fLsS -o /dev/null -w '%{http_code}' https://gh.inkchills.cn/` 返回 200；加速站会挂，`src/remote/artefact.js` 里的列表是实测排序，不是固定答案 |
 
@@ -218,7 +218,8 @@ $env:ELECTRON_RUN_AS_NODE = "1"
    还是「本机已安装但不在组合里」；
 2. `@deepseek-ai/*` 与大脑 bundle 不出现 —— 它们是产品本身，不是选项；
    `NODE_NEVER_SYNC` 里的五个名字（含 `ds-harness-remote`）也不出现；
-3. 默认**全部开启**：这台机器装了、起了作用，节点就是同一个工作面的延伸。关掉一个就只在这台
+3. 默认**全部开启**：这台机器装了、起了作用，节点就是同一个工作面的延伸（为什么默认全开、
+   为什么有硬排除清单，见 [ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六之五）。关掉一个就只在这台
    机器上运行；
 4. 打开一个开关后，那一行必须真的落地，四条都要成立：
    - 节点 profile 的 `package.json` 的 `dependencies` 多出这个包，
@@ -228,9 +229,9 @@ $env:ELECTRON_RUN_AS_NODE = "1"
    - 接口返回里带每个节点的原文结果，节点没接受就带 `warning`，页面把节点的话显示出来；
 5. 关掉开关：包从 bundle 列表移除，节点重启，工区照旧；
 6. 把开关拨回默认值，profile 目录里的 `fleet-plugins.json` 那条记录被删掉，而不是存成同值
-   （存 `$DSH_HOME` 会让 `desktop` 与 `fleettest` 互相影响，所以现在的路径是 **profile 内**）；
-7. 页面本身能滚动：整页高于窗口时出现滚动条。实测过 `mainPanel` 1026px 高、内容 10658px，
-   而 `centerCol` 是 `overflow: hidden` —— 页面必须自己持有滚动条，否则最下面那段永远看不到。
+   （为什么存 profile 内、为什么删而不是存同值，见 [ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六之五「状态存哪」）；
+7. 页面本身能滚动：整页高于窗口时出现滚动条（实测 `mainPanel` 1026px 高、内容 10658px；
+   原因与修法见 [ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六之六「页面骨架是量出来的」）。
 
 ```powershell
 node packages\dsh-fleet\test\version-unit.mjs       # 开关语义（哪些算第三方、默认开、顺序、容错）
@@ -357,14 +358,11 @@ node packages\dsh-fleet\test\run-all.mjs --layer e2e --host <base> --token <t>  
 | contract（3） | descriptor / dispatch / upstream（都走 Electron 的 Node 读 `app.asar`） |
 | e2e（13） | gateway / host-routing / workspace-flow / tool-parity / tool-git-image / client-bundle / event-relay / session / terminal / multi-node / artefact / approval / browser |
 
-runner 自己的三条硬约束（都实测过会踩）：
-
-- **退出码要真的表示结论。** 七个套件原本 `process.exitCode = 1` 后又 `process.exit(0)`，
-  失败被吞掉；runner 会把它读成通过。全部改成按 `failures.length` 退出。
-- **没跑 ≠ 通过。** 请求 `--layer e2e` 却一个都没能跑时，命令以退出码 1 结束，并明说
-  "the layer that proves a user can work was not exercised"。
-- **SKIP 必须带原因。** 缺节点凭据、缺 Chrome 端口、节点无 Release 制品、节点被设成
-  `danger-full-access` 不会发审批请求 —— 四种都报告原因，不写成通过。
+runner 自己的三条硬约束（退出码要真的表示结论、没跑不等于通过、SKIP 必须带原因）是设计取舍，
+见 [ARCHITECTURE](../../../docs/ARCHITECTURE.md) §七「一条命令跑完」。实现上 runner 按
+`failed.length` 决定退出码，并在「请求了 e2e 却一个都没跑成」时强制 `exit 1`；四种 SKIP 条件
+（缺节点凭据、缺 Chrome 端口、节点无 Release 制品、`danger-full-access` 节点不发审批请求）见本文
+「一条命令跑完」那张表。
 
 ### 2026-11-17 · 一条命令跑完 24 个套件
 
@@ -377,13 +375,8 @@ runner 自己的三条硬约束（都实测过会踩）：
 | contract（3） | descriptor / dispatch / upstream（都走 Electron 的 Node 读 `app.asar`） |
 | e2e（15） | gateway / host-routing / workspace-flow / workspace-browse / plugin-switch / tool-parity / tool-git-image / client-bundle / event-relay / session / terminal / multi-node / artefact / approval / browser |
 
-本轮新增的两个套件（§7 与 §7b 的判据各有一份）：
-
-- `workspace-browse.mjs`：本机与节点用同一形状回答、节点列的是节点的盘（`/` 没有上级、
-  隐藏目录不列、不存在的目录带 shell 原文）、选中的节点目录变成带包裹身份的工区、同一
-  目录再选一次幂等、相对路径 400。
-- `plugin-switch.mjs`：单个开关真的落到节点（包被安装或复制、bundle 列表排在脑 bundle
-  之前、包真的存在），**并且重启之后浏览器那一路流还活着**。
+本轮新增的两个套件（`workspace-browse.mjs`、`plugin-switch.mjs`）各自验什么，见
+[ARCHITECTURE](../../../docs/ARCHITECTURE.md) §七 测试表的对应行。
 
 ### 2026-11-17 · 一条命令跑完 24 个套件（第二次）
 
@@ -399,12 +392,11 @@ runner 自己的三条硬约束（都实测过会踩）：
 修完两条之后**重跑全绿**：`24 passed, 0 failed, 0 skipped in 1217.9s`
 （`DSH_BROWSER_DEBUG_PORT=9222` 已设；`artefact` 单项 964.1 s）。
 
-两个非绿项都不是功能坏了：
+两个非绿项都不是功能坏了，逐条结论如下（修法与常量见 [ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六之四）：
 
 1. **`artefact` 超时是一次真的缺陷暴露，已修。** 单独复跑 68 s 全过，说明装得上；慢的是下载这一步。
    实测两条候选 URL 的差距：加速地址 4 s 拉完 172 683 323 字节，直连 GitHub 30 s 只拿到
-   925 295 字节。修法是给 curl 加**传输**下限与上限（常量与断言见 `docs/ARCHITECTURE.md`
-   §六之四），并把这一项的预算提到 2700 s —— 这套要装两次。修完实测 **653 s**，20 条断言全过。
+   925 295 字节。修完后这一项的预算提到 2700 s（这套要装两次），实测 **653 s**，20 条断言全过。
 2. **`browser` 是环境 SKIP，不是通过。** 单独用 `DSH_BROWSER_DEBUG_PORT=9222` 复跑全过
    （10 条断言：侧栏渲染、合并 baseline 7/7 远程工区、三个远程工区标题可见、插件入口
    「远程节点」可达、结束仍绘制），截图 `.scratch/browser-acceptance.png`。
@@ -490,19 +482,18 @@ $ hostname                                            →  Develop
 这一轮由三条用户反馈驱动，每条都先复现再改。修法都写进了
 `docs/ARCHITECTURE.md`（§连接状态机、§六之七、§六之六「页面骨架是量出来的」），这里只记结论。
 
-一、**「重启后远程节点界面无变化」→ 真因是开机后一个节点都没连。** `autoConnect()` 先看
-`credentialsReady()` 再决定连不连，而 secret 只由 `put()`/`connect()` 填充，于是刚启动的 Host 上
-每个节点都读成「没有凭据」，循环一次都不连。用内存注册表 + 内存凭据库的夹具复现：
-修复前 `connect` 调用 **0 次**，修复后 **1 次**；`fleettest` Host 冷启动 24 s 后
-`fleet/api/nodes` 直接报 `state: connected`，无需点击。
+一、**「重启后远程节点界面无变化」→ 真因是开机后一个节点都没连。** 用内存注册表 + 内存凭据库的
+夹具复现：修复前 `connect` 调用 **0 次**，修复后 **1 次**；`fleettest` Host 冷启动 24 s 后
+`fleet/api/nodes` 直接报 `state: connected`，无需点击。根因与修法见
+[ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六「开机自动连接：先取凭据，再判断」。
 
 二、**「节点管理模式怎么没有出现」→ 预设装上了，但它在选择器里叫 `node-control`。**
-`agentPresets/list` 一直有它，`node-control.mjs` 的 13 条断言也一直全过。缺的是展示字段
-（`name`/`description` 在 schema 里可选，少写不报错），于是输入框显示裸 id。补上
-`name: 节点管理` 与说明后与 `rhino-mode` 同形。
+`agentPresets/list` 一直有它，`node-control.mjs` 的 13 条断言也一直全过。补上 `name: 节点管理`
+与说明后与 `rhino-mode` 同形；为什么这两个字段是可选的、漏写为什么不报错，见
+[ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六之七「预设必须有 `name` 和 `description`」。
 
-三、**设置页风格与官方不一致。** 页面根、滚动列、页头、内容列、卡片、按钮、开关七项逐项实测
-对齐；顺带修掉组标题被压到 23 px 宽、竖排成 68 px 高的真实布局缺陷。
+三、**设置页风格与官方不一致。** 七项逐项实测对齐，顺带修掉组标题被压成竖排的真实布局缺陷；
+逐项数值与三处踩过的坑见 [ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六之六「页面骨架是量出来的」。
 
 **验收证据（全部可复跑）**
 
@@ -516,7 +507,7 @@ $ hostname                                            →  Develop
 | 设置页截图 | `.scratch/acceptance-2026-11-19/v-settings.png` | 远程节点页：本机 / 远程 / 工作区 / 插件同步 四组卡片 |
 | 四页选择器截图 | 同目录 `v-form` `v-device` `v-roots-local` `v-roots-node` `v-browse` | 表单 → 此设备/盘符 → 节点/根目录 → 浏览 |
 
-截图方法记一笔：headless Chrome 用 `Page.captureScreenshot` 的**默认路径**抓不到对话框文字
-（DOM 有正确 rect 与颜色，PNG 里只有遮罩和白色卡片）。实测 `clip.scale = 1`（full / inset /
-half / offset 四种）全部拿不到，`clip.scale = 2` 能拿到（同一 rect 从 0 个暗像素变 213 个）。
-这是截图通道的问题，不是界面缺陷 —— 真实 Electron 窗口是 GPU 合成，文字正常。
+截图方法记一笔（这是截图通道的坑，不是设计取舍，所以留在这里）：headless Chrome 用
+`Page.captureScreenshot` 的**默认路径**抓不到对话框文字（DOM 有正确 rect 与颜色，PNG 里只有遮罩
+和白色卡片）。实测 `clip.scale = 1`（full / inset / half / offset 四种）全部拿不到，
+`clip.scale = 2` 能拿到（同一 rect 从 0 个暗像素变 213 个）。真实 Electron 窗口是 GPU 合成，文字正常。

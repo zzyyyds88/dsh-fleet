@@ -21,15 +21,10 @@ ADR-0003 定下了链路（手机 → 中转 → 桌面 Host → 节点）。真
 
 ### 决策
 
-节点路径在同一个路径语法里用前缀表达（语法与三条理由见 ARCHITECTURE §五）：
-
-```
-/@fleet                       → 节点列表
-/@fleet/<nodeId>/             → 那台节点的文件系统根
-/@fleet/<nodeId>/root/proj    → 那台节点上的 /root/proj
-```
-
+节点路径在同一个路径语法里用 `/@fleet` 前缀表达：`/@fleet` 是节点列表，`/@fleet/<nodeId>/`
+是那台节点的文件系统根，`/@fleet/<nodeId>/root/proj` 就是它上面的 `/root/proj`。
 `<nodeId>` 是 `n` + 12 位十六进制，与 `host/routing.js` 里同一个正则，解码无歧义。
+语法位置与三条理由见 [ARCHITECTURE](ARCHITECTURE.md) §五「节点路径的语法位置」。
 
 ### 被否方案
 
@@ -48,7 +43,8 @@ win32 上 `/@fleet/n1/root/proj` 是 drive-relative，落点是 `<当前盘>:\@f
 然后 fleet 在 `workspace/create` 成功后**自底向上 `rmdir`（非递归）**，`ENOTEMPTY` 立刻停。
 删掉的一定是 `mkdir -p` 刚建出来的空链，不可能碰到有内容的目录；`resolve()` 在同一个进程里算，
 与被装饰的 `mkdir` 得到同一个路径，不需要时间窗或「空」判定。fleet 同时拒绝把本地工作区建在
-`/@fleet` 里（`fleet/path-reserved`），保证这个前缀永远归 fleet。
+`/@fleet` 里（`fleet/path-reserved`），保证这个前缀永远归 fleet。落点与清理规则的现状见
+[ARCHITECTURE](ARCHITECTURE.md) §五「节点路径的语法位置」。
 
 ### 被否方案
 
@@ -70,7 +66,8 @@ win32 上 `/@fleet/n1/root/proj` 是 drive-relative，落点是 `<当前盘>:\@f
 所以 fleet **整体替换** `list` 与 `createDirectory` 两个方法（装成实例 own property，
 `requireCapability` 不再执行），自己出结果：`/@fleet` 回节点列表，`/@fleet/<id>…` 走 SSH 列节点盘
 并把所有 path 字段加前缀，其余走本地列举并补 `crumbs`。`browse.js` 的 `listLocal` 因此多了
-`crumbs` 字段（纯增量，`/fleet/api/browse` 的消费者不受影响）。
+`crumbs` 字段（纯增量，`/fleet/api/browse` 的消费者不受影响）。「整体替换而非装饰」这条在
+[ARCHITECTURE](ARCHITECTURE.md) §五路由表里也有记录，但上游那三个具体标识符只写在这里。
 
 ### 被否方案
 
@@ -81,25 +78,21 @@ win32 上 `/@fleet/n1/root/proj` 是 drive-relative，落点是 `<当前盘>:\@f
 
 ## 五、节点控制模式
 
-「模式」= 一个 **agent preset**，不是新的会话类型。三个部件：`fleetControl` 服务（host 平面，
-方法 `list / add / update / remove / connect / disconnect / status`，输出不含任何密钥字段）、
-`fleet_nodes` 工具（preset 平面，新子路径 `@greatbaby/dsh-fleet/node-control`，只注册这一个工具）、
-`preset-node-control` 声明（`config.plugins` 只有 `persona` + `fleet-nodes`）。
+「模式」= 一个 **agent preset**，不是新的会话类型。三个部件的切分与「preset 即能力全集」的
+组合语义见 [ARCHITECTURE](ARCHITECTURE.md) §六之七。
 
 ### 「其他拒绝」为什么是构造保证
 
-web-app 的 patch 把 host 平面上的 agent 工具行全部 `disabled: true`，agent 平面的工具**只由
-preset 的 `config.plugins` 供给**。本 preset 只列 `fleet_nodes`，这个会话就没有别的工具。
-
 **不加 `ctx.tools.restrict`**：加了就是第二份清单，两份清单迟早不一致，而「preset 即能力全集」
-本身就是这个仓库的组合语义。详见 ARCHITECTURE §六之七。
+本身就是这个仓库的组合语义。机制见 [ARCHITECTURE](ARCHITECTURE.md) §六之七（「其他一律拒绝」
+为什么是构造保证）。
 
 ### 密钥为什么不能作为工具参数
 
 会话日志会原样记录工具参数，在聊天里贴密码等于写进历史文件。所以 `add` 只接受两种**引用**：
-`{ kind: 'key', path: … }`（Host 上的私钥文件，读后写进 `ctx.credentials`，路径与内容都不回显）
-或 `{ kind: 'password', env: … }`（Host 上的环境变量名）。内联 `password` / `privateKey`
-**不支持**，要在桌面设置页里填。
+`{ kind: 'key', path: … }`（Host 上的私钥文件）或 `{ kind: 'password', env: … }`（Host 上的环境
+变量名）。内联 `password` / `privateKey` **不支持**，要在桌面设置页里填。三种引用形式与拒绝码见
+[ARCHITECTURE](ARCHITECTURE.md) §六之七「密钥不能作为工具参数」。
 
 ## 六、被控节点的插件清单
 
@@ -110,7 +103,8 @@ preset 的 `config.plugins` 供给**。本 preset 只列 `fleet_nodes`，这个�
 理由：`@greatbaby/dsh-fleet` 是桌面端插件，节点装它没有意义，而且它的 preset 里含节点控制工具 ——
 被控节点能控制别的节点，正是用户明确否定的形态。`ds-harness-remote` 会让节点变成第二个中转 Host。
 `isThirdParty` 的 `@deepseek-ai/*` 规则保留 —— 它回答的是「这是不是产品本身」，与
-`NODE_NEVER_SYNC` 回答的「这个不能进节点」是两件事。当前清单见 ARCHITECTURE §六之五。
+`NODE_NEVER_SYNC` 回答的「这个不能进节点」是两件事。当前清单与每个名字的理由见
+[ARCHITECTURE](ARCHITECTURE.md) §六之五「默认全开，另有一份硬排除清单」。
 
 ## 七、安装形态
 
@@ -119,7 +113,8 @@ preset 的 `config.plugins` 供给**。本 preset 只列 `fleet_nodes`，这个�
 `presets/*.patch.yml`、`locale.meta.detail` 指向真实存在的文件、`scripts.pack` 出 tarball。
 
 理由：`meta.detail` 指向不存在的文件时，详情页在用户眼里是空白的，而这不会被任何测试发现 ——
-清单自洽必须是可执行的断言，不能靠人看。所以新增了 `test/install-unit.mjs`（离线层）。
+清单自洽必须是可执行的断言，不能靠人看。所以新增了 `test/install-unit.mjs`（离线层）；
+它断言了哪几条见 [ARCHITECTURE](ARCHITECTURE.md) §七测试表的 `install-unit.mjs` 行。
 
 ## 八、A 类端点补路由
 
@@ -129,11 +124,13 @@ ADR-0003 §A 列出「手机能发、中转放行、fleet 没路由」的端点�
   `subagents/{prompt,interruptByUser}`、`session/selectModel`、`commands/execute`、
   `fileReferences/list`、`sessionReferenceResolver/candidates`。
 - **Host 级列表，合并 + id 包装**：`schedule/catalog`、`list`、`history` 合并各节点并把 id 包成
-  `fleet_<nodeId>_<id>`；`schedule/view|edit|run|delete|deleteInactive` 按 id 解包路由；
-  `schedule/create` 按 `sessionId` 解包。
+  `fleet_<nodeId>_<id>`；`schedule/view|edit|run|deleteInactive` 按 id 解包路由；
+  `schedule/create` 按 `sessionId` 解包。（原文写作 `delete` 是笔误：上游 `dsh-schedule` 的
+  wire 端点里没有 `schedule/delete`，只有 `deleteInactive`，实测见 app.asar 的 `typert.host.js`。）
 
 **明确不路由**：`settings/*`、`agentPresets/*`、`credentials/*`、`llm/*`、`pluginManager/*`、
 `pluginInventory/list`、`skills/list`、`session/modelCatalog` —— 它们描述的是**这台桌面安装**。
+逐端点的路由方式与「判据：它读的状态在谁那儿」见 [ARCHITECTURE](ARCHITECTURE.md) §五路由表。
 
 ## 九、明确做不到的（不改手机、不改中转的硬边界）
 
@@ -159,3 +156,6 @@ ADR-0003 §A 列出「手机能发、中转放行、fleet 没路由」的端点�
 | `presets/node-control.patch.yml` | 新增 |
 | `package.json` | patch 数组、`engines.dsh`、`files`、`exports["./node-control"]` |
 | `test/picker-paths-unit.mjs`、`test/install-unit.mjs`、`test/fleet-control-unit.mjs` | 新增 |
+
+这份清单是**当时**的改动记录，不是现在的职责划分 —— 各文件当前的职责见
+[ARCHITECTURE](ARCHITECTURE.md) §六「包结构」。
