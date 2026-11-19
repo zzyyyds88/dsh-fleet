@@ -32,7 +32,27 @@ class NodeWorkspaces {
     /** @type {{ close: () => void } | undefined} */
     this.stream = undefined
     this.closed = false
+    /**
+     * Whether the node this picture came from is currently unreachable.
+     *
+     * The rows stay (see `sync()`), and this flag is what lets a caller tell "this node has no
+     * workspaces" from "this node is not answering right now".
+     */
+    this.offline = false
     this.readyWaiters = []
+  }
+
+  /**
+   * Mark the picture as stale without dropping it.
+   *
+   * The stream is closed because a dead node's stream is dead too, and reopening it is what a
+   * reconnect does. The baseline is kept on purpose — it is the last known truth about that
+   * machine, and a sidebar row that can still be read is better than a row that vanished.
+   */
+  markOffline() {
+    this.offline = true
+    try { this.stream?.close() } catch { /* already closing */ }
+    this.stream = undefined
   }
 
   /** Open the node's workspace stream, resolving once its baseline arrived. */
@@ -47,6 +67,8 @@ class NodeWorkspaces {
         this.stream = undefined
       },
     })
+    // A reopened stream means the node answers again.
+    this.offline = false
   }
 
   /** Resolve once the baseline is available, or reject after `timeoutMs`. */
@@ -191,8 +213,23 @@ export class RemoteWorkspaces {
     const live = new Set(this.fleet.routable().map(runtime => runtime.record.id))
     for (const [nodeId, node] of [...this.nodes]) {
       if (live.has(nodeId)) continue
-      node.close()
-      this.nodes.delete(nodeId)
+      // A node that is **gone** (its record was removed) loses its rows; a node that is merely
+      // unreachable keeps them, marked offline.
+      //
+      // Measured before this: dropping the rows on every drop made the sidebar lose a whole
+      // machine's workspaces the moment the socket died, and get them back a minute later when
+      // the reconnect ladder succeeded. A person reads that as "my work disappeared", and the
+      // only way to tell it apart from a real deletion was to watch it happen. Keeping the rows
+      // and saying they are offline is the honest version — and it is what the sidebar's own
+      // greyed rows do for a closed window.
+      if (this.fleet.get(nodeId) === undefined) {
+        node.close()
+        this.nodes.delete(nodeId)
+        continue
+      }
+      if (node.offline) continue
+      node.markOffline()
+      this.#publish({ type: 'replace', value: this.baseline() })
     }
     const opened = []
     for (const runtime of this.fleet.routable()) {
@@ -225,9 +262,27 @@ export class RemoteWorkspaces {
   #signature() {
     const parts = []
     for (const [nodeId, node] of this.nodes) {
-      parts.push(`${nodeId}:${node.baseline === null ? '-' : String(node.baseline.items.length)}`)
+      parts.push(
+        `${nodeId}:${node.baseline === null ? '-' : String(node.baseline.items.length)}`
+        + `${node.offline ? '!' : ''}`,
+      )
     }
     return parts.join('|')
+  }
+
+  /**
+   * The nodes whose rows are currently in the merged picture, and whether each is stale.
+   *
+   * A caller needs this to distinguish "the node has no workspaces" from "the node is not
+   * answering"; the merged baseline alone cannot say which.
+   * @returns {Array<{ nodeId: string, offline: boolean, rows: number }>}
+   */
+  nodeStates() {
+    return [...this.nodes].map(([nodeId, node]) => ({
+      nodeId,
+      offline: node.offline,
+      rows: node.baseline?.items.length ?? 0,
+    }))
   }
 
   /** Every local workspace id this module currently knows about. */

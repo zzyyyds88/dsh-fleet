@@ -31,7 +31,9 @@ export function fleetHome() {
  * @property {{ kind: 'password' | 'key' | 'agent', secretRef?: string }} auth
  * @property {string} [jumpHost] - optional `host` or `user@host:port` jump target.
  * @property {string} [remoteRoot] - absolute install directory on the machine.
- * @property {boolean} enabled - whether opening the profile tries to connect.
+ * @property {string} [hostKey] - the SSH host key fingerprint recorded on first connect,
+ *   `SHA256:…` as OpenSSH spells it. Absent means this machine has never been verified.
+ * @property {boolean} [enabled] - whether opening the profile tries to connect.
  * @property {string} [lastError]
  * @property {number} [lastConnectedAt]
  * @property {number} [lastSeenVersion]
@@ -83,6 +85,9 @@ export function normalizeNode(input) {
       ? { jumpHost: input.jumpHost.trim() }
       : {}),
     remoteRoot,
+    ...(typeof input.hostKey === 'string' && input.hostKey.length > 0
+      ? { hostKey: input.hostKey }
+      : {}),
     enabled: input.enabled !== false,
     ...(typeof input.lastError === 'string' ? { lastError: input.lastError.slice(0, 500) } : {}),
     ...(Number.isFinite(input.lastConnectedAt) ? { lastConnectedAt: input.lastConnectedAt } : {}),

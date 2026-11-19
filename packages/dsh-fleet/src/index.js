@@ -256,6 +256,12 @@ export function apply(ctx, config = {}) {
           sendJson(res, 200, { ok: true, node: await fleet.disconnect(runtime) })
           return
         }
+        if (action === 'log') {
+          // The node's own recent lines, redacted on write (see host/node-log.js). Read-only
+          // and cheap, so the card can poll it while a node is failing.
+          sendJson(res, 200, { ok: true, id, lines: runtime.logs.lines(), text: runtime.logs.text() })
+          return
+        }
         if (action === 'probe') {
           runtime.facts = await runtime.host.probe()
           sendJson(res, 200, { ok: true, node: runtime.describe() })

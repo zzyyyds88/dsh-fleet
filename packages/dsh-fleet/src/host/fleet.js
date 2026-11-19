@@ -11,10 +11,12 @@
  */
 import { NodeRegistry } from '../core/registry.js'
 import { SecretStore, authFromSecret } from '../core/secrets.js'
+import { classifyFailure } from '../core/errors.js'
 import { GATE, decideGate } from '../core/version.js'
 import { SshConnection } from '../ssh/connection.js'
-import { RemoteHost, remoteLayout } from '../remote/daemon.js'
+import { RemoteHost, remoteLayout, MINIMUM_NODE_MAJOR } from '../remote/daemon.js'
 import { BRAIN_FILES, BRAIN_PACKAGE } from './brain-bundle.generated.js'
+import { NodeLog } from './node-log.js'
 import { Provisioner } from './provision.js'
 import { RemoteGateway } from './remote-gateway.js'
 
@@ -26,6 +28,19 @@ import { RemoteGateway } from './remote-gateway.js'
  * deliberately absent: a node serves no window, so it never even loads that layer.
  */
 export const BRAIN_BUNDLES = Object.freeze(['@deepseek-ai/dsh-base', BRAIN_PACKAGE])
+
+/**
+ * How long to wait before each reconnect attempt after a drop, in order.
+ *
+ * Three quick tries for the common case (a machine that rebooted), then the steady interval
+ * below. Measured against the real node: a `systemctl restart ssh` comes back in about two
+ * seconds, so the first attempt almost always succeeds; a full reboot took 21 s, which lands on
+ * the third or fourth.
+ */
+const RECOVERY_LADDER_MS = Object.freeze([2_000, 4_000, 8_000])
+
+/** The interval between reconnect attempts once the quick ladder is exhausted. */
+const RECOVERY_INTERVAL_MS = 120_000
 /** Connection lifecycle of one node, as a settings surface shows it. */
 export const NODE_STATE = Object.freeze({
   IDLE: 'idle',
@@ -42,11 +57,40 @@ export class NodeRuntime {
    */
   constructor(record, options) {
     this.record = record
-    this.log = options.log
+    /**
+     * This node's own log.
+     *
+     * `options.log` writes to the desktop's logger, which the person looking at a red card will
+     * never find. This one is readable from the card itself, redacted on write.
+     */
+    this.logs = new NodeLog()
+    const desktopLog = options.log
+    /** Log to both the desktop's logger and this node's own buffer. */
+    this.log = message => {
+      desktopLog(message)
+      this.logs.push(message)
+    }
     this.version = options.version
     this.state = NODE_STATE.IDLE
     this.phase = undefined
     this.error = undefined
+    /** The classified form of `error`: `{ code, message, action, retryable, detail }`. */
+    this.failure = undefined
+    /**
+     * When this node's connection dropped on its own, if it did.
+     *
+     * Kept separate from `lastConnectedAt` because the two answer different questions: "when
+     * did it last work" survives a drop, "when did it stop" is what the card needs while the
+     * reconnect ladder runs. Cleared on a successful connect.
+     * @type {number | undefined}
+     */
+    this.droppedAt = undefined
+    /** How many times this runtime has come back after a drop, since the app started. */
+    this.recoveries = 0
+    /** Which rung of the reconnect ladder the next attempt uses. */
+    this.recoveryAttempts = 0
+    /** @type {ReturnType<typeof setTimeout> | undefined} */
+    this.recoveryTimer = undefined
     this.facts = undefined
     /**
      * How this node's runtime arrived: `artefact` or `npm`.
@@ -70,6 +114,16 @@ export class NodeRuntime {
       username: record.username,
       auth: { kind: record.auth.kind },
       label: record.name,
+      // The recorded host key, when this machine has been seen before. `undefined` is
+      // first use: the key is recorded then, and every later handshake is compared against
+      // it. Without this the verifier had nothing to compare with and the whole chain was
+      // dead code — a man-in-the-middle was accepted silently.
+      hostFingerprint: record.hostKey,
+      onFirstFingerprint: fingerprint => options.onFirstFingerprint?.(record.id, fingerprint),
+      onFingerprintMismatch: (expected, actual) => options.onFingerprintMismatch?.(record.id, expected, actual),
+      // The socket died on its own. Reporting it here is what turns "the sidebar silently
+      // lost every remote workspace" into a named, recoverable state.
+      onDrop: () => options.onDrop?.(record.id),
     })
     this.host = new RemoteHost({
       connection: this.connection,
@@ -135,13 +189,21 @@ export class NodeRuntime {
       ...(this.phase === undefined ? {} : { phase: this.phase }),
       ...(this.runtimeVia === undefined ? {} : { runtimeVia: this.runtimeVia }),
       ...(this.error === undefined ? {} : { error: this.error }),
+      // The machine-readable half of the same failure: a stable code, the one action worth
+      // offering, and whether pressing Connect again could change anything. The client
+      // localises the sentence and picks the button; this object is what makes that possible
+      // without parsing an English message.
+      ...(this.failure === undefined ? {} : { failure: this.failure }),
       ...(this.facts === undefined ? {} : { remote: this.facts }),
       ...(this.serving === undefined
         ? {}
         : { serving: { port: this.serving.port, version: this.serving.version } }),
       ...(this.provision === undefined ? {} : { provision: this.provision }),
+      ...(this.record.hostKey === undefined ? {} : { hostKey: this.record.hostKey }),
       ...(this.record.lastConnectedAt === undefined ? {} : { lastConnectedAt: this.record.lastConnectedAt }),
       ...(this.record.lastSeenVersion === undefined ? {} : { lastSeenVersion: this.record.lastSeenVersion }),
+      ...(this.droppedAt === undefined ? {} : { droppedAt: this.droppedAt }),
+      ...(this.recoveries === 0 ? {} : { recoveries: this.recoveries }),
     }
   }
 }
@@ -160,11 +222,19 @@ export class Fleet {
    * @param {string[]} [options.mirrors] - accelerator prefixes, best first; an empty list means "the artefact route is off".
    * @param {readonly string[]} [options.routes] - which ways a runtime may arrive, in order.
    * @param {string} [options.npmRegistry] - registry a node resolves through; omit for the node's own.
+   * @param {(nodeId: string, fingerprint: string) => void} [options.onFirstFingerprint] - called
+   *   the first time this node's host key is seen, so the registry can record it.
+   * @param {(nodeId: string, expected: string, actual: string) => void} [options.onFingerprintMismatch]
+   *   - called when a node presents a different key than the one recorded for it.
    * @param {(message: string) => void} [options.log]
    */
   constructor(options) {
     this.log = options.log ?? (() => {})
     this.version = options.version
+    /** Where a newly seen host key is recorded. */
+    this.onFirstFingerprint = options.onFirstFingerprint
+    /** Where a changed host key is reported. */
+    this.onFingerprintMismatch = options.onFingerprintMismatch
     /** The brain build this plugin would install: its own package version. */
     this.brainVersion = options.brainVersion ?? '0.0.0'
     /** Ordered artefact sources (CNB, then accelerators); `undefined` means the default list. */
@@ -281,28 +351,39 @@ export class Fleet {
    * Bring one node up: SSH, probe, install when the version differs, start the
    * resident host, then prove the gateway answers before reporting success.
    * @param {NodeRuntime} runtime
-   * @param {{ force?: boolean }} [options]
+   * @param {{ force?: boolean, recovering?: boolean }} [options]
    */
   async connect(runtime, options = {}) {
     return await this.serial(runtime, async () => {
       if (runtime.state === NODE_STATE.CONNECTED && runtime.serving !== undefined && options.force !== true) {
         return runtime.describe()
       }
+      // A person pressing Connect cancels a ladder that is already running: two attempts on
+      // one node would race on `runtime.queue` and the loser would report a failure the other
+      // one had already fixed.
+      if (options.recovering !== true) this.#cancelRecovery(runtime)
       runtime.state = NODE_STATE.CONNECTING
       runtime.error = undefined
+      runtime.failure = undefined
       this.#publish()
       try {
         await this.#adoptSecret(runtime)
         if (!runtime.credentialsReady()) {
-          throw new Error('this node has no stored credential; add its password or private key first')
+          throw Object.assign(
+            new Error('this node has no stored credential; add its password or private key first'),
+            { code: 'credential-missing' },
+          )
         }
         runtime.phase = 'probe'
         this.#publish()
         runtime.facts = await runtime.host.probe()
         if (!runtime.facts.nodeUsable) {
-          throw new Error(
-            `this machine runs Node ${runtime.facts.nodeVersion || '(none)'}, `
-            + 'but the resident host needs Node 22 or newer',
+          throw Object.assign(
+            new Error(
+              `this machine runs Node ${runtime.facts.nodeVersion || '(none)'}, `
+              + `but the resident host needs Node ${String(MINIMUM_NODE_MAJOR)} or newer`,
+            ),
+            { code: 'node-too-old' },
           )
         }
         runtime.phase = 'install'
@@ -421,14 +502,21 @@ export class Fleet {
         }
         runtime.state = NODE_STATE.CONNECTED
         runtime.phase = undefined
+        runtime.failure = undefined
+        runtime.droppedAt = undefined
         runtime.registryError = undefined
         this.registry.recordOutcome(runtime.record.id, { ok: true, version: runtime.facts.nodeVersion })
         this.#publish()
         return runtime.describe()
       } catch (error) {
         runtime.state = NODE_STATE.FAILED
-        runtime.phase = undefined
+        // The phase is **kept**. It used to be cleared here, which threw away the single most
+        // useful fact about the failure: which step it happened at. Measured: a node that
+        // failed while unpacking its runtime and one that failed in the SSH handshake both
+        // rendered as "无法连接: <one sentence>" with a Retry button, and the phase list that
+        // had been filling in during the attempt vanished at exactly the moment it mattered.
         runtime.error = error instanceof Error ? error.message : String(error)
+        runtime.failure = classifyFailure(error, { phase: runtime.phase })
         runtime.serving = undefined
         runtime.gateway.reset()
         this.registry.recordOutcome(runtime.record.id, { ok: false, error: runtime.error })
@@ -443,10 +531,15 @@ export class Fleet {
    */
   async disconnect(runtime) {
     return await this.serial(runtime, async () => {
+      // A deliberate disconnect must not be reported as a drop, and must not start the
+      // reconnect ladder: cancel it before the socket goes away.
+      this.#cancelRecovery(runtime)
       runtime.gateway.reset()
       runtime.serving = undefined
       runtime.state = NODE_STATE.IDLE
       runtime.phase = undefined
+      runtime.failure = undefined
+      runtime.droppedAt = undefined
       await runtime.host.stop().catch(() => undefined)
       // `invalidate` drops the socket so the next connect handshakes afresh.
       // `dispose` would latch the connection shut, and Connect after Disconnect
@@ -455,6 +548,89 @@ export class Fleet {
       this.#publish()
       return runtime.describe()
     })
+  }
+
+  /**
+   * A node's SSH socket closed on its own.
+   *
+   * This is the state that used to be invisible. `SshConnection` cleared its client and said
+   * nothing, so `NodeRuntime.state` stayed `connected`: the card kept a green dot, the sidebar
+   * kept listing that node's workspaces, and every call routed to it failed with
+   * `fleet/node-offline` — a failure that names a state the UI never showed.
+   *
+   * The recovery ladder is deliberately quiet and deliberately long. A machine that reboots
+   * comes back in under a minute; a laptop that closed its lid comes back in hours. So: three
+   * quick attempts (2 s, 4 s, 8 s) for the common case, then once every two minutes, forever,
+   * until it works or the person presses Disconnect. Nothing is reported as an error while the
+   * ladder runs — `state` is `idle` with `droppedAt` set, which the card renders as "已断线，
+   * 正在重连", not as a red failure.
+   *
+   * A drop is not treated as "the person wants it down": an explicit `disconnect()` cancels
+   * the ladder first, which is the only way to say "stop trying".
+   */
+  #onDrop(nodeId) {
+    const runtime = this.runtimes.get(nodeId)
+    if (runtime === undefined) return
+    if (runtime.state !== NODE_STATE.CONNECTED) return
+    this.log(`[${runtime.record.name}] the SSH connection closed; starting the reconnect ladder`)
+    runtime.state = NODE_STATE.IDLE
+    runtime.serving = undefined
+    runtime.gateway.reset()
+    runtime.phase = undefined
+    runtime.failure = undefined
+    runtime.droppedAt = Date.now()
+    this.#publish()
+    this.#scheduleRecovery(runtime)
+  }
+
+  /**
+   * One attempt at bringing a dropped node back, and the next delay when it fails.
+   *
+   * The first three delays are short because the overwhelmingly common drop is a machine that
+   * restarted; after that the interval settles at two minutes, because continuing to hammer a
+   * machine that has been gone for a minute is pointless and every attempt costs a handshake.
+   */
+  #scheduleRecovery(runtime) {
+    this.#cancelRecovery(runtime)
+    const attempt = runtime.recoveryAttempts ?? 0
+    const delay = attempt < RECOVERY_LADDER_MS.length
+      ? RECOVERY_LADDER_MS[attempt]
+      : RECOVERY_INTERVAL_MS
+    const timer = setTimeout(() => {
+      runtime.recoveryTimer = undefined
+      if (runtime.state === NODE_STATE.CONNECTED) return
+      if (!runtime.record.enabled) return
+      runtime.recoveryAttempts = (runtime.recoveryAttempts ?? 0) + 1
+      void this.connect(runtime, { recovering: true })
+        .then(() => {
+          runtime.recoveries += 1
+          runtime.recoveryAttempts = 0
+          runtime.droppedAt = undefined
+          this.log(`[${runtime.record.name}] reconnected after a drop`)
+          this.#publish()
+        })
+        .catch(error => {
+          // Silent by design: a machine that is simply off is not an error the person needs to
+          // read every two minutes. The card already says "已断线"; the log keeps the reason.
+          this.log(
+            `[${runtime.record.name}] reconnect attempt ${String(runtime.recoveryAttempts)} failed: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+          )
+          if (runtime.state !== NODE_STATE.CONNECTED) this.#scheduleRecovery(runtime)
+        })
+    }, delay)
+    // Never hold the Host open for a reconnect: a laptop lid closing must not keep the app alive.
+    timer.unref?.()
+    runtime.recoveryTimer = timer
+  }
+
+  /** Stop the reconnect ladder for one node. */
+  #cancelRecovery(runtime) {
+    if (runtime.recoveryTimer !== undefined) {
+      clearTimeout(runtime.recoveryTimer)
+      runtime.recoveryTimer = undefined
+    }
+    runtime.recoveryAttempts = 0
   }
 
   /**
@@ -649,10 +825,45 @@ export class Fleet {
 
   #runtimeOf(record) {
     const existing = this.runtimes.get(record.id)
-    if (existing !== undefined) return existing
-    const created = new NodeRuntime(record, { log: this.log, version: this.version })
+    if (existing !== undefined) {
+      // The record is re-read on every `list()`, so a host key recorded by one connect has
+      // to reach the connection that already exists — otherwise the verifier keeps seeing
+      // `undefined` and every handshake is "first use".
+      existing.connection.target.hostFingerprint = record.hostKey
+      return existing
+    }
+    const created = new NodeRuntime(record, {
+      log: this.log,
+      version: this.version,
+      onFirstFingerprint: (id, fingerprint) => this.#recordHostKey(id, fingerprint),
+      onFingerprintMismatch: (id, expected, actual) => {
+        this.log(
+          `[${this.registry.get(id)?.name ?? id}] SSH host key changed: recorded ${expected}, `
+          + `presented ${actual}. Refusing the connection.`,
+        )
+      },
+      onDrop: id => this.#onDrop(id),
+    })
     this.runtimes.set(record.id, created)
     return created
+  }
+
+  /**
+   * Record the host key a node presented for the first time.
+   *
+   * Trust on first use, and only that: the point is not to prove the first key is right (no
+   * out-of-band channel exists for that) but to make **every later** handshake provable. A key
+   * that changes afterwards is the one signal a person can act on, and it is only available if
+   * the first one was written down.
+   */
+  #recordHostKey(nodeId, fingerprint) {
+    const record = this.registry.get(nodeId)
+    if (record === undefined) return
+    if (record.hostKey === fingerprint) return
+    this.registry.put({ ...record, hostKey: fingerprint })
+    const runtime = this.runtimes.get(nodeId)
+    if (runtime !== undefined) runtime.connection.target.hostFingerprint = fingerprint
+    this.log(`[${record.name}] recorded SSH host key ${fingerprint}`)
   }
 
   async #adoptSecret(runtime) {

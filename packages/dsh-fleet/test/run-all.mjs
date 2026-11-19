@@ -136,6 +136,14 @@ const SUITES = [
     proves: 'version gate branches, artefact URLs, install script, per-node layout, switch semantics',
   },
   {
+    name: 'errors',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'errors-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 60_000,
+    proves: 'a connect failure becomes a code with one action and a retryable flag, and a node\'s own log redacts secrets before storing them and stays bounded',
+  },
+  {
     name: 'picker-paths',
     layer: 'offline',
     file: ['packages', 'dsh-fleet', 'test', 'picker-paths-unit.mjs'],

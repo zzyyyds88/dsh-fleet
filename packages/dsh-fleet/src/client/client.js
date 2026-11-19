@@ -75,6 +75,8 @@ window.__ModuleLoader__.load({
           remoteRoot: '远端安装目录',
           autoConnect: '应用启动时自动连接',
           empty: '还没有远程节点。点「添加节点」接入一台机器。',
+          searchNodes: '按名字、用户或地址搜索',
+          searchEmpty: '没有匹配的节点。',
           errorTitle: '无法连接',
           removeConfirm: '移除这个节点？它在那台机器上的会话不会被删除。',
           workspaces: '工作区',
@@ -96,6 +98,43 @@ window.__ModuleLoader__.load({
             npm: '运行时来源：节点自行构建',
           },
           missingSecret: '还没有保存密码或私钥。',
+          /** Why a connect failed, as one sentence plus the one action worth offering. */
+          failures: {
+            'ssh-auth': '那台机器拒绝了这个节点的凭据。',
+            'ssh-host-key': '那台机器出示的 SSH 主机密钥和记录的不一致。',
+            'ssh-timeout': '那台机器没有在超时前应答。',
+            'ssh-network': '连不上那台机器。',
+            'ssh-closed': '和那台机器的连接被关闭了。',
+            'credential-missing': '这个节点还没有保存凭据。',
+            'node-too-old': '那台机器的 Node.js 版本太旧。',
+            'runtime-install': '节点运行时装不上。',
+            'node-ahead': '节点上的 DSH 比这个桌面端更新。',
+            'node-unknown-version': '读不出节点上装的版本。',
+            provision: '写不进节点的配置。',
+            'host-start': '常驻服务没有起来。',
+            'host-verify': '常驻服务起来了，但会话通道没有应答。',
+            unknown: '这个节点连不上。',
+          },
+          actions: {
+            'fix-credential': '修改凭据',
+            'review-host-key': '查看主机密钥',
+            'check-network': '检查网络',
+            retry: '重试',
+            'upgrade-node': '升级节点的 Node.js',
+            'upgrade-desktop': '升级桌面端',
+            reinstall: '重装运行时',
+            'inspect-log': '查看连接日志',
+          },
+          retrying: '重试中',
+          dropped: '已断线，正在重连',
+          droppedAt: when => `已断线，正在重连（${when} 断开）`,
+          recovered: count => `已重连 ${count} 次`,
+          hostKey: key => `主机密钥 ${key}`,
+          showLog: '连接日志',
+          logEmpty: '还没有日志。',
+          copyLog: '复制',
+          logCopied: '已复制',
+          logHint: '最近 100 行，密码、令牌与私钥已抹掉。',
           plugins: '插件同步',
           pluginsHint: '这里列出的是你自己装到这个桌面端的第三方插件，默认全部下发：装在这里、连了节点，就是同一个工作环境，而不是两台各跑一套的机器。关掉一个就只在这台机器上运行。中转插件与这个插件自身永远不会下发，因为节点再去控制别的节点、或者自己开一个入口，都不是要的东西。改动立即下发到已连接的节点，节点会在需要时重启常驻进程。',
           pluginLoaded: '本机已加载',
@@ -138,6 +177,7 @@ window.__ModuleLoader__.load({
           addRemoteDevice: '添加远程设备…',
           sourceFolder: '源文件夹',
           chooseFolder: '选择文件夹',
+          lastUsed: '上次使用',
           chooseFolderHint: 'Harness 可以读取和编辑这些文件夹',
           changeFolder: '更换',
           pickThisFolder: '选择此文件夹',
@@ -180,6 +220,8 @@ window.__ModuleLoader__.load({
           remoteRoot: 'Remote install directory',
           autoConnect: 'Connect automatically when the app starts',
           empty: 'No remote nodes yet. Add one to connect a machine.',
+          searchNodes: 'Search by name, user or address',
+          searchEmpty: 'No node matches.',
           errorTitle: 'Could not connect',
           removeConfirm: 'Remove this node? Its sessions on the remote machine are not deleted.',
           workspaces: 'Workspaces',
@@ -201,6 +243,43 @@ window.__ModuleLoader__.load({
             npm: 'Runtime: built on the node',
           },
           missingSecret: 'No password or private key is stored yet.',
+          /** Why a connect failed, as one sentence plus the one action worth offering. */
+          failures: {
+            'ssh-auth': 'The machine refused this node\'s credential.',
+            'ssh-host-key': 'The machine presented a different SSH host key than the one recorded for it.',
+            'ssh-timeout': 'The machine did not answer in time.',
+            'ssh-network': 'The machine could not be reached.',
+            'ssh-closed': 'The connection to the machine was closed.',
+            'credential-missing': 'This node has no stored credential yet.',
+            'node-too-old': 'The machine\'s Node.js is too old.',
+            'runtime-install': 'The node\'s runtime could not be installed.',
+            'node-ahead': 'The node runs a newer DSH than this desktop.',
+            'node-unknown-version': 'The version installed on the node could not be read.',
+            provision: 'The node\'s configuration could not be written.',
+            'host-start': 'The resident service did not start.',
+            'host-verify': 'The resident service started but did not answer the session probe.',
+            unknown: 'This node could not be connected.',
+          },
+          actions: {
+            'fix-credential': 'Edit credential',
+            'review-host-key': 'Review host key',
+            'check-network': 'Check the network',
+            retry: 'Retry',
+            'upgrade-node': 'Upgrade the node\'s Node.js',
+            'upgrade-desktop': 'Upgrade this desktop',
+            reinstall: 'Reinstall the runtime',
+            'inspect-log': 'Open the connection log',
+          },
+          retrying: 'retrying',
+          dropped: 'Disconnected, reconnecting',
+          droppedAt: when => `Disconnected, reconnecting (since ${when})`,
+          recovered: count => `Reconnected ${String(count)} time(s)`,
+          hostKey: key => `Host key ${key}`,
+          showLog: 'Connection log',
+          logEmpty: 'Nothing logged yet.',
+          copyLog: 'Copy',
+          logCopied: 'Copied',
+          logHint: 'The last 100 lines, with passwords, tokens and private keys removed.',
           plugins: 'Plugin sync',
           pluginsHint: 'These are the third-party plugins you installed into this desktop. They are sent by default: one installation, one working environment, rather than two machines that quietly differ. Switch one off and it stays on this machine only. The relay plugin and this plugin itself are never sent — a node that could manage other nodes, or that opened a second way in, is not what this is for. A change reaches connected nodes immediately and the node restarts its resident host when it has to.',
           pluginLoaded: 'loaded here',
@@ -241,6 +320,7 @@ window.__ModuleLoader__.load({
           addRemoteDevice: 'Add remote device…',
           sourceFolder: 'Source folder',
           chooseFolder: 'Choose a folder',
+          lastUsed: 'Last used',
           chooseFolderHint: 'Harness can read and edit these folders',
           changeFolder: 'Change',
           pickThisFolder: 'Use this folder',
@@ -445,6 +525,19 @@ window.__ModuleLoader__.load({
         color: 'var(--dsw-alias-label-error)', fontSize: 12, lineHeight: '18px',
         whiteSpace: 'pre-wrap', wordBreak: 'break-word',
       },
+      /** The classified-failure block: one sentence, one action, the detail behind a toggle. */
+      failureHead: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+      failureDetail: {
+        marginTop: 6, fontSize: 11, lineHeight: '16px',
+        color: 'var(--dsw-alias-label-tertiary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+      },
+      logBox: {
+        marginTop: 6, maxHeight: 180, overflow: 'auto', padding: '6px 8px',
+        borderRadius: 'var(--dsw-radius-md)', background: 'var(--dsw-alias-bg-layer-3)',
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11,
+        lineHeight: '16px', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+        color: 'var(--dsw-alias-label-secondary)',
+      },
       form: {
         display: 'flex', flexDirection: 'column', gap: 14, padding: 16,
         borderRadius: 'var(--dsw-radius-xl)', border: '0.5px solid var(--dsw-alias-border-l2)',
@@ -585,6 +678,33 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The last folder a person picked on one device.
+     *
+     * Two functions rather than a module-level map so the storage key stays in one place, and
+     * every read is defensive: `localStorage` throws in a private window on some browsers, and
+     * a folder-picker that cannot remember a path must still open.
+     */
+    const LAST_DIR_KEY = 'dsh-fleet:last-dir:'
+
+    /** Read the remembered folder for one device, or `undefined`. */
+    function readLastDir(deviceId) {
+      try {
+        return window.localStorage?.getItem(`${LAST_DIR_KEY}${deviceId}`) ?? undefined
+      } catch {
+        return undefined
+      }
+    }
+
+    /** Remember one device's folder. Failure is silent: this is a convenience, not state. */
+    function rememberLastDir(deviceId, path) {
+      try {
+        window.localStorage?.setItem(`${LAST_DIR_KEY}${deviceId}`, path)
+      } catch {
+        // A browser that refuses storage keeps the dialog working, just without the shortcut.
+      }
+    }
+
+    /**
      * The project form the shell asks for when a workspace is added.
      *
      * The shell's own picker browses **this** machine, so it can never name `/root/project`
@@ -638,6 +758,18 @@ window.__ModuleLoader__.load({
       const [rootsLoading, setRootsLoading] = useState(false)
       /** Where the browser should land when it opens: a drive here, `/` on a node. */
       const [pendingRoot, setPendingRoot] = useState('')
+      /**
+       * Where this device was last used.
+       *
+       * Most projects live in one place, and "open a workspace" is almost always "open the
+       * same folder again". Remembered per device, because a path is meaningless on another
+       * machine — `/root/project` on the desktop is nothing.
+       *
+       * In `localStorage` rather than on the Host: it is a per-window convenience with no
+       * meaning outside this browser profile, and putting it in the registry would make every
+       * node record carry a field only the UI reads.
+       */
+      const [lastDir, setLastDir] = useState(undefined)
 
       // Load the machine list when the dialog opens, not on mount: this component stays
       // mounted for the whole Session, and polling a node list that nobody is looking at
@@ -655,6 +787,14 @@ window.__ModuleLoader__.load({
         if (!open) return
         void reloadNodes()
       }, [open, reloadNodes])
+
+      // The remembered folder for whichever device is selected. Read on every device change,
+      // not once: the value is per device, and showing one machine's path beside another's
+      // name would be worse than showing nothing.
+      useEffect(() => {
+        if (!open) return
+        setLastDir(readLastDir(deviceId))
+      }, [open, deviceId])
 
       const browse = useCallback(async (target, dir) => {
         setLoading(true)
@@ -738,6 +878,7 @@ window.__ModuleLoader__.load({
         setSaving(true)
         try {
           const wanted = title.trim()
+          rememberLastDir(deviceId, folder)
           if (wanted.length === 0) {
             props.onPicked?.(folder)
             return
@@ -921,6 +1062,20 @@ window.__ModuleLoader__.load({
           h('div', { style: dialog },
             header(deviceLabel, () => setPage('device')),
             h('div', { style: styles.deviceList },
+              // The last folder used on this device, first: reopening a project is the common
+              // case, and reaching it through two more levels every time is the thing this
+              // dialog was slow at. It is a shortcut, not a replacement — the roots stay below.
+              lastDir === undefined || lastDir === ''
+                ? null
+                : h('button', {
+                    type: 'button',
+                    style: rowStyle,
+                    title: lastDir,
+                    onClick: () => { setChosen({ path: lastDir, name: lastDir.split(/[\\/]/u).filter(Boolean).at(-1) ?? lastDir }); setPage('form') },
+                  },
+                  h('span', { style: styles.deviceIcon, 'aria-hidden': true }, h(IconFolderCloseRegular, { size: 16 })),
+                  h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                    `${T.lastUsed} · ${lastDir}`)),
               rootsLoading
                 ? h('div', { style: styles.empty }, T.loading)
                 : roots.length === 0
@@ -1315,6 +1470,20 @@ window.__ModuleLoader__.load({
           ? h('div', { style: styles.cardReason },
               h(PhaseList, { phase: node.phase, runtimeVia: node.runtimeVia }))
           : null,
+        // A dropped node is not a failure: nothing is wrong with the machine's configuration,
+        // the socket went away and the ladder is bringing it back. Saying "已断线，正在重连" is
+        // the honest state, and it is the one the sidebar's greyed rows agree with.
+        node.state === 'idle' && node.droppedAt !== undefined
+          ? h('div', { style: styles.cardReason },
+              h('span', { style: styles.meta },
+                node.droppedAt === undefined
+                  ? T.dropped
+                  : T.droppedAt(new Date(node.droppedAt).toLocaleTimeString())))
+          : null,
+        node.recoveries !== undefined && node.recoveries > 0
+          ? h('div', { style: styles.cardReason },
+              h('span', { style: styles.meta }, T.recovered(node.recoveries)))
+          : null,
         // A node that built its own runtime says so on its own line: it is the one fact
         // that explains why this machine behaves differently from its neighbours, and it is
         // not something a person could infer from the version.
@@ -1322,15 +1491,101 @@ window.__ModuleLoader__.load({
           ? h('div', { style: styles.cardReason, title: T.runtimeVia[node.runtimeVia] },
               h('span', { style: styles.meta }, T.runtimeVia[node.runtimeVia]))
           : null,
+        connected && node.hostKey !== undefined
+          ? h('div', { style: styles.cardReason, title: node.hostKey },
+              h('span', { style: styles.meta }, T.hostKey(node.hostKey)))
+          : null,
         expanded && connected
           ? h('div', { style: styles.cardReason },
               h(NodeWorkspaces, { nodeId: node.id, workspaces, onAdded: onAction === undefined ? undefined : onRefresh }))
           : null,
         node.error !== undefined
           ? h('div', { style: styles.cardReason },
-              h('div', { style: styles.errorBar },
-                h('div', null, h('strong', null, `${T.errorTitle}: `), node.error)))
+              h(FailureBlock, { node, onAction: verb => { run(verb).catch(() => undefined) } }))
           : null,
+      )
+    }
+
+    /**
+     * Why a connect failed, and the one thing to do about it.
+     *
+     * The Host classifies every failure into a code (`core/errors.js`) and sends
+     * `{ code, message, action, retryable, detail }`. The sentence is localised here, and the
+     * **action** decides which button appears — a wrong password does not get a Retry button,
+     * because pressing it can only produce the same failure and read as "the app is broken".
+     *
+     * The English detail stays available behind a toggle rather than being the headline: it is
+     * what a bug report needs, not what a person reads first.
+     */
+    function FailureBlock({ node, onAction }) {
+      const [open, setOpen] = useState(false)
+      const [showLog, setShowLog] = useState(false)
+      const failure = node.failure
+      const sentence = failure === undefined
+        ? T.errorTitle
+        : T.failures[failure.code] ?? T.failures.unknown
+      const action = failure?.action === undefined ? undefined : T.actions[failure.action]
+      // `retry` and `reinstall` map onto node actions; the rest are "go fix something else",
+      // which is what the log is for.
+      const verb = failure?.action === 'reinstall' ? 'reinstall' : failure?.action === 'retry' ? 'connect' : undefined
+      return h('div', { style: styles.errorBar },
+        h('div', { style: styles.failureHead },
+          h('strong', null, `${T.errorTitle}: `),
+          h('span', null, sentence),
+          action === undefined
+            ? null
+            : verb === undefined
+              ? h('button', { type: 'button', style: styles.link, onClick: () => setShowLog(true) }, action)
+              : h('button', { type: 'button', style: styles.button, onClick: () => onAction(verb) }, action),
+          failure?.retryable === true && verb === undefined
+            ? h('button', { type: 'button', style: styles.link, onClick: () => onAction('connect') }, T.actions.retry)
+            : null,
+          h('button', {
+            type: 'button',
+            style: styles.link,
+            onClick: () => setOpen(current => !current),
+          }, open ? T.back : T.showLog)),
+        open || showLog
+          ? h(NodeLogPanel, { nodeId: node.id })
+          : h('div', { style: styles.failureDetail }, node.error),
+      )
+    }
+
+    /**
+     * One node's last hundred lines.
+     *
+     * Fetched on open rather than carried in the node list: a hundred lines per node on every
+     * two-second poll would be most of the traffic for a surface that is closed almost always.
+     * The Host redacts on write, so what arrives here is already safe to copy.
+     */
+    function NodeLogPanel({ nodeId }) {
+      const [text, setText] = useState(undefined)
+      const [error, setError] = useState(undefined)
+      const [copied, setCopied] = useState(false)
+      useEffect(() => {
+        let cancelled = false
+        api(`/nodes/${nodeId}/log`)
+          .then(body => { if (!cancelled) setText(body.text ?? '') })
+          .catch(failure => { if (!cancelled) setError(failure.message) })
+        return () => { cancelled = true }
+      }, [nodeId])
+      const copy = () => {
+        const write = navigator.clipboard?.writeText(text ?? '')
+        void write?.then(() => {
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1500)
+        }).catch(() => undefined)
+      }
+      return h('div', null,
+        h('div', { style: { ...styles.failureHead, marginTop: 6 } },
+          h('span', { style: styles.meta }, T.logHint),
+          text === undefined || text === ''
+            ? null
+            : h('button', { type: 'button', style: styles.link, onClick: copy },
+                copied ? T.logCopied : T.copyLog)),
+        error !== undefined
+          ? h('div', { style: styles.failureDetail }, error)
+          : h('div', { style: styles.logBox }, text === undefined || text === '' ? T.logEmpty : text),
       )
     }
 
@@ -1703,7 +1958,27 @@ window.__ModuleLoader__.load({
     function FleetBody() {
       const fleet = useFleet()
       const [editing, setEditing] = useState(undefined)
-      const remote = useMemo(() => fleet.nodes.filter(node => node.id !== undefined), [fleet.nodes])
+      const [search, setSearch] = useState('')
+      const all = useMemo(() => fleet.nodes.filter(node => node.id !== undefined), [fleet.nodes])
+      // Most recently connected first, then never-connected ones by name.
+      //
+      // The order a person wants is not alphabetical: with a handful of machines, the one they
+      // are working on is the one that connected last. `lastConnectedAt` is recorded by the
+      // registry on every successful connect, so this needs no extra state — and it survives a
+      // restart, which a purely in-memory "recent" list would not.
+      const remote = useMemo(() => {
+        const needle = search.trim().toLowerCase()
+        const filtered = needle === ''
+          ? all
+          : all.filter(node => `${node.name} ${node.username}@${node.host}:${String(node.port)}`
+              .toLowerCase().includes(needle))
+        return [...filtered].sort((left, right) => {
+          const leftAt = left.lastConnectedAt ?? 0
+          const rightAt = right.lastConnectedAt ?? 0
+          if (leftAt !== rightAt) return rightAt - leftAt
+          return String(left.name).localeCompare(String(right.name))
+        })
+      }, [all, search])
       // A fragment, not a wrapper: `pageBody` applies its `gap:32` to its children, so the
       // three groups have to be its direct children for the official rhythm to hold.
       return h(React.Fragment, null,
@@ -1735,6 +2010,17 @@ window.__ModuleLoader__.load({
               onClick: () => setEditing({ next: true }),
             }, T.add),
           }),
+          // A search box only once there is something to search: with two nodes it is a field
+          // that costs more attention than it saves.
+          all.length > 2
+            ? h('div', { style: { padding: '0 8px 8px' } },
+                h('input', {
+                  style: styles.input,
+                  value: search,
+                  placeholder: T.searchNodes,
+                  onChange: event => setSearch(event.target.value),
+                }))
+            : null,
           editing !== undefined && editing.next === true
             ? h(NodeForm, {
                 onSubmit: async draft => {
@@ -1755,7 +2041,7 @@ window.__ModuleLoader__.load({
               })
             : null,
           remote.length === 0
-            ? h('div', { style: styles.empty }, T.empty)
+            ? h('div', { style: styles.empty }, search.trim() === '' ? T.empty : T.searchEmpty)
             : h('ul', { style: styles.cards },
                 remote.map(node => h(NodeRow, {
                   key: node.id,

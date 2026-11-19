@@ -69,6 +69,14 @@ export class SshConnection {
   /** @type {Promise<import('ssh2').SFTPWrapper> | undefined} */
   #sftp
   #closed = false
+  /**
+   * Clients this object ended itself, so their `close` event is not reported as a drop.
+   *
+   * A WeakSet rather than a flag on the client: ssh2 owns that object, and a property added
+   * to it would be one more thing a future version could disagree about.
+   * @type {WeakSet<import('ssh2').Client>}
+   */
+  #ending = new WeakSet()
 
   /**
    * @param {object} target
@@ -77,6 +85,12 @@ export class SshConnection {
    * @param {string} target.username
    * @param {{ kind: 'password' | 'key' | 'agent', password?: string, privateKey?: string | Buffer, passphrase?: string }} target.auth
    * @param {string} [target.label] - diagnostic label for logs.
+   * @param {string} [target.hostFingerprint] - the host key recorded for this machine; absent
+   *   means first use.
+   * @param {(fingerprint: string) => void} [target.onFirstFingerprint] - first key seen.
+   * @param {(expected: string, actual: string) => void} [target.onFingerprintMismatch] - the key
+   *   changed, which refuses the handshake.
+   * @param {() => void} [target.onDrop] - the socket closed without this object asking.
    * @param {(message: string) => void} [target.log]
    */
   constructor(target) {
@@ -264,6 +278,7 @@ export class SshConnection {
     const client = this.#client
     this.#client = undefined
     if (client !== undefined) {
+      this.#ending.add(client)
       try { client.end() } catch { /* already gone */ }
     }
   }
@@ -274,6 +289,7 @@ export class SshConnection {
     this.#client = undefined
     this.#sftp = undefined
     if (client !== undefined) {
+      this.#ending.add(client)
       try { client.end() } catch { /* already gone */ }
     }
   }
@@ -308,16 +324,20 @@ export class SshConnection {
       client.once('ready', () => {
         settle(() => {
           client.once('close', () => {
-            if (this.#client === client) {
-              this.#client = undefined
-              this.#sftp = undefined
-            }
+            if (this.#client !== client) return
+            this.#client = undefined
+            this.#sftp = undefined
+            // A close this object did not ask for is a **drop**, and the node has to learn
+            // about it: until now `state` stayed `connected` after the socket died, so the
+            // sidebar kept listing workspaces that could not be opened and the card showed a
+            // green dot. `invalidate()`/`dispose()` mark the client as deliberately ended, so
+            // an ordinary disconnect never reports a drop.
+            if (!this.#ending.has(client)) this.target.onDrop?.()
           })
           client.once('error', () => {
-            if (this.#client === client) {
-              this.#client = undefined
-              this.#sftp = undefined
-            }
+            if (this.#client !== client) return
+            this.#client = undefined
+            this.#sftp = undefined
           })
           resolve(client)
         })
@@ -342,8 +362,9 @@ export class SshConnection {
       keepaliveCountMax: KEEPALIVE_COUNT_MAX,
       // The fence a browser deployment gets from a signed cookie, a node gets
       // from the SSH host key: record the first key seen per host:port and
-      // refuse a silent change. `undefined` in target.knownHostFingerprint
-      // means this node has never been verified.
+      // refuse a silent change. `undefined` in target.hostFingerprint means this
+      // node has never been verified — that is **first use**, not a failure, so the
+      // key is recorded and the handshake proceeds. Every later handshake compares.
       hostVerifier: (key, verify) => {
         const fingerprint = fingerprintOf(key)
         const expected = this.target.hostFingerprint
@@ -352,7 +373,9 @@ export class SshConnection {
           verify(true)
           return
         }
-        verify(fingerprint === expected)
+        const accepted = fingerprint === expected
+        if (!accepted) this.target.onFingerprintMismatch?.(expected, fingerprint)
+        verify(accepted)
       },
     }
     if (auth.kind === 'password') {
