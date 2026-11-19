@@ -25,17 +25,24 @@
  * what turns a slow connect into a fast one — it is not what makes an upgrade possible.
  *
  * Usage:
- *   node packages/dsh-fleet/scripts/publish-runtime.mjs [--platform linux-x64[(-musl)]] [--out dist] [--publish]
+ *   node packages/dsh-fleet/scripts/publish-runtime.mjs [--platform linux-x64[(-musl)]] [--out dist] [--publish] [--cnb]
  *
  * `--platform` accepts the tag form the plugin uses (`linux-x64`, `linux-arm64`,
- * `linux-musl-arm64`, `darwin-arm64`). Nothing is published unless `--publish` is given.
- * CI runs this per platform (`.github/workflows/release-runtime.yml`) so following an
+ * `linux-musl-arm64`, `darwin-arm64`). Nothing is published unless `--publish` or `--cnb` is
+ * given. CI runs this per platform (`.github/workflows/release-runtime.yml`) so following an
  * upstream release does not require anyone's laptop.
+ *
+ * **Two destinations, and they are not alternatives.** `--publish` uploads to the GitHub
+ * release, which a node reaches through an accelerator. `--cnb` uploads the same bytes to CNB,
+ * which serves them straight — measured at 4 233 285 B/s on the reference node against
+ * 0.2–9.6 MB/s through the accelerators, a 40× run-to-run spread. CNB is the primary source
+ * (`DEFAULT_SOURCES` in `src/remote/artefact.js`), GitHub is the disaster recovery. The CNB
+ * token is read from `CNB_TOKEN` and never written anywhere: this repository is public.
  */
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -50,8 +57,10 @@ const value = (name, fallback) => {
 const platform = value('platform', 'linux-x64')
 const outDir = resolve(pluginRoot, value('out', '../../dist'))
 const shouldPublish = flag('publish')
+const shouldPublishCnb = flag('cnb')
 const tag = value('tag', undefined)
 const registry = value('registry', 'https://registry.npmmirror.com')
+const cnbRepository = value('cnb-repo', 'serendipity-archive/dsh-fleet')
 
 /**
  * `linux-x64` → npm's `--os linux --cpu x64`, plus libc for the Linux split.
@@ -253,10 +262,11 @@ process.stdout.write(
   + `  sha256   ${sha256}\n`,
 )
 
-if (!shouldPublish) {
+if (!shouldPublish && !shouldPublishCnb) {
   process.stdout.write(
     '\nNot published. Upload with:\n'
-    + `  gh release upload ${tag ?? `v${version}`} "${archive}" "${archive}.sha256" --clobber\n`,
+    + `  gh release upload ${tag ?? `v${version}`} "${archive}" "${archive}.sha256" --clobber\n`
+    + `  CNB_TOKEN=… node ${process.argv[1]} --platform ${platform} --cnb\n`,
   )
   process.exit(0)
 }
@@ -270,6 +280,99 @@ const notes = [
   '',
   `sha256: ${sha256}`,
 ].join('\n')
+
+/**
+ * Upload the archive and its checksum to CNB, the primary source.
+ *
+ * The API is release-oriented and needs a git object to hang a tag on, so an empty repository
+ * is the one state this cannot work in — reported as such rather than as a mysterious 400.
+ *
+ * Four calls, in the order CNB requires — the fourth is the one that is easy to miss:
+ *   1. `POST /{repo}/-/releases` — 409 means "already there", which is the normal re-publish
+ *      case, so the tag is looked up instead of failing;
+ *   2. `POST /{repo}/-/releases/{id}/asset-upload-url` — a signed `asset.cnb.cool` URL,
+ *      scoped to one file name and one size, plus the `verify_url` that confirms it;
+ *   3. `PUT` the bytes to it;
+ *   4. `POST` the `verify_url`. **Without this the asset never becomes part of the release.**
+ *      Measured: a PUT answers 200 and the release's asset list stays empty, and an anonymous
+ *      download of the file 404s. The API description says so; nothing else does.
+ *
+ * `ttl` is left at `0` (permanent) because a runtime artefact has to outlive its release's
+ * retention: the maximum is 180 days, so anything else would silently delete the fast path.
+ *
+ * The public repository is deliberate: the node holds no CNB credential, and an anonymous
+ * `GET` of a public asset answers 302 with Range/206 support.
+ */
+async function publishToCnb() {
+  const token = process.env.CNB_TOKEN
+  if (typeof token !== 'string' || token === '') {
+    throw new Error('--cnb needs CNB_TOKEN in the environment; it is never written to disk')
+  }
+  const base = `https://api.cnb.cool/${cnbRepository}`
+  const auth = { authorization: `Bearer ${token}`, accept: 'application/json' }
+  const json = { ...auth, 'content-type': 'application/json' }
+
+  const created = await fetch(`${base}/-/releases`, {
+    method: 'POST',
+    headers: json,
+    body: JSON.stringify({
+      tag_name: releaseTag,
+      name: `DSH ${version} node runtime`,
+      body: notes,
+      prerelease: version.includes('-'),
+      target_commitish: 'main',
+    }),
+  })
+  if (!created.ok && created.status !== 409) {
+    throw new Error(`CNB release ${releaseTag}: ${created.status} ${(await created.text()).slice(0, 300)}`)
+  }
+  const release = await fetch(`${base}/-/releases/tags/${encodeURIComponent(releaseTag)}`, { headers: auth })
+  if (!release.ok) throw new Error(`CNB release ${releaseTag} is not readable: ${release.status}`)
+  const { id } = await release.json()
+
+  for (const file of [`${archive}`, `${archive}.sha256`]) {
+    const bytes = readFileSync(file)
+    const granted = await fetch(`${base}/-/releases/${id}/asset-upload-url`, {
+      method: 'POST',
+      headers: json,
+      body: JSON.stringify({ asset_name: basename(file), overwrite: true, size: bytes.length, ttl: 0 }),
+    })
+    if (!granted.ok) throw new Error(`CNB upload URL for ${file}: ${granted.status} ${(await granted.text()).slice(0, 300)}`)
+    const { upload_url: uploadUrl, verify_url: verifyUrl } = await granted.json()
+    const put = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/octet-stream', 'content-length': String(bytes.length) },
+      body: bytes,
+    })
+    if (!put.ok) throw new Error(`CNB upload of ${file}: ${put.status} ${(await put.text()).slice(0, 300)}`)
+    const confirmed = await fetch(verifyUrl, { method: 'POST', headers: auth })
+    if (!confirmed.ok) {
+      throw new Error(`CNB confirmation of ${file}: ${confirmed.status} ${(await confirmed.text()).slice(0, 300)}`)
+    }
+    process.stdout.write(`  uploaded and confirmed ${basename(file)} on CNB\n`)
+  }
+
+  // The asset list carries the hash CNB computed, so the published bytes are checked rather
+  // than assumed — the same reasoning as the `.sha256` sidecar for the node's own download.
+  const settled = await (await fetch(`${base}/-/releases/tags/${encodeURIComponent(releaseTag)}`, { headers: auth })).json()
+  const asset = (settled.assets ?? []).find(item => item.name === name)
+  if (asset === undefined) throw new Error(`CNB accepted the upload but ${name} is not in the release`)
+  if (asset.hash_value !== sha256) {
+    throw new Error(`CNB reports sha256 ${asset.hash_value} for ${name}, the archive is ${sha256}`)
+  }
+  process.stdout.write(
+    `published ${name} to CNB ${releaseTag}\n`
+    + `  ${asset.browser_download_url}\n`,
+  )
+}
+
+if (shouldPublishCnb) await publishToCnb()
+
+if (!shouldPublish) {
+  process.stdout.write('\nNot uploaded to GitHub. Add --publish to do that too.\n')
+  process.exit(0)
+}
+
 const made = spawnSync('gh', [
   'release', 'create', releaseTag,
   '--title', `DSH ${version} node runtime`,

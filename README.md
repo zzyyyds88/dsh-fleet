@@ -236,14 +236,15 @@ node packages/dsh-fleet/test/run-all.mjs --layer offline,contract   # 不需要�
 
 端到端层里有两个套件真的在节点上装东西：
 
-- `artefact` 从加速站下载一份 165 MiB 的运行时（候选只有 `DEFAULT_MIRRORS` 里的加速站，
-  **不回退直连 GitHub**）；加速站全挂时它以 `ARTEFACT_UNAVAILABLE` 退出并被记成 SKIP。
+- `artefact` 从发布源下载一份 165 MiB 的运行时（源列表是 `DEFAULT_SOURCES`：CNB 优先，其后是
+  加速站，**不回退直连 GitHub**）；全都拿不到时它以 `ARTEFACT_UNAVAILABLE` 退出并被记成 SKIP。
 - `npm-install` 让节点自己 `npm install` 同一版本，证明兜底路线留下的树带着构建戳、解析到了
   节点自己的原生包、且 `node-pty` 的 `spawn-helper` 可执行。节点连不上 registry 时退出码 3，
   同样记成 SKIP。实测参考节点 26–33 s。
 
-换加速站改 `packages/dsh-fleet/src/remote/artefact.js` 的 `DEFAULT_MIRRORS`。`browser` 套件需要
-一个带 `--remote-debugging-port` 的 Chrome，默认不跑。
+换源改 `packages/dsh-fleet/src/remote/artefact.js` 的 `DEFAULT_SOURCES`（整条有序列表，含
+CNB 那种自有路径布局的源），只换加速站改 `DEFAULT_MIRRORS`。`browser` 套件需要一个带
+`--remote-debugging-port` 的 Chrome，默认不跑。
 
 ---
 

@@ -22,6 +22,7 @@ import {
   artefactName,
   artefactUrls,
   DEFAULT_MIRRORS,
+  DEFAULT_SOURCES,
   FETCH_CEILING_SECONDS,
   FETCH_FLOOR_BYTES,
   FETCH_FLOOR_SECONDS,
@@ -127,37 +128,49 @@ const check = (ok, label, detail) => {
   check(artefactName('0.2.2', 'linux-x64') === 'dsh-0.2.2-linux-x64.tar.gz',
     'the file name carries version and platform', artefactName('0.2.2', 'linux-x64'))
 
-  // A node reaches the artefact through a **list** of accelerators, because a single host
-  // is a single point of failure: measured here, the old default (`git.yylx.win`) refused
-  // every connection and each install silently fell through to direct GitHub at ~27 KB/s,
-  // which for 172 683 323 bytes is ~1.8 hours — "connecting a node hangs".
+  // A node reaches the artefact through an ordered **source list**: CNB first, then the
+  // GitHub accelerators as disaster recovery. Measured here: CNB served the full 172 683 323
+  // byte archive at 4 233 285 B/s (~33 s, spread under 1% across repeats) while the
+  // accelerators ranged 0.2–9.6 MB/s run to run — a 40× spread, which is the difference
+  // between "connecting" and "hanging".
   //
   // There is deliberately **no direct-GitHub candidate**: "try GitHub anyway" is the one
-  // fallback guaranteed to be worse than reporting, so an empty accelerator list is a
+  // fallback guaranteed to be worse than reporting, so an empty source list is a
   // configuration error that throws instead of a quiet slow download.
   const urls = artefactUrls({ version: '0.2.2-rc.3', platform: 'linux-x64' })
-  check(urls.length === DEFAULT_MIRRORS.length,
-    'exactly one candidate per accelerator', String(urls.length))
-  check(urls[0].startsWith(`${DEFAULT_MIRRORS[0]}https://github.com/`),
-    'the first accelerator is a prefix, not a rewrite', urls[0])
-  check(DEFAULT_MIRRORS.every((mirror, index) => urls[index].startsWith(mirror)),
-    'the candidates keep the accelerators\' order')
+  check(urls.length === DEFAULT_SOURCES.length,
+    'exactly one candidate per source', String(urls.length))
+  check(urls[0] === 'https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v0.2.2-rc.3/dsh-0.2.2-rc.3-linux-x64.tar.gz',
+    'CNB comes first, filled into its own URL shape rather than prefixed', urls[0])
+  check(DEFAULT_MIRRORS.every((mirror, index) => urls[index + 1].startsWith(`${mirror}https://github.com/`)),
+    'the accelerators follow, still as prefixes')
   check(!urls.some(url => url.startsWith('https://github.com/')),
     'GitHub direct is never a candidate — a slow fallback reads as a hang', urls.at(-1))
   check(urls.every(url => url.includes('/releases/download/v0.2.2-rc.3/dsh-0.2.2-rc.3-linux-x64.tar.gz')),
     'every candidate points at the same tag and file name')
   check(new Set(urls).size === urls.length, 'the candidates are distinct')
   let emptyThrew = ''
-  try { artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: [] }) }
+  try { artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: [], sources: [] }) }
   catch (error) { emptyThrew = String(error.message) }
-  check(emptyThrew.includes('no accelerator configured'),
-    'no accelerators is a named error, not a silent direct download', emptyThrew.slice(0, 80))
-  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: ['https://m.example/'] })[0]
+  check(emptyThrew.includes('no artefact source configured'),
+    'no sources is a named error, not a silent direct download', emptyThrew.slice(0, 80))
+  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: ['https://m.example/'] })[1]
     .startsWith('https://m.example/https://github.com/'), 'a custom accelerator is used verbatim')
   check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: ['https://a/', ''] })
-    .length === 1, 'an empty entry in the list is not a candidate of its own')
-  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: DEFAULT_MIRRORS, repository: 'a/b', tag: 'nightly' })[0]
+    .length === 2, 'an empty entry in the list is not a candidate of its own')
+  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: DEFAULT_MIRRORS, repository: 'a/b', tag: 'nightly' })[1]
     .includes('/a/b/releases/download/nightly/'), 'the repository and tag are configurable')
+  // A template source is a general mechanism, not a hard-coded CNB special case.
+  check(artefactUrls({
+    version: '1.0.0', platform: 'linux-x64',
+    sources: [{ kind: 'template', template: 'https://x/{version}/{platform}/{tag}/{file}' }],
+  })[0] === 'https://x/1.0.0/linux-x64/v1.0.0/dsh-1.0.0-linux-x64.tar.gz',
+  'a template fills in version, platform, tag and file name')
+  let kindThrew = ''
+  try { artefactUrls({ version: '1.0.0', platform: 'linux-x64', sources: [{ kind: 'ftp' }] }) }
+  catch (error) { kindThrew = String(error.message) }
+  check(kindThrew.includes('unknown artefact source kind'),
+    'an unknown source kind is reported, not skipped into a shorter list', kindThrew.slice(0, 80))
 }
 
 // ---- the install script: what it must contain to be safe --------------------
@@ -539,16 +552,19 @@ const check = (ok, label, detail) => {
     'resolved for the node platform, not whichever machine runs npm')
   check(npmCall(refused.calls).includes('.fleet-artefact.json'),
     'and it writes the stamp, so the next connect does not reinstall it')
-  // Every URL the artefact script was given goes *through* an accelerator. An accelerator
-  // URL contains `github.com` as its suffix (that is how prefixing works), so this looks at
-  // where each URL starts, not at whether the words appear.
+  // Every URL the artefact script was given starts at CNB or at an accelerator — never at
+  // GitHub itself. An accelerator URL contains `github.com` as its suffix (that is how
+  // prefixing works), so this looks at where each URL starts.
   const scriptUrls = refused.calls
     .flatMap(call => [...call.matchAll(/'(https:\/\/[^']+)'/gu)].map(match => match[1]))
   check(scriptUrls.length > 0 && scriptUrls.every(url => !url.startsWith('https://github.com/')),
     'and the artefact route it tried first still never starts at GitHub directly',
     scriptUrls.find(url => url.startsWith('https://github.com/')))
-  check(scriptUrls.every(url => DEFAULT_MIRRORS.some(mirror => url.startsWith(mirror))),
-    'every URL it builds goes through a configured accelerator')
+  check(scriptUrls[0]?.startsWith('https://cnb.cool/'),
+    'the node tries CNB first, before any accelerator', scriptUrls[0])
+  check(scriptUrls.every(url => url.startsWith('https://cnb.cool/')
+    || DEFAULT_MIRRORS.some(mirror => url.startsWith(mirror))),
+  'every URL it builds comes from a configured source')
 
   // 2. A checksum mismatch is *not* the same thing. The bytes arrived and were wrong, so
   //    the previous runtime is rolled back and the failure is reported: re-resolving the

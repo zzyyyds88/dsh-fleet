@@ -137,7 +137,7 @@ export function routesOf(config) {
  * decorators, and the management API a settings surface reads.
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {{ enabled?: boolean, autoConnect?: boolean, mirrors?: string[], runtime?: 'auto' | 'artefact' | 'npm', registry?: string }} [config]
+ * @param {{ enabled?: boolean, autoConnect?: boolean, mirrors?: string[], sources?: Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}>, runtime?: 'auto' | 'artefact' | 'npm', registry?: string }} [config]
  */
 export function apply(ctx, config = {}) {
   if (config.enabled === false) return
@@ -159,6 +159,7 @@ export function apply(ctx, config = {}) {
     credentials: ctx.credentials,
     version,
     brainVersion,
+    sources: config.sources,
     mirrors: config.mirrors,
     // Read on every connect and every reinstall: forcing a route in the settings surface
     // has to reach the next install, not the next desktop restart.
@@ -280,6 +281,7 @@ export function apply(ctx, config = {}) {
               throw apiError('node-ahead', decision.message, 409)
             }
             const reinstalled = await runtime.host.install(runtime.facts, {
+              sources: config.sources,
               mirrors: config.mirrors,
               routes: routesOf(config),
               registry: config.registry,

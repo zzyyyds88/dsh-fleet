@@ -314,11 +314,12 @@ export class RemoteHost {
    * and a resolve on the node itself when the artefact cannot be had.
    *
    * 1. **The artefact.** One download, no registry, no resolution: the node ends up on bytes
-   *    somebody built and tested. Downloads go through the **accelerator list**
-   *    (`DEFAULT_MIRRORS`) and nowhere else — `artefactUrls()` has no direct-GitHub
-   *    candidate, because GitHub direct measures ~27 KB/s here and 165 MiB at that speed is
-   *    1.8 hours, which is the "connecting hangs" report this came from. Dropping straight
-   *    to GitHub would turn a decidable failure into an apparent hang.
+   *    somebody built and tested. Downloads go through the ordered **source list**
+   *    (`DEFAULT_SOURCES`: CNB first, then the GitHub accelerators) and nowhere else —
+   *    `artefactUrls()` has no direct-GitHub candidate, because GitHub direct measures
+   *    ~27 KB/s here and 165 MiB at that speed is 1.8 hours, which is the "connecting hangs"
+   *    report this came from. Dropping straight to GitHub would turn a decidable failure into
+   *    an apparent hang.
    * 2. **npm, on the node, for the exact same release.** This is the route that makes an
    *    upstream DSH bump something this project can follow without anyone pre-building a
    *    tree first. It is slower (a full resolve) and needs a registry, so it is never
@@ -342,7 +343,7 @@ export class RemoteHost {
    * whose terminal fails at first use.
    *
    * @param {{ npmPath?: string, nodeUsable: boolean, nodeVersion?: string, curlPath?: string, wgetPath?: string, os?: string, arch?: string, libc?: string }} facts
-   * @param {{ mirrors?: string[], routes?: readonly string[], registry?: string }} [options]
+   * @param {{ mirrors?: string[], sources?: Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}>, routes?: readonly string[], registry?: string }} [options]
    * @returns {Promise<{ version: string, via: 'artefact' | 'npm', engineWarning?: string }>}
    */
   async install(facts, options = {}) {
@@ -382,12 +383,12 @@ export class RemoteHost {
   /**
    * The artefact route. Returns `undefined` when the caller should try the next route.
    *
-   * A download that could not be **had** (no accelerator, no downloader, every accelerator
+   * A download that could not be **had** (no source, no downloader, every source
    * refusing) is exactly what the npm route exists for, so it appends a line to `failures`
    * and returns. Anything that arrived and then failed throws.
    *
    * @param {object} facts
-   * @param {{ mirrors?: string[] }} options
+   * @param {{ mirrors?: string[], sources?: Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}> }} options
    * @param {string[]} failures
    */
   async #installFromArtefact(facts, options, failures) {
@@ -408,12 +409,17 @@ export class RemoteHost {
     }
     let urls
     try {
-      urls = artefactUrls({ version: this.version, platform, mirrors: options.mirrors })
+      urls = artefactUrls({
+        version: this.version,
+        platform,
+        mirrors: options.mirrors,
+        sources: options.sources,
+      })
     } catch (error) {
-      // An empty accelerator list is no longer a hard configuration error: it is "the
+      // An empty source list is no longer a hard configuration error: it is "the
       // artefact route is switched off", which the npm route already covers.
       failures.push(`artefact: ${error instanceof Error ? error.message : String(error)}`)
-      this.log('no accelerator is configured; skipping the artefact route')
+      this.log('no artefact source is configured; skipping the artefact route')
       return undefined
     }
     const script = installScript({
@@ -442,10 +448,10 @@ export class RemoteHost {
       throw toSshError(new Error(`installing the resident host failed: ${detail.slice(-600)}`))
     }
     failures.push(
-      `artefact: no accelerator served dsh-${this.version}-${platform} (tried ${String(urls.length)}):\n`
+      `artefact: no source served dsh-${this.version}-${platform} (tried ${String(urls.length)}):\n`
       + urls.map(url => `    ${url}`).join('\n'),
     )
-    this.log(`no accelerator served the ${platform} artefact; falling back to npm on the node`)
+    this.log(`no source served the ${platform} artefact; falling back to npm on the node`)
     return undefined
   }
 

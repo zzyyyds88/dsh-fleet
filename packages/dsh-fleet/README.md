@@ -149,16 +149,20 @@ decision is which machine the folder is on.
 
 Two routes, tried in order (`runtime` in the config: `auto` / `artefact` / `npm`):
 
-1. **A published artefact** — `dsh-<version>-<platform>.tar.gz` from a Release,
-   downloaded through the accelerator list. One file, no registry, works offline once
-   cached.
+1. **A published artefact** — `dsh-<version>-<platform>.tar.gz` from a Release. One file,
+   no registry. The sources are tried in order and the list lives in
+   `DEFAULT_SOURCES` (`src/remote/artefact.js`): **CNB first**, then the GitHub
+   accelerators as disaster recovery. Measured on the reference node with the full
+   165 MiB archive: CNB served it at 4 233 285 B/s (~33 s, spread under 1% across
+   repeats) while the accelerators ranged 0.2–9.6 MB/s run to run — a 40× spread,
+   which is the difference between "connecting" and "hanging".
 2. **The node resolves it itself** — `npm install --os/--cpu/--libc
    "@deepseek-ai/dsh@<exact version>"` on the node. Slower (a full resolve, measured
    26–33 s for 673 packages), but it needs no artefact at all: that is what makes an
    upstream DSH release followable without anyone pre-building a tree.
 
 Which one to skip is decided by *why* the first failed. A tree that could not be
-**had** — every accelerator down, no `curl`/`wget`, `mirrors: []` — falls through to
+**had** — every source down, no `curl`/`wget`, `mirrors: []` — falls through to
 `npm`. A tree that arrived and was **wrong** (bad checksum, bad archive, no CLI inside)
 rolls back and reports: re-resolving the same broken release would download more and
 hide which source was at fault.
@@ -266,7 +270,17 @@ Nothing on a node needs to change: the node side is the embedded
     # How a node gets its DSH: auto (default, artefact then npm),
     # artefact (published tree only), or npm (let the node resolve it).
     runtime: auto
-    # Accelerators tried in order when downloading an artefact.
+    # Where an artefact is fetched from, best first. Omit to use
+    # DEFAULT_SOURCES: CNB, then the GitHub accelerators. A template
+    # source fills in {version} {platform} {tag} {file}; a prefix source
+    # is prepended to the GitHub release URL.
+    sources:
+      - kind: template
+        template: https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/{tag}/{file}
+      - kind: prefix
+        prefix: https://gh.inkchills.cn/
+    # Shorthand for the prefix sources only; an empty list turns the
+    # artefact route off, which falls through to npm.
     mirrors: [https://git.yylx.win/, https://gh.inkchills.cn/]
     # Registry the *node* uses when it resolves the release itself.
     # Omit to use the node's own `npm config get registry`.
@@ -279,6 +293,11 @@ Nothing on a node needs to change: the node side is the embedded
 named error instead of a slower connect, and `npm` is how you check whether the node's own
 registry works at all. `registry` is passed through to the node's `npm install --registry`;
 leaving it out is usually right, because the node knows its own network.
+
+`sources` and `mirrors` are not the same knob. `sources` is the whole ordered list, including
+hosts with their own URL layout; `mirrors` only names accelerators, which is why it is kept —
+it is what a person usually wants to change. Setting `mirrors: []` is the documented way to
+switch the artefact route off entirely, and it does *not* leave CNB as a lone source.
 
 ## Endpoints that stay local, on purpose
 

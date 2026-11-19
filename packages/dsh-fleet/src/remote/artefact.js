@@ -73,6 +73,50 @@ export const DEFAULT_REPOSITORY = 'zzyyyds88/dsh-fleet'
 export const RELEASE_BASE = 'releases/download'
 
 /**
+ * The primary source: CNB, a domestic host that serves release assets straight.
+ *
+ * An accelerator works by *prefixing* a GitHub URL, which is why {@link DEFAULT_MIRRORS} is a
+ * list of prefixes. CNB is not an accelerator — it is a second, independent place the same
+ * archive is published to, with its own URL shape
+ * (`https://cnb.cool/<org>/<repo>/-/releases/download/<tag>/<file>`), so a prefix list cannot
+ * express it. Hence {@link DEFAULT_SOURCES}: a source is either a prefix (GitHub through a
+ * proxy) or a template (a host with its own path layout).
+ *
+ * **Measured on the test node, full 172 683 323-byte archive, not a HEAD request:**
+ *
+ *   cnb.cool         4 233 285 B/s   (~33 s for the whole archive, run-to-run spread under 1%)
+ *   gh.inkchills.cn  ~2.4 MB/s
+ *   tvv.tw           ~2.3 MB/s
+ *   ghfast.top       ~0.7 MB/s
+ *   git.yylx.win     connection refused at the time, kept for when it returns
+ *
+ * The accelerator hosts vary by a factor of 40 between runs; CNB did not move by 1% across
+ * repeats, and 33 s is the difference between "connecting" and "hanging". So CNB is first and
+ * the accelerators stay behind it as disaster recovery — if CNB is unreachable the node still
+ * installs, slower.
+ *
+ * Public repository on purpose: the node holds **no CNB credential at all**, and an anonymous
+ * `GET` of a public asset answers 302 into `asset.cnb.cool` with Range/206 support.
+ */
+export const CNB_REPOSITORY = 'serendipity-archive/dsh-fleet'
+
+/** The CNB release URL shape, with the placeholders {@link artefactUrls} fills in. */
+export const CNB_TEMPLATE =
+  `https://cnb.cool/${CNB_REPOSITORY}/-/releases/download/{tag}/{file}`
+
+/**
+ * Sources tried in order: CNB first, then the GitHub accelerators.
+ *
+ * A `template` source builds the URL from `{version}`/`{platform}`/`{file}`/`{tag}`; a `prefix`
+ * source prepends itself to the canonical `github.com/<repository>/releases/download/…` URL,
+ * which is what an accelerator *is*.
+ */
+export const DEFAULT_SOURCES = Object.freeze([
+  Object.freeze({ kind: 'template', template: CNB_TEMPLATE }),
+  ...DEFAULT_MIRRORS.map(prefix => Object.freeze({ kind: 'prefix', prefix })),
+])
+
+/**
  * The packaging rules that produced an artefact.
  *
  * A version comparison says nothing about the *contents* of a tree: this plugin packs a
@@ -225,15 +269,20 @@ export function artefactName(version, platform) {
 /**
  * Absolute URLs of one artefact, best candidate first.
  *
- * An accelerator works by prefixing the original URL, which is why this is a prefix
- * rather than a rewrite: `https://gh.inkchills.cn/https://github.com/…`.
+ * A source is one of two things, because a download host is one of two things:
+ *
+ * - `{ kind: 'template', template }` — a host with its own path layout (CNB:
+ *   `https://cnb.cool/<org>/<repo>/-/releases/download/<tag>/<file>`). Prefixing cannot express
+ *   that shape, so the template is filled in instead.
+ * - `{ kind: 'prefix', prefix }` — an accelerator, which works by prepending itself to the
+ *   canonical `github.com/<repository>/releases/download/…` URL.
  *
  * **There is no direct-GitHub candidate, on purpose.** Falling back to `github.com`
  * looks harmless and is not: measured on the test node it runs at ~27 KB/s, so a failed
  * accelerator turns into 1.8 hours of apparent hang — the failure that started this. A
- * host that cannot reach any accelerator is also a host where GitHub is slow or blocked,
+ * host that cannot reach any source is also a host where GitHub is slow or blocked,
  * so "try GitHub anyway" is the one fallback that is guaranteed to be worse than
- * reporting. When every accelerator fails the install reports `ARTEFACT_UNAVAILABLE`
+ * reporting. When every source fails the install reports `ARTEFACT_UNAVAILABLE`
  * and the list gets fixed by hand, which is a decision a person makes once, not a
  * silent 1.8-hour wait on every connect.
  *
@@ -241,28 +290,60 @@ export function artefactName(version, platform) {
  * @param {string} options.version
  * @param {string} options.platform - a `platformTag()` result.
  * @param {string} [options.repository]
- * @param {string[]} [options.mirrors] - accelerator prefixes; at least one is required.
+ * @param {Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}>} [options.sources]
+ *   - replaces the default source list entirely.
+ * @param {string[]} [options.mirrors] - accelerator prefixes kept for compatibility; they are
+ *   appended *after* the template sources so a configured accelerator list never silently
+ *   loses CNB, and a custom one still gets used.
  * @param {string} [options.tag] - release tag; defaults to `v${version}`.
  * @returns {string[]} candidate URLs, best first.
- * @throws when the configured accelerator list yields no candidate — a missing
- *   accelerator is a configuration error, not a reason to download from GitHub directly.
+ * @throws when the resulting source list yields no candidate — a missing source is a
+ *   configuration error, not a reason to download from GitHub directly.
  */
 export function artefactUrls({
-  version, platform, repository = DEFAULT_REPOSITORY, mirrors = DEFAULT_MIRRORS, tag,
+  version, platform, repository = DEFAULT_REPOSITORY, sources, mirrors, tag,
 }) {
   const name = artefactName(version, platform)
   const releaseTag = tag ?? `v${version}`
   const official = `https://github.com/${repository}/${RELEASE_BASE}/${releaseTag}/${name}`
+  const list = sources ?? (
+    // An explicitly empty accelerator list is the documented way to switch the artefact
+    // route off (`mirrors: []` → the node builds its own runtime), so it must not be
+    // silently turned into "CNB only".
+    mirrors !== undefined && mirrors.length === 0
+      ? []
+      : [
+        ...DEFAULT_SOURCES.filter(source => source.kind === 'template'),
+        ...(mirrors ?? DEFAULT_MIRRORS).map(prefix => ({ kind: 'prefix', prefix })),
+      ]
+  )
   const candidates = []
-  for (const mirror of mirrors) {
-    if (mirror === '') continue
-    candidates.push(`${mirror.endsWith('/') ? mirror : `${mirror}/`}${official}`)
+  for (const source of list) {
+    if (source?.kind === 'template') {
+      const template = String(source.template ?? '')
+      if (template === '') continue
+      candidates.push(template
+        .replaceAll('{version}', version)
+        .replaceAll('{platform}', platform)
+        .replaceAll('{tag}', releaseTag)
+        .replaceAll('{file}', name))
+      continue
+    }
+    if (source?.kind === 'prefix') {
+      const prefix = String(source.prefix ?? '')
+      if (prefix === '') continue
+      candidates.push(`${prefix.endsWith('/') ? prefix : `${prefix}/`}${official}`)
+      continue
+    }
+    // An unknown kind is a configuration mistake, and skipping it silently would leave a
+    // source list that looks longer than the one actually tried.
+    throw new Error(`unknown artefact source kind: ${JSON.stringify(source?.kind ?? null)}`)
   }
   if (candidates.length === 0) {
     throw new Error(
-      'no accelerator configured: the node runtime is downloaded only through the '
-      + 'accelerator list, never straight from GitHub (see DEFAULT_MIRRORS). '
-      + 'Add at least one accelerator to `mirrors`.',
+      'no artefact source configured: the node runtime is downloaded only through the '
+      + 'source list (CNB first, then the accelerators), never straight from GitHub '
+      + '(see DEFAULT_SOURCES). Add at least one source.',
     )
   }
   return [...new Set(candidates)]

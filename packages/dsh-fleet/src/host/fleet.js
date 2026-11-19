@@ -156,7 +156,8 @@ export class Fleet {
    * @param {() => readonly string[]} [options.nodeBundles] - the bundle list a node composes,
    *   read at connect and sync time so a plugin switched on reaches a node without a restart.
    * @param {() => { specOf: (bundle: string) => string | undefined, isLocal: (bundle: string) => boolean, localFiles: (bundle: string) => Record<string, string> } | undefined} [options.pluginSpecs] - where a plugin comes from and how it travels.
-   * @param {string[]} [options.mirrors] - accelerator prefixes, best first; an empty list means "go direct".
+   * @param {Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}>} [options.sources] - artefact sources, best first; replaces the default list.
+   * @param {string[]} [options.mirrors] - accelerator prefixes, best first; an empty list means "the artefact route is off".
    * @param {readonly string[]} [options.routes] - which ways a runtime may arrive, in order.
    * @param {string} [options.npmRegistry] - registry a node resolves through; omit for the node's own.
    * @param {(message: string) => void} [options.log]
@@ -166,7 +167,9 @@ export class Fleet {
     this.version = options.version
     /** The brain build this plugin would install: its own package version. */
     this.brainVersion = options.brainVersion ?? '0.0.0'
-    /** GitHub accelerator prefixes for artefact downloads, best first; empty means "go direct". */
+    /** Ordered artefact sources (CNB, then accelerators); `undefined` means the default list. */
+    this.sources = options.sources
+    /** GitHub accelerator prefixes for artefact downloads, best first; empty means "off". */
     this.mirrors = options.mirrors
     /**
      * Which routes a runtime may arrive by, in order.
@@ -331,6 +334,7 @@ export class Fleet {
         // to change a few hundred KB of bundle would be the wrong 8 seconds.
         if (gate.action === GATE.INSTALL) {
           const installedRuntime = await runtime.host.install(runtime.facts, {
+            sources: this.sources,
             mirrors: this.mirrors,
             routes: this.routes(),
             registry: this.npmRegistry(),

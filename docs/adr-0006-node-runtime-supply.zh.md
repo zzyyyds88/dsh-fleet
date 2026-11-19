@@ -32,7 +32,7 @@ npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/
 | 顺序 | 路线 | 何时用 |
 |---|---|---|
 | 1 | **制品** | 默认首选。一次下载、无 registry 依赖、字节确定 |
-| 2 | **节点自建** | 制品拿不到时：加速站全挂、没有 `curl`/`wget`、`mirrors: []`、平台打不出标签 |
+| 2 | **节点自建** | 制品拿不到时：所有源全挂、没有 `curl`/`wget`、`mirrors: []`、平台打不出标签 |
 
 配置新增 `runtime: auto | artefact | npm`（默认 `auto`）与 `registry`。能强制单条路线，是为了
 让失败可归因 —— 排查时不至于在一句复合错误里猜是哪条路出的问题。
@@ -43,7 +43,7 @@ npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/
 
 | 情形 | 处理 |
 |---|---|
-| 加速站全挂（退出码 3，`ARTEFACT_UNAVAILABLE`） | 落 npm |
+| 所有源全挂（退出码 3，`ARTEFACT_UNAVAILABLE`） | 落 npm |
 | 没有 `curl` 也没有 `wget` | 落 npm（原来直接报错） |
 | `mirrors: []`（原来是配置错误） | 落 npm，等于「制品路线关掉了」 |
 | 平台打不出标签 | 落 npm（原来也是这样） |
@@ -80,8 +80,21 @@ npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/
 做法：`npmInstallScript` 用 `--engine-strict=false` 装，装完比对一次，不符就回 `engineWarning`，
 界面如实显示。**抱怨、可运行、不静默**是这三条。
 
-> 待决：节点是否统一升到 Node 24。这会改变 `MINIMUM_NODE_MAJOR`（现值 22），并让一部分
-> 现场机器连不上，属于用户级取舍，本 ADR 不擅自决定。
+> **已决（2026-11-19）：节点不升 Node 24，`MINIMUM_NODE_MAJOR` 保持 22。** 用户的原话是「有必
+> 要就升，没必要就拉倒」，下面是判定「没必要」的实测依据：
+>
+> | 检查 | 结果 |
+> |---|---|
+> | 参考节点实际运行 | Node v22.20.0 + DSH 0.2.2-rc.5，连接与 e2e 全绿 |
+> | `dsh` 的 `engines.node` | `>=24.9.0`，但只在 npm 路线上被读到，且已 `--engine-strict=false` |
+> | 305 个依赖包里真正的 Node 24 API（`Promise.try` / `RegExp.escape` / `Float16Array` / `node:sqlite`） | **0 处** |
+> | 唯一的 `await using` 命中 | `dsh-ptc-runtime-node/lib/process.js` 里 acorn 的**解析器字符串字面量**，不是语法；`node --check` 在 22 上通过 |
+> | `workflow-ptc` 会不会加载 | brain 组合里 `disabled: true`，节点组合是 `dsh-base + rhino-mode + fleet-brain`，加载不到 |
+>
+> 也就是说 `engines` 这条声明在今天**只是建议**：没有任何一条被实际执行的代码路径需要 24。
+> 抬高门槛的唯一后果是一部分现场机器连不上，而换不来任何东西。什么时候该重开这个决定：
+> 依赖闭包里出现真正的 Node 24 语法或 API（`node --check` 或一次真实启动就能发现），
+> 或者上游开始用 `engines` 之外的机制强制版本。
 
 ## 五、代价（实测）
 
@@ -90,13 +103,14 @@ registry 指向 `npmmirror`（metadata 0.148 s）。
 
 | 路线 | 耗时 | 树大小 | 额外依赖 | 备注 |
 |---|---|---|---|---|
-| 制品 | 一次 165 MiB 下载，加速站 4.97 MiB/s 约 34 s | 680.2 MiB / 51 520 文件 | 加速站可达 | 可离线；打包时裁过 |
+| 制品（CNB） | 一次 162 MiB 下载，实测 4 311 729 B/s 约 40 s | 669.3 MiB / 51 419 文件 | CNB 可达 | 可离线；打包时裁过 |
+| 制品（加速站） | 同一次下载，加速站 0.2–9.6 MB/s，抖动 40 倍 | 同上 | 加速站可达 | 灾备 |
 | 节点自建 | `npm install` 26–33 s / 673 包 | 958 MiB / 93 983 文件 | registry 可达 | 首次 275.7 MiB npm 缓存；同版本第二次 1 s |
 
 本机（Windows，跨平台解析 `--os=linux --cpu=x64 --libc=glibc`）实测 83.2 s / 968.2 MiB /
 94106 文件；`npm ci` 加平台标志 53.4 s，正确跳过 win32 的包。
 
-两条树差 277 MiB（+40.8%），差在 `STRIPPED`：`.map` 9 933 个、`.d.ts` 16 144 个、`.md` 与
+两条树差 289 MiB（+43.1%），差在 `STRIPPED`：`.map` 9 933 个、`.d.ts` 16 144 个、`.md` 与
 per-package 的 test 目录都不进制品。只影响节点磁盘占用，不影响可用性。
 
 **真机验收证据**：`test/npm-install-acceptance.mjs` 在参考节点上两次通过（22 项断言，含戳、
@@ -136,7 +150,45 @@ pack 不 `fail-fast`：某个平台没成，其余平台的节点照样能走快
 在本平台 runner 上打包**不是**为了让原生包正确（`--os/--cpu/--libc` 已经保证了），而是为了
 让 `tar` 能记下可执行位 —— Windows 记不了（见上）。
 
-## 八、非目标
+## 八、制品发到哪：CNB 主源，GitHub 加速站灾备
+
+原来只有 GitHub Release 一条去路，节点靠**前缀加速站**下载。前缀加速表达不了 CNB 的路径形状
+（`https://cnb.cool/<org>/<repo>/-/releases/download/<tag>/<file>`），所以 `artefactUrls()` 从
+「前缀数组」改成「源对象数组」：
+
+```js
+DEFAULT_SOURCES = [
+  { kind: 'template', template: 'https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/{tag}/{file}' },
+  { kind: 'prefix', prefix: 'https://git.yylx.win/' },   // 以下四项仍拼接 GitHub 官方 URL
+  { kind: 'prefix', prefix: 'https://gh.inkchills.cn/' },
+  { kind: 'prefix', prefix: 'https://tvv.tw/' },
+  { kind: 'prefix', prefix: 'https://ghfast.top/' },
+]
+```
+
+`mirrors: string[]` 继续可用（转化为 prefix 源追加在模板源之后），`mirrors: []` 仍是「关掉制品
+路线」的写法。`sources` 是整条有序列表，给需要自有布局的源用。
+
+**为什么把 CNB 放第一，实测**（参考节点，整档 170 092 405 字节）：
+
+| 源 | 10 MiB 分段实测 |
+|---|---|
+| cnb.cool（302 → asset.cnb.cool，Range/206） | **4 311 729 B/s**，重复测量抖动 <1% |
+| gh.inkchills.cn | 178 047 B/s（同一时段） |
+| 四个加速站历史区间 | 0.2–9.6 MB/s，**抖动 40 倍** |
+
+抖动才是问题：同样的节点、同样的归档，有时 34 s 有时一小时，读起来就是「连接卡住了」。CNB 不
+抖。仓库**公开**是刻意的 —— 节点上不放任何 CNB 凭据，匿名 `GET` 就能下。
+
+发布侧的四个坑，全部实测撞过：
+
+1. `target_commitish` 是必填，且必须能解析成提交对象 —— 空仓库没有提交，先 push 一次 `main`。
+2. 重复建同名 release 返回 **409**，响应体里没有 id；要按 tag 再查一次。
+3. `PUT` 到预签名地址返回 200 **不等于附件已关联**：必须再 `POST` 一次返回里的 `verify_url`。
+   少了这一步，release 的 assets 一直是空的，匿名下载 404。这条只写在 API 描述里。
+4. `ttl` 最大 180 天，`0` 表示永久。制品要用永久 —— 否则半年后快路径会自己消失。
+
+## 九、非目标
 
 - **不 fork 官方 DSH 包。** 节点自建的是**上游发布版本身**，不是本项目的分叉。所有定制仍然只走
   `@local/dsh-fleet-brain` 与 profile patch（AGENTS.md §4）。
