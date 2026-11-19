@@ -359,6 +359,23 @@ provision 阶段内部顺序也是语义的：**组合先于启动**（profile �
 
 脱敏规则有顺序要求：`Bearer` 那条必须在 `key=value` 那条**之前**。反过来会让 `Authorization: Bearer abc.def` 被 `authorization` 规则吃掉前一半、把 token 本身留在行里 —— 实测就是这个结果，`offline/errors` 里有一条断言守着它。
 
+### 一次 exec 就是一个 SSH 包：命令行不能装 payload
+
+ssh2 发一次 exec 请求时**不切包**：`Protocol.js:1273` 的 `alloc(1 + 4 + 4 + 4 + 1 + 4 + cmdLen)` 说明整条命令就是单个 `SSH_MSG_CHANNEL_REQUEST` 包，多大都一样。而 OpenSSH 的 `PACKET_MAX_SIZE` 是 256 KiB。超了以后服务端**不回错误**：它按错位的长度继续读，接着每个包都被当成垃圾 —— 日志里是 `Bad packet length <某个数>` 紧跟 `Connection corrupted`，客户端看到的是连接自己断了。
+
+这条踩过一次，代价是一整轮 e2e 全红：`writePluginBundle` 把整棵插件树 base64 之后拼进命令行，`dsh-whale-widget` 在磁盘上 5.9 MB，拼出来 **7,923,386 字节**，而节点日志里反复出现的 `7923616` 就是这个数（差 230 字节 = 脚本尾部）。单连接量出来的边界正好在 256 KiB：
+
+| 命令行长 | 结果 |
+|---|---|
+| 262,000 | 干净 |
+| 262,200 | 6 条连接全坏 |
+| 同样内容走 stdin（300 KB / 7.9 MB） | 干净 |
+
+所以规则是**payload 走 stdin，命令行走 argv**。stdin 是 channel-data，按协商的 `packetSize`（32 KiB）分片，多大都不成一个超大包；`writeBrainBundle` / `writePluginBundle` 的树就是这么过去的。同时 `SshConnection.exec` 有一道本地闸门 `MAX_COMMAND_BYTES = 128 KiB`，超了就在本地抛 `SSH_FAILURE.PROTOCOL` —— 本地报错是调用方唯一能处理的结果，服务端给的是一次掉线。`offline/packet` 套件钉住这两条。
+
+顺带一个同类的坑：`pkill -f` 匹配的是**任意命令行**，所以 `RemoteHost.stop()` 兜底脚本里的模式会匹配到执行它自己的 `sh -c`（argv 里就带着这个模式），把自己杀掉、channel 无退出码。实测普通模式 `{"out":"","code":null}`、`bin[.]js` 这种加方括号的 `{"out":"SURVIVED","code":0}`，而对真正的 resident host 依然匹配（节点上 2 个变 1 个）。凡是 `pkill -f` 的模式里出现自己的字面量，都要这样打断它。
+
+
 ### 开机自动连接：先取凭据，再判断
 
 `autoConnect` 曾经是这个形状：遍历记录 → `if (!runtime.credentialsReady()) continue` → `connect()`。看起来是"没有凭据就别白连一次"，实际上**每次开机都一个都连不上**：`runtime.secret` 只由 `put()` 和 `connect()` 填充，刚构造出来的 runtime 一律是"没有凭据"，于是这个 `continue` 把每个节点都跳过了。实测症状：重启后设置页全显示「未连接」、侧栏里一个远程工作区都没有 —— 和「插件坏了」完全无法区分；而手动点「连接」就能连上，那正是 autoConnect 要省掉的动作。

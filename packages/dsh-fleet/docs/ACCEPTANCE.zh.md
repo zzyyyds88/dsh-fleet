@@ -14,7 +14,7 @@
 node packages/dsh-fleet/test/run-all.mjs
 ```
 
-它会自己启动一个 `--profile fleettest` 的 Host、连上已记录的节点，按三层跑完全部 31 个套件，
+它会自己启动一个 `--profile fleettest` 的 Host、连上已记录的节点，按三层跑完全部 35 个套件，
 每个套件一行结论，失败的附最后几行输出与完整日志路径。**任何一层失败都以非零退出**。
 
 ```powershell
@@ -303,7 +303,7 @@ node packages\dsh-fleet\test\workspace-browse.mjs <base> <token>
 node packages\dsh-fleet\test\run-all.mjs --layer offline,contract
 ```
 
-单跑某一个套件时才用直调形式；`test/run-all.mjs --list` 打印全部 31 个套件与它们各自的依赖。
+单跑某一个套件时才用直调形式；`test/run-all.mjs --list` 打印全部 35 个套件与它们各自的依赖。
 **每个套件守的是哪条上游契约、DSH 升级后按什么顺序重跑**，见 [`UPGRADE.zh.md`](UPGRADE.zh.md) §二。
 
 ```powershell
@@ -511,3 +511,67 @@ $ hostname                                            →  Develop
 `Page.captureScreenshot` 的**默认路径**抓不到对话框文字（DOM 有正确 rect 与颜色，PNG 里只有遮罩
 和白色卡片）。实测 `clip.scale = 1`（full / inset / half / offset 四种）全部拿不到，
 `clip.scale = 2` 能拿到（同一 rect 从 0 个暗像素变 213 个）。真实 Electron 窗口是 GPU 合成，文字正常。
+
+### 2026-11-20 · 节点连接被 sshd 判损坏：命令行超了 256 KiB
+
+**症状**：节点 `/var/log/auth.log` 里成百上千条
+
+```
+Bad packet length 88734736.
+ssh_dispatch_run_fatal: Connection from user root 192.168.3.24 port 62259: Connection corrupted
+```
+
+fleet 随即报节点掉线，于是 `plugin-switch` / `tool-parity` / `tool-git-image` / `event-relay`
+一起红，全量 e2e 长期停在 `13 passed, 4 failed`。
+
+**量出来的分界**（30 s 窗口，只读节点自己的计数器，`base + dsh-web-app` 打底）：
+
+| 桌面 profile 里有什么 | 连接 | 损坏 |
+|---|---|---|
+| 只有 fleet | 1 | 0 |
+| fleet + `dsh-whale-widget` | 7 | 6 |
+| fleet + `dsh-whale-widget`，开关拨到 `{"sync":false}` | 1 | 0 |
+| fleet + 插件列着但入口文件改名（装不成也导不进） | 7 | 6 |
+| 不启动任何测试 Host，空跑 40 s | 0 | 0 |
+
+即：**多一个 bundle 就坏，与那个 bundle 是什么代码无关**；差别只在 fleet 会不会去"把插件送到
+节点"。再把 `syncConfig` 的每一步单独停掉（整包副本 + 真 Host），只有停掉 `#installPlugins`
+时损坏消失。
+
+**真因**：ssh2 把一次 exec 请求**当成一个 SSH 包**发出去（`Protocol.js:1273`
+`alloc(1 + 4 + 4 + 4 + 1 + 4 + cmdLen)`），OpenSSH 的 `PACKET_MAX_SIZE` 是 256 KiB。
+`writePluginBundle` 把整棵插件树 base64 之后拼进命令行，`dsh-whale-widget` 在磁盘上 5.9 MB，
+拼出来正好 **7,923,386 字节** —— 与日志里那个反复出现的 `7923616` 差 230 字节（脚本尾部）。
+超过上限后 sshd 不是回一个错误，而是读完这个包之后流位置就错了，之后每个包都按错位长度读，
+那就是 `Bad packet length` 与 `Connection corrupted`。
+
+单条连接、只发一条命令量的边界：
+
+| 命令行长 | 结果 |
+|---|---|
+| 240,000 | 连接 +0，损坏 +0 |
+| 262,000 | 连接 +0，损坏 +0 |
+| 262,200 | 连接 +6，损坏 +6 |
+| 300,000 | 连接 +6，损坏 +6 |
+| 同样内容走 **stdin**（300 KB / 7.9 MB） | 连接 +0，损坏 +0 |
+
+**修法**（`fix(ssh): 插件树改走 stdin`）：两个 writer 的 payload 从 heredoc 改成 stdin（channel-data
+按协商的 `packetSize` 分片，多大都不成一个超大包）；`SshConnection.exec` 加本地闸门
+`MAX_COMMAND_BYTES = 128 KiB`，超过就在本地抛 `SSH_FAILURE.PROTOCOL`，不再把包发出去让服务器去
+损坏连接。新套件 `test/packet-unit.mjs`（offline 层）钉住这条规则。
+
+**验收证据**
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| 纯逻辑 + 组合 | `run-all.mjs --layer offline` | **14 passed, 0 failed, 0 skipped in 2.3s** |
+| 契约缝隙 | `run-all.mjs --layer contract` | **3 passed, 0 failed, 0 skipped in 709ms** |
+| 端到端（18 套件，`fleettest` + 真节点 `probe-93`） | `run-all.mjs --layer e2e` | **17 passed, 0 failed, 1 skipped in 270.0s** |
+| 节点侧损坏计数（跑 e2e 前 → 后） | `grep -c 'Connection corrupted' /var/log/auth.log` | **2024 → 2024（+0）** |
+
+唯一 SKIP 是 `e2e/browser`（未设 `DSH_BROWSER_DEBUG_PORT`），不是通过。
+
+同一轮还修了一处独立的健壮性缺陷：`RemoteHost.stop()` 的兜底 `pkill -f '…/lib/bin.js'` 会匹配到
+执行它自己的 `sh -c`（argv 里就带着这个模式），把自己杀掉、channel 无退出码。改成 `bin[.]js`
+后实测 `{"out":"SURVIVED","code":0}`，且仍然杀到了真正的 resident host（节点上 2 个变 1 个）。
+
