@@ -304,7 +304,8 @@ export class Fleet {
         }
         runtime.phase = 'install'
         this.#publish()
-        // The gate decides; the installer only carries it out. Doing the comparison        // here rather than inside `install` keeps the reason available to the settings
+        // The gate decides; the installer only carries it out. Doing the comparison
+        // here rather than inside `install` keeps the reason available to the settings
         // page, which is what the user reads when a connect refuses to proceed.
         const installed = await runtime.host.inspectRuntime()
         const gate = decideGate({
@@ -329,8 +330,6 @@ export class Fleet {
         // rewritten unconditionally in the provision phase below — reinstalling 169 MB
         // to change a few hundred KB of bundle would be the wrong 8 seconds.
         if (gate.action === GATE.INSTALL) {
-          runtime.phase = 'install'
-          this.#publish()
           const installedRuntime = await runtime.host.install(runtime.facts, {
             mirrors: this.mirrors,
             routes: this.routes(),
