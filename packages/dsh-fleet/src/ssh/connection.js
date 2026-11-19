@@ -398,6 +398,31 @@ export class SshConnection {
     throw toSshError(lastError)
   }
 
+  /**
+   * The one place that reacts to a live client going away.
+   *
+   * Both `error` and `close` can report the same death, and ssh2 emits `error` first when a
+   * socket fails. Two separate handlers therefore raced: whichever ran first cleared
+   * `#client`, and the other saw `#client !== client` and returned — so a node could stay
+   * `connected` over a socket that was already dead, and every later call failed with a
+   * message naming a state the UI never showed.
+   *
+   * The guard is the client identity, not the event: whichever handler arrives first wins and
+   * the other is a no-op. `deliberate` says the close was this object's own doing (see
+   * `invalidate()`/`dispose()`), which is never a drop.
+   *
+   * @param {import('ssh2').Client} client
+   * @param {string} reason
+   * @param {boolean} [deliberate]
+   */
+  #onClientGone(client, reason, deliberate = this.#ending.has(client)) {
+    if (this.#client !== client) return
+    this.#client = undefined
+    this.#sftp = undefined
+    if (deliberate) return
+    this.target.log?.(`ssh: the connection closed on its own (${reason})`)
+    this.target.onDrop?.()
+  }
   #connectOnce() {
     return new Promise((resolve, reject) => {
       const client = new Client()
@@ -409,26 +434,22 @@ export class SshConnection {
       }
       client.once('ready', () => {
         settle(() => {
-          client.once('close', () => {
-            if (this.#client !== client) return
-            this.#client = undefined
-            this.#sftp = undefined
-            // A close this object did not ask for is a **drop**, and the node has to learn
-            // about it: until now `state` stayed `connected` after the socket died, so the
-            // sidebar kept listing workspaces that could not be opened and the card showed a
-            // green dot. `invalidate()`/`dispose()` mark the client as deliberately ended, so
-            // an ordinary disconnect never reports a drop.
-            if (!this.#ending.has(client)) this.target.onDrop?.()
+          client.once('close', hadError => {
+            this.#onClientGone(client, `closed, hadError=${String(hadError)}`)
           })
-          client.once('error', () => {
-            if (this.#client !== client) return
-            this.#client = undefined
-            this.#sftp = undefined
+          client.once('error', error => {
+            // An error on a live client is a drop: report it here, and mark the client as
+            // ended so the `close` that follows does not report the same death again.
+            this.#onClientGone(client, `failed: ${error.message}`, false)
+            this.#ending.add(client)
+            try { client.end() } catch { /* already gone */ }
           })
           resolve(client)
         })
       })
       client.on('error', error => {
+        // Before `ready` there is no live connection to report: this is a handshake failure,
+        // and rejecting the pending `client()` promise is the whole response.
         try { client.end() } catch { /* already gone */ }
         settle(() => reject(toSshError(error)))
       })
