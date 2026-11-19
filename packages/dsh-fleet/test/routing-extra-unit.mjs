@@ -60,7 +60,16 @@ function fakeFleet() {
   }
 }
 
-/** A service stand-in whose methods only record that they ran. */
+/**
+ * A service stand-in whose methods only record that they ran.
+ *
+ * Deliberately **not** `async`: most of the namespaces this file covers are synchronous
+ * upstream (`goals/*`, `userQuestions/answer`, `commands/list`), and an async stand-in
+ * hides the thing that broke on 2026-11-19 — an `async` wrapper turned a synchronous
+ * return into a promise and a synchronous throw into a rejected promise nobody awaited,
+ * which the Host's `unhandledRejection` handler turned into `process.exit(1)`. Tests that
+ * want to await a non-promise can; `await` accepts a plain value.
+ */
 function fakeService(methods) {
   const service = {}
   for (const name of methods) {
@@ -68,7 +77,7 @@ function fakeService(methods) {
       configurable: true,
       enumerable: false,
       writable: true,
-      value: async (...args) => ({ local: name, args }),
+      value: (...args) => ({ local: name, args }),
     })
   }
   return service
