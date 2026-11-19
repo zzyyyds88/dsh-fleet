@@ -638,6 +638,90 @@ function fakeFleet(nodeId, gateway) {
     String(remerge.length))
 }
 
+// ---- a local call keeps the upstream method's SHAPE, not only its value ----
+// Measured 2026-11-19 on 0.2.2-rc.5: every `*Endpoint` wrapper was an `async`
+// function, so a local call came back as a promise. Three routed services are
+// synchronous and their in-process callers do not await them:
+//
+//   dsh-tool-goal   goalValue(ctx.goals.create(agent, …))  — read .id/.revision
+//   dsh-tool-goal   goals.get(agent)                       — read .phase
+//   dsh-command-goal ctx.goals.create(invocation.agent, …)  — passed straight to a renderer
+//
+// `goals.create` also throws synchronously when a goal already exists. Under the
+// `async` wrapper that throw became a rejected promise nobody awaited, which the
+// Host's `unhandledRejection` handler turned into
+// `dsh: fatal load failure: GoalError: goal "goal-…" already exists with phase
+// "active"` and then `process.exit(1)` — the whole desktop app exited.
+{
+  const { gateway } = fakeGateway(NODE, {})
+  const router = new Router({ fleet: fakeFleet(NODE, gateway) })
+
+  /** Upstream-shaped `goals`: every method synchronous, `create` throws on a duplicate. */
+  class FakeGoals {
+    constructor() { this.current = undefined }
+    get(agent) { return this.current === undefined ? undefined : { ...this.current, forAgent: agent?.id } }
+    create(agent, request) {
+      if (this.current !== undefined) {
+        throw Object.assign(new Error('goal "goal-1" already exists with phase "active"'), { code: 'GOAL_ALREADY_EXISTS' })
+      }
+      this.current = { id: 'goal-1', revision: 1, objective: request.objective, phase: 'active' }
+      return { ...this.current, forAgent: agent?.id }
+    }
+  }
+
+  const { decorateGoals } = await import('../src/host/decorators-extra.js')
+  const service = new FakeGoals()
+  decorateGoals(service, router)
+
+  // The wrapper itself must not be an `async` function: `constructor.name` is the
+  // cheapest structural proof, and it is what `Object.prototype.toString` reports.
+  check(service.get.constructor.name === 'Function', 'a routed sync method is not an async function', service.get.constructor.name)
+
+  // The value must arrive without an await, and it must be the goal itself.
+  const created = service.create({ id: 'session-local' }, { objective: 'ship it' })
+  check(created !== null && typeof created === 'object' && typeof created.then !== 'function',
+    'a local goals.create returns the goal itself, not a promise')
+  check(created.id === 'goal-1' && created.revision === 1 && created.phase === 'active',
+    'and every field goalValue reads is present', JSON.stringify(created))
+  check(created.forAgent === 'session-local', 'the upstream method really ran', String(created.forAgent))
+
+  // The synchronous throw has to stay synchronous. A promise rejection here is what
+  // killed the app: nothing awaited it, and the Host exits on an unhandled rejection.
+  let thrown
+  try {
+    service.create({ id: 'session-local' }, { objective: 'again' })
+  } catch (error) {
+    thrown = error
+  }
+  check(thrown?.code === 'GOAL_ALREADY_EXISTS', 'a local goals.create throws synchronously', String(thrown?.code))
+  check(thrown instanceof Error && typeof thrown.then !== 'function', 'the throw is an Error, not a rejected promise')
+
+  // `get` is the read the goal bar makes on every render.
+  const read = service.get({ id: 'session-local' })
+  check(read !== null && typeof read === 'object' && typeof read.then !== 'function',
+    'a local goals.get returns the view itself')
+  check(read.phase === 'active', 'and the goal bar can read its phase', String(read.phase))
+}
+
+// ---- a stream endpoint stays a stream, not a promise ----------------------
+{
+  const { gateway } = fakeGateway(NODE, {
+    'session/follow': [{ type: 'snapshot', header: { id: SESSION }, records: [] }],
+  })
+  const router = new Router({ fleet: fakeFleet(NODE, gateway) })
+  const { decorateJobController } = await import('../src/host/decorators.js')
+
+  class FakeJobs {
+    list(request) { return (async function* () { yield { type: 'rows', local: request.sessionId } })() }
+    follow(request) { return (async function* () { yield { type: 'opened', local: request.sessionId } })() }
+  }
+  const service = new FakeJobs()
+  decorateJobController(service, router)
+  const stream = service.list({ sessionId: 'session-local' })
+  check(typeof stream?.[Symbol.asyncIterator] === 'function',
+    'a local job list returns the upstream stream, not a promise wrapping it')
+}
+
 if (failures.length > 0) {
   log(`FAILED: ${failures.join(', ')}`)
   process.exitCode = 1

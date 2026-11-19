@@ -276,13 +276,21 @@ export function decorateSchedule(service, router, options = {}) {
     return { ...own, items: merged }
   }
 
-  /** Route one per-entry verb. */
-  const entry = (endpoint, local) => async function routed(request, signal) {
+  /**
+   * Route one per-entry verb.
+   *
+   * Not `async`: the local branch is a pure pass-through, so it has to hand back exactly
+   * what the upstream method returned — including throwing synchronously. See the
+   * `*Endpoint` comment in `router.js` for the failure that shape loss caused.
+   */
+  const entry = (endpoint, local) => function routed(request, signal) {
     const id = fieldOf(requestIn(request), 'id') ?? fieldOf(requestIn(request), 'scheduleId')
     const decoded = decodeRemoteId(typeof id === 'string' ? id : undefined)
-    if (decoded === undefined) return await local(request, signal)
+    if (decoded === undefined) return local(request, signal)
     const payload = router.toRemote({ request: { ...requestIn(request), id: decoded.remoteId } }, decoded.nodeId)
-    return router.toLocal(await router.call(decoded.nodeId, endpoint, payload, signal), decoded.nodeId)
+    return router.call(decoded.nodeId, endpoint, payload, signal).then(
+      value => router.toLocal(value, decoded.nodeId),
+    )
   }
 
   return decorateMethods(service, {

@@ -206,14 +206,19 @@ export function decorateWorkspaceController(service, router, workspaces) {
       ?? decodeRemoteId(Reflect.get(request, 'beforeSessionId'))
   }
 
-  /** Route a mutation whose owner is a node. */
-  const mutation = (endpoint, local) => async function routed(request, signal) {
+  /**
+   * Route a mutation whose owner is a node.
+   *
+   * Not `async`: every one of these upstream methods is synchronous, and the local
+   * branch is a pass-through, so it has to return exactly what upstream returned and
+   * throw exactly where upstream threw. See the `*Endpoint` comment in `router.js`.
+   */
+  const mutation = (endpoint, local) => function routed(request, signal) {
     const owner = ownerOf(request)
-    if (owner === undefined) return await local(request, signal)
+    if (owner === undefined) return local(request, signal)
     const payload = router.toRemote({ request: request ?? {} }, owner.nodeId)
-    return router.toLocalWorkspace(
-      await router.call(owner.nodeId, `workspace/${endpoint}`, payload, signal),
-      owner.nodeId,
+    return router.call(owner.nodeId, `workspace/${endpoint}`, payload, signal).then(
+      value => router.toLocalWorkspace(value, owner.nodeId),
     )
   }
 
@@ -223,33 +228,38 @@ export function decorateWorkspaceController(service, router, workspaces) {
       return mergeWorkspaceStream(own, workspaces, signal)
     },
 
-    create: local => async function create(request, signal) {
+    // Not `async`: `workspace/create` is synchronous upstream, so the local branch has to
+    // stay synchronous. Only the branches that talk to a node return a promise. See the
+    // `*Endpoint` comment in `router.js` for what shape loss cost.
+    create: local => function create(request, signal) {
       const path = request === null || typeof request !== 'object' ? undefined : Reflect.get(request, 'path')
       const target = decodePickerPath(path)
       // `/@fleet/<id>/…` names one node unambiguously, so it never falls through to the
       // others: a path on the wrong machine must fail as "that node is offline", not
       // silently become a different machine's workspace.
       if (target !== undefined && target.kind === 'node') {
-        try {
-          const runtime = router.node(target.nodeId)
-          // The node's `workspace/create` realpaths its folder and fails before making
-          // anything, so a folder that is not there yet is created here first. This is
-          // also the only way a Remote caller can open a new project: its own "new
-          // folder" affordance is not in the phone client's endpoint allowlist.
-          await ensureRemoteDirectory(runtime.connection, target.remotePath)
-          const value = await router.call(target.nodeId, 'workspace/create', {
-            request: { path: target.remotePath },
-          }, signal)
-          return router.toLocalWorkspace(value, target.nodeId)
-        } finally {
-          // The relay creates this directory on *this* machine before it dispatches
-          // (see picker-paths.js): remove the empty chain it just made, and nothing
-          // else. Failure is logged, never turned into a failed workspace.
-          const pruned = pruneShadow(path, message => console.warn(message))
-          if (pruned.removed.length > 0) {
-            console.log(`fleet: removed ${String(pruned.removed.length)} shadow director${pruned.removed.length === 1 ? 'y' : 'ies'} under ${shadowRoot()}`)
+        return (async () => {
+          try {
+            const runtime = router.node(target.nodeId)
+            // The node's `workspace/create` realpaths its folder and fails before making
+            // anything, so a folder that is not there yet is created here first. This is
+            // also the only way a Remote caller can open a new project: its own "new
+            // folder" affordance is not in the phone client's endpoint allowlist.
+            await ensureRemoteDirectory(runtime.connection, target.remotePath)
+            const value = await router.call(target.nodeId, 'workspace/create', {
+              request: { path: target.remotePath },
+            }, signal)
+            return router.toLocalWorkspace(value, target.nodeId)
+          } finally {
+            // The relay creates this directory on *this* machine before it dispatches
+            // (see picker-paths.js): remove the empty chain it just made, and nothing
+            // else. Failure is logged, never turned into a failed workspace.
+            const pruned = pruneShadow(path, message => console.warn(message))
+            if (pruned.removed.length > 0) {
+              console.log(`fleet: removed ${String(pruned.removed.length)} shadow director${pruned.removed.length === 1 ? 'y' : 'ies'} under ${shadowRoot()}`)
+            }
           }
-        }
+        })()
       }
       // `/@fleet` on its own is the node list, not a directory anywhere — a workspace
       // cannot be created from it, and it must never fall through to a local `mkdir`.
@@ -262,17 +272,20 @@ export function decorateWorkspaceController(service, router, workspaces) {
       // A bare absolute POSIX path (typed by hand) still tries each node in turn: that is
       // the only meaning it can have, since this machine's own paths are not POSIX.
       if (typeof path === 'string' && path.startsWith('/')) {
-        for (const runtime of router.nodes()) {
-          const nodeId = runtime.record.id
-          try {
-            const value = await router.call(nodeId, 'workspace/create', { request: { path } }, signal)
-            if (Reflect.get(value ?? {}, 'workspace') !== undefined) {
-              return router.toLocalWorkspace(value, nodeId)
-            }
-          } catch { /* this node cannot see that path; try the next */ }
-        }
+        return (async () => {
+          for (const runtime of router.nodes()) {
+            const nodeId = runtime.record.id
+            try {
+              const value = await router.call(nodeId, 'workspace/create', { request: { path } }, signal)
+              if (Reflect.get(value ?? {}, 'workspace') !== undefined) {
+                return router.toLocalWorkspace(value, nodeId)
+              }
+            } catch { /* this node cannot see that path; try the next */ }
+          }
+          return local(request, signal)
+        })()
       }
-      return await local(request, signal)
+      return local(request, signal)
     },
 
     rename: local => mutation('rename', local),
@@ -558,13 +571,13 @@ export function decorateJobController(service, router) {
         value => router.toLocal(value, decoded.nodeId),
       )
     },
-    kill: local => async function kill(request, signal) {
+    // Not `async`: `job/kill` is synchronous upstream, so a local call has to return the
+    // upstream value directly. See the `*Endpoint` comment in `router.js`.
+    kill: local => function kill(request, signal) {
       const decoded = decodeRemoteId(sessionIdIn(request))
-      if (decoded === undefined) return await local(request, signal)
+      if (decoded === undefined) return local(request, signal)
       const bare = { ...request, sessionId: decoded.remoteId }
-      try {
-        return await router.call(decoded.nodeId, 'job/kill', { request: bare }, signal)
-      } catch (error) {
+      return router.call(decoded.nodeId, 'job/kill', { request: bare }, signal).catch(error => {
         // A node's `job/not-found` repeats the Session id in `details`. Left alone
         // that is a bare node identity reaching the browser, which would then be
         // used as if it named something local.
@@ -572,7 +585,7 @@ export function decorateJobController(service, router) {
           error.details = router.toLocal(error.details, decoded.nodeId)
         }
         throw error
-      }
+      })
     },
   })
 }
@@ -604,10 +617,10 @@ export function decorateTerminalController(service, router) {
   const target = sessionId => decodeRemoteId(sessionId)
 
   return decorateMethods(service, {
-    list: local => async function list(sessionId, signal) {
+    list: local => function list(sessionId, signal) {
       const decoded = target(sessionId)
-      if (decoded === undefined) return await local(sessionId, signal)
-      return await router.call(decoded.nodeId, 'terminal/list', { sessionId: decoded.remoteId }, signal)
+      if (decoded === undefined) return local(sessionId, signal)
+      return router.call(decoded.nodeId, 'terminal/list', { sessionId: decoded.remoteId }, signal)
     },
 
     watch: local => function watch(sessionId, signal) {
@@ -634,16 +647,16 @@ export function decorateTerminalController(service, router) {
       )
     },
 
-    environment: local => async function environment(agent, signal) {
+    environment: local => function environment(agent, signal) {
       const decoded = target(agent?.id)
-      if (decoded === undefined) return await local(agent, signal)
-      return await router.call(decoded.nodeId, 'terminal/environment', { agentId: decoded.remoteId }, signal)
+      if (decoded === undefined) return local(agent, signal)
+      return router.call(decoded.nodeId, 'terminal/environment', { agentId: decoded.remoteId }, signal)
     },
 
-    shells: local => async function shells(agent, signal) {
+    shells: local => function shells(agent, signal) {
       const decoded = target(agent?.id)
-      if (decoded === undefined) return await local(agent, signal)
-      return await router.call(decoded.nodeId, 'terminal/shells', { agentId: decoded.remoteId }, signal)
+      if (decoded === undefined) return local(agent, signal)
+      return router.call(decoded.nodeId, 'terminal/shells', { agentId: decoded.remoteId }, signal)
     },
 
     create: local => async function create(agent, request, signal) {
@@ -657,22 +670,21 @@ export function decorateTerminalController(service, router) {
       )
     },
 
-    rename: local => async function rename(agent, id, title) {
+    rename: local => function rename(agent, id, title) {
       const decoded = target(agent?.id)
-      if (decoded === undefined) return await local(agent, id, title)
-      const value = await router.call(
+      if (decoded === undefined) return local(agent, id, title)
+      return router.call(
         decoded.nodeId,
         'terminal/rename',
         { agentId: decoded.remoteId, id, title },
-      )
-      return value === undefined ? undefined : router.toLocal(value, decoded.nodeId)
+      ).then(value => (value === undefined ? undefined : router.toLocal(value, decoded.nodeId)))
     },
 
-    close: local => async function close(agent, id) {
+    close: local => function close(agent, id) {
       const decoded = target(agent?.id)
-      if (decoded === undefined) return await local(agent, id)
-      const value = await router.call(decoded.nodeId, 'terminal/close', { agentId: decoded.remoteId, id })
-      return value === undefined ? undefined : router.toLocal(value, decoded.nodeId)
+      if (decoded === undefined) return local(agent, id)
+      return router.call(decoded.nodeId, 'terminal/close', { agentId: decoded.remoteId, id })
+        .then(value => (value === undefined ? undefined : router.toLocal(value, decoded.nodeId)))
     },
 
     /**

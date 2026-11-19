@@ -24,6 +24,29 @@ import {
   remapIds,
 } from './routing.js'
 
+/**
+ * Every `*Endpoint` wrapper below hands a **local** call straight to `local(...)`, and
+ * the wrapper function itself is deliberately **not** `async`.
+ *
+ * The local half of a router is a pass-through, so it has to keep the upstream method's
+ * *shape* and not only its value. Several routed services are synchronous and their
+ * in-process callers depend on that: `dsh-tool-goal` evaluates
+ * `goalValue(ctx.goals.create(agent, …))` without awaiting, and `goals.create` throws
+ * synchronously when a goal already exists. Wrapping that in `async` produced two
+ * failures at once:
+ *
+ *   - the created goal came back as a promise, so every field `goalValue` read was
+ *     `undefined` and the tool answered "invalid output";
+ *   - the synchronous throw became a rejected promise nobody awaited, which the Host's
+ *     `unhandledRejection` handler turned into
+ *     `dsh: fatal load failure: GoalError: goal "goal-…" already exists with phase
+ *     "active"` followed by `process.exit(1)` — the whole desktop app exited.
+ *
+ * Measured 2026-11-19 on `0.2.2-rc.5`. The remote half stays a promise because the wire
+ * is a promise; that asymmetry is inherent to routing, and no in-process caller here
+ * ever passes a remote Agent.
+ */
+
 /** Endpoint families whose arguments name a Session. */
 const SESSION_REQUEST_KEYS = Object.freeze(['request', 'sessionId', 'address'])
 
@@ -356,14 +379,13 @@ export class Router {
   sessionEndpoint(endpoint, local, options = {}) {
     const router = this
     const wrapArgs = options.args ?? 'request'
-    return async function routed(request, signal) {
+    return function routed(request, signal) {
       const id = wrapArgs === 'request' ? sessionIdOf(request) : sessionIdOf({ sessionId: request })
       const decoded = decodeRemoteId(id)
-      if (decoded === undefined) return await local(request, signal)
+      if (decoded === undefined) return local(request, signal)
       const payload = router.toRemote({ request: request ?? {} }, decoded.nodeId)
-      return router.toLocal(
-        await router.call(decoded.nodeId, `session/${endpoint}`, payload, signal),
-        decoded.nodeId,
+      return router.call(decoded.nodeId, `session/${endpoint}`, payload, signal).then(
+        value => router.toLocal(value, decoded.nodeId),
       )
     }
   }
@@ -375,13 +397,12 @@ export class Router {
    */
   workspaceEndpoint(endpoint, local) {
     const router = this
-    return async function routed(request, signal) {
+    return function routed(request, signal) {
       const decoded = decodeRemoteId(workspaceIdOf(request))
-      if (decoded === undefined) return await local(request, signal)
+      if (decoded === undefined) return local(request, signal)
       const payload = router.toRemote({ request: request ?? {} }, decoded.nodeId)
-      return router.toLocalWorkspace(
-        await router.call(decoded.nodeId, `workspace/${endpoint}`, payload, signal),
-        decoded.nodeId,
+      return router.call(decoded.nodeId, `workspace/${endpoint}`, payload, signal).then(
+        value => router.toLocalWorkspace(value, decoded.nodeId),
       )
     }
   }
@@ -409,9 +430,9 @@ export class Router {
   agentEndpoint(endpoint, rest, local, options = {}) {
     const router = this
     const wrap = options.wrapResult !== false
-    return async function routed(agent, ...args) {
+    return function routed(agent, ...args) {
       const decoded = decodeRemoteId(agent?.id)
-      if (decoded === undefined) return await local(agent, ...args)
+      if (decoded === undefined) return local(agent, ...args)
       /** @type {Record<string, unknown>} */
       const payload = { agentId: decoded.remoteId }
       for (const [index, name] of rest.entries()) {
@@ -419,8 +440,9 @@ export class Router {
         if (value === undefined) continue
         payload[name] = name === 'request' ? router.toRemote(value, decoded.nodeId) : value
       }
-      const value = await router.call(decoded.nodeId, endpoint, payload, signalOf(args))
-      return wrap ? router.toLocal(value, decoded.nodeId) : value
+      return router.call(decoded.nodeId, endpoint, payload, signalOf(args)).then(
+        value => (wrap ? router.toLocal(value, decoded.nodeId) : value),
+      )
     }
   }
 
@@ -439,18 +461,17 @@ export class Router {
    */
   fieldEndpoint(endpoint, field, local) {
     const router = this
-    return async function routed(request, signal) {
+    return function routed(request, signal) {
       const raw = request === null || typeof request !== 'object' ? undefined : Reflect.get(request, field)
       const decoded = decodeRemoteId(typeof raw === 'string' ? raw : undefined)
-      if (decoded === undefined) return await local(request, signal)
+      if (decoded === undefined) return local(request, signal)
       const payload = router.toRemote({ request: request ?? {} }, decoded.nodeId)
       // Only the identity this endpoint routes on is unwrapped; other identities inside the
       // request stay wrapped, so a field this module never heard of still cannot leak a bare
       // node id to the browser.
       payload.request[field] = decoded.remoteId
-      return router.toLocal(
-        await router.call(decoded.nodeId, endpoint, payload, signal),
-        decoded.nodeId,
+      return router.call(decoded.nodeId, endpoint, payload, signal).then(
+        value => router.toLocal(value, decoded.nodeId),
       )
     }
   }
@@ -470,11 +491,12 @@ export class Router {
    */
   firstArgEndpoint(endpoint, field, local) {
     const router = this
-    return async function routed(id, ...args) {
+    return function routed(id, ...args) {
       const decoded = decodeRemoteId(typeof id === 'string' ? id : undefined)
-      if (decoded === undefined) return await local(id, ...args)
-      const value = await router.call(decoded.nodeId, endpoint, { [field]: decoded.remoteId })
-      return router.toLocal(value, decoded.nodeId)
+      if (decoded === undefined) return local(id, ...args)
+      return router.call(decoded.nodeId, endpoint, { [field]: decoded.remoteId }).then(
+        value => router.toLocal(value, decoded.nodeId),
+      )
     }
   }
 
