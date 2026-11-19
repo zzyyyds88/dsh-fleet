@@ -1,0 +1,163 @@
+name: Release node runtime
+
+# Publish the node runtime for one upstream DSH release, built per platform on CI rather
+# than on somebody's laptop.
+#
+# Why this exists: a node *can* resolve its own runtime (`npmInstallScript` in
+# `src/remote/artefact.js`), so nothing here is required for an upgrade to be possible. What
+# it buys is the fast path — one download against a mirror instead of a full resolve against
+# a registry — for every node, without the maintainer's machine being on the critical path.
+#
+# Measured on the reference node (192.168.3.93, glibc 2.35, Node v22.20.0): the npm route
+# takes 26-33 s for 673 packages and needs a registry; the artefact route is one 165 MiB
+# download a mirror serves at 4.97 MiB/s, so ~34 s, with no registry at all.
+#
+# The matrix packs natively. `publish-runtime.mjs` resolves **for the target platform** with
+# `--os/--cpu/--libc` and `--ignore-scripts`, so running it on the matching runner is not what
+# makes the natives correct — it is what lets `tar` record the executable bit, which a Windows
+# packer cannot (measured: every entry comes out `-rw-rw-rw-`).
+#
+# The build and the upload are separate jobs on purpose: four matrix legs uploading into one
+# release would race on `gh release create`, and a failure there would look like a packaging
+# bug. The legs only produce artifacts; one job publishes all of them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream DSH version to pack, e.g. 0.2.2-rc.5'
+        required: true
+        type: string
+      publish:
+        description: 'Upload to the GitHub release (otherwise only build artifacts)'
+        required: false
+        default: true
+        type: boolean
+  repository_dispatch:
+    types: [upstream-dsh-release]
+
+permissions:
+  contents: write
+
+jobs:
+  pack:
+    name: Pack ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing must not discard the archives the others already built: a node
+      # on any platform that succeeded can then take the fast path.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-latest
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+          - platform: darwin-arm64
+            runner: macos-14
+          - platform: win32-x64
+            runner: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The packer only needs a modern Node to run npm; the archive's own Node floor is
+          # the upstream `engines` field, which the node checks (and is told about) itself.
+          node-version: '24'
+
+      - name: Resolve the version to pack
+        id: wanted
+        shell: bash
+        run: |
+          set -eu
+          version="${{ github.event.inputs.version || github.event.client_payload.version }}"
+          if [ -z "$version" ]; then
+            echo "::error::no version given — pass one in workflow_dispatch or in the dispatch payload"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Pack the runtime for this platform
+        shell: bash
+        # `--registry` is what the *packer* can reach. The node later uses whichever registry
+        # it is configured with, and the npm route uses the node's own.
+        run: |
+          node packages/dsh-fleet/scripts/publish-runtime.mjs \
+            --version "${{ steps.wanted.outputs.version }}" \
+            --platform "${{ matrix.platform }}" \
+            --out dist \
+            --registry https://registry.npmmirror.com
+
+      - name: Keep the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.platform }}
+          path: |
+            dist/dsh-*.tar.gz
+            dist/dsh-*.tar.gz.sha256
+          # The archives are ~165 MiB each; this is the whole point of the job.
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: Publish to the release
+    needs: pack
+    if: ${{ github.event_name == 'repository_dispatch' || inputs.publish }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the version
+        id: wanted
+        shell: bash
+        run: |
+          set -eu
+          version="${{ github.event.inputs.version || github.event.client_payload.version }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Collect every platform's archive
+        uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        shell: bash
+        env:
+          # `gh` reads this; `contents: write` is what makes the upload legal.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # One `create` (tolerating "already exists", which is the normal case when this runs a
+        # second time for a re-pack) and one `upload --clobber` for all eight files, so the
+        # release either has every platform or fails loudly here with nothing half-published.
+        run: |
+          set -eu
+          version="${{ steps.wanted.outputs.version }}"
+          tag="v${version}"
+          ls -l dist
+          gh release create "$tag" \
+            --title "DSH ${version} node runtime" \
+            --notes "Node runtime for DSH ${version}, one archive per platform. A node downloads
+          this instead of resolving the release itself; \`~/.dsh-fleet/runtime\` becomes exactly
+          the unpacked tree. Verified by sha256 next to each archive." \
+            || echo "release ${tag} already exists; uploading into it"
+          gh release upload "$tag" dist/dsh-*.tar.gz dist/dsh-*.tar.gz.sha256 --clobber
+
+  # One summary job, so a person reading the run knows whether nodes can take the fast path
+  # for this release without opening four logs.
+  summary:
+    needs: pack
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report
+        shell: bash
+        run: |
+          set -eu
+          result="${{ needs.pack.result }}"
+          echo "pack: $result"
+          if [ "$result" != "success" ]; then
+            echo "::warning::some platforms did not pack — those nodes will resolve the release themselves, which is slower but works"
+          fi
