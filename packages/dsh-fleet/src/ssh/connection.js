@@ -286,21 +286,26 @@ export class SshConnection {
    * exchange in flight. A burst therefore hits the ceiling on a connection that is perfectly
    * healthy, and ssh2 reports it as `Channel open failure: open failed`.
    *
-   * Two decisions, both measured:
+   * **Measured: waiting is not enough, and that is the whole reason this method has two stages.**
+   * Ten long-running execs fill the budget, and from then on *that connection* refuses every new
+   * channel for as long as those ten run — `channel.close()` on a channel whose remote command is
+   * still alive does not return its slot (`budget-recovery` probe: refusals persisted for the
+   * full 40 s observation window, and `pgrep` showed the remote `sleep` processes still there).
+   * So:
    *
-   * - **Wait and retry, rather than re-handshake.** Dropping the client would free the budget,
-   *   but it would also kill every stream riding that connection — losing a node's workspace
-   *   feed to open one `mkdir` is a worse trade than a few hundred milliseconds of waiting.
-   * - **Retry a bounded number of times with a short backoff.** A channel frees up as soon as
-   *   any in-flight exec finishes, so the wait is bounded in practice. After the last attempt
-   *   the refusal is reported as `CHANNEL`, which the connect ladder treats as retryable and
-   *   the settings page renders as "the node is busy" rather than an unexplained failure.
+   * 1. Retry on the same connection a few times with a short backoff. This covers the ordinary
+   *    case — a channel frees up as soon as any in-flight exec finishes — and keeps every stream
+   *    riding the connection alive.
+   * 2. If the budget is still full, **drop the client and handshake again**. The new connection
+   *    starts with an empty budget, so this always works. It costs the streams on the old
+   *    connection, which is why it is the last resort rather than the first move: a connection
+   *    that can no longer open a channel is useless anyway, and the alternative measured out to
+   *    a node that answers nothing until the person reconnects by hand.
    *
    * @param {string} command
    * @returns {Promise<import('ssh2').Channel>}
    */
   async #openSession(command) {
-    let lastError
     for (let attempt = 0; attempt <= CHANNEL_RETRIES; attempt += 1) {
       const client = await this.client()
       try {
@@ -311,8 +316,8 @@ export class SshConnection {
           })
         })
       } catch (error) {
-        lastError = error
-        if (error?.sshCategory !== SSH_FAILURE.CHANNEL || attempt === CHANNEL_RETRIES) throw error
+        if (error?.sshCategory !== SSH_FAILURE.CHANNEL) throw error
+        if (attempt === CHANNEL_RETRIES) break
         this.target.log?.(
           `ssh: the server's channel budget is full (${error.message}); `
           + `waiting ${String(CHANNEL_BACKOFF_MS)}ms before attempt ${String(attempt + 2)}`,
@@ -320,7 +325,23 @@ export class SshConnection {
         await new Promise(resolve => setTimeout(resolve, CHANNEL_BACKOFF_MS * (attempt + 1)))
       }
     }
-    throw lastError
+    // The budget did not free up on this connection. Free it the only way that works.
+    //
+    // `invalidate()` marks the client as deliberately ended, so the reconnect this triggers is
+    // not reported as a drop and does not start the recovery ladder — the node stays `connected`
+    // and simply gets a fresh channel budget.
+    this.target.log?.(
+      `ssh: the channel budget is still full after ${String(CHANNEL_RETRIES + 1)} attempts; `
+      + 'reconnecting to get a fresh budget',
+    )
+    this.invalidate()
+    const fresh = await this.client()
+    return await new Promise((resolve, reject) => {
+      fresh.exec(command, (error, opened) => {
+        if (error) reject(toSshError(error))
+        else resolve(opened)
+      })
+    })
   }
 
   /**
