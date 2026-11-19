@@ -58,6 +58,7 @@ import {
   decorateWorkspaceFiles,
 } from './host/decorators.js'
 import {
+  decorateAgentPresets,
   decorateCommands,
   decorateFileReferences,
   decorateGoals,
@@ -528,6 +529,9 @@ export function apply(ctx, config = {}) {
       ['sessionReferenceResolver', decorateSessionReferenceResolver],
       ['sessionFileReferences', decorateFileReferences],
       ['schedule', service => decorateSchedule(service, router, { log })],
+      // The mode seat in the composer recomposes an Agent; for a remote Session
+      // only its node can do that. See `decorateAgentPresets`.
+      ['agentPresets', decorateAgentPresets],
     ]) {
       ctx.inject([name], inner => {
         const service = inner.get(name)

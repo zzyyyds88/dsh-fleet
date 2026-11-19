@@ -184,6 +184,44 @@ export function decorateFileReferences(service, router) {
 }
 
 /**
+ * Install the `agentPresets` router.
+ *
+ * The preset seat in the composer is not decoration: choosing a mode **recomposes
+ * the Agent**, which for a remote Session has to happen on the node. Left unrouted,
+ * `agentPresets/select` runs here against a placeholder Agent whose `session` is
+ * deliberately `undefined` (see `host/lookups.js`), and the upstream implementation
+ * dies on its first line:
+ *
+ *   `this.owner.agents.turnBoundaryOf(agent.session)` → `.header` of undefined
+ *
+ * Measured in the desktop app: switching a remote Session's mode answered
+ * `无法切换到「node-control」：Cannot read properties of undefined (reading
+ * 'header')`, which names neither the cause nor the fix.
+ *
+ * Routing it makes the node's own registry answer, so a preset the node really has
+ * is applied there, and one it does not have comes back as the node's named
+ * `agent-preset/not-found` with its available list. That is the honest answer:
+ * a remote Session's brain runs on the node, so a Host-only preset (such as
+ * `node-control`, which manages *this* machine's recorded nodes) cannot compose it.
+ *
+ * `list` and `read` stay local on purpose. They describe the roster a **new**
+ * Session can be created from here, and a merged roster would advertise presets
+ * that cannot be selected for the Session in front of the person.
+ *
+ * @param {object} service - the live upstream `agentPresets` service.
+ * @param {import('./router.js').Router} router
+ * @returns {() => void}
+ */
+export function decorateAgentPresets(service, router) {
+  return decorateMethods(service, {
+    // `select(agent, agentPreset)` — the Agent is the first positional argument,
+    // resolved from `agentId` before the method runs, so `agentEndpoint` has
+    // everything it needs from `host/lookups.js`.
+    select: local => router.agentEndpoint('agentPresets/select', ['agentPreset'], local, { wrapResult: false }),
+  })
+}
+
+/**
  * Install the `schedule` router: merge the Host-wide list, route the per-entry verbs.
  *
  * This namespace is different from the others in one respect that decides the design: its

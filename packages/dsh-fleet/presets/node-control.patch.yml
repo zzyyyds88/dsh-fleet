@@ -22,6 +22,12 @@
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: node-control
+        # The preset list is a picker, so a row without these two reads as a bare id
+        # (`node-control`) with no explanation — measured in the desktop composer, where
+        # it sat between 犀牛模式 (name + description) and the built-ins and looked like a
+        # leftover rather than a mode someone installed on purpose.
+        name: 节点管理
+        description: 只管理已记录的远程节点：查看、添加、连接、断开。没有文件、终端、搜索与联网工具 —— 需要干活请到对应节点的工作区里新建会话。
         order: 20
         plugins:
           - id: persona
