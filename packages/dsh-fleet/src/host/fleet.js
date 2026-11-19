@@ -48,6 +48,15 @@ export class NodeRuntime {
     this.phase = undefined
     this.error = undefined
     this.facts = undefined
+    /**
+     * How this node's runtime arrived: `artefact` or `npm`.
+     *
+     * Kept on the runtime rather than re-read from the stamp on every `describe()`: the
+     * settings page shows it next to the version, and a round trip per paint would be a
+     * command on the node for a word on a card.
+     * @type {'artefact' | 'npm' | undefined}
+     */
+    this.runtimeVia = undefined
     /** @type {{ port: number, token: string, pid: number, version: string } | undefined} */
     this.serving = undefined
     this.queue = Promise.resolve()
@@ -124,6 +133,7 @@ export class NodeRuntime {
       remoteRoot: this.record.remoteRoot,
       state: this.state,
       ...(this.phase === undefined ? {} : { phase: this.phase }),
+      ...(this.runtimeVia === undefined ? {} : { runtimeVia: this.runtimeVia }),
       ...(this.error === undefined ? {} : { error: this.error }),
       ...(this.facts === undefined ? {} : { remote: this.facts }),
       ...(this.serving === undefined
@@ -147,6 +157,8 @@ export class Fleet {
    *   read at connect and sync time so a plugin switched on reaches a node without a restart.
    * @param {() => { specOf: (bundle: string) => string | undefined, isLocal: (bundle: string) => boolean, localFiles: (bundle: string) => Record<string, string> } | undefined} [options.pluginSpecs] - where a plugin comes from and how it travels.
    * @param {string[]} [options.mirrors] - accelerator prefixes, best first; an empty list means "go direct".
+   * @param {readonly string[]} [options.routes] - which ways a runtime may arrive, in order.
+   * @param {string} [options.npmRegistry] - registry a node resolves through; omit for the node's own.
    * @param {(message: string) => void} [options.log]
    */
   constructor(options) {
@@ -156,6 +168,16 @@ export class Fleet {
     this.brainVersion = options.brainVersion ?? '0.0.0'
     /** GitHub accelerator prefixes for artefact downloads, best first; empty means "go direct". */
     this.mirrors = options.mirrors
+    /**
+     * Which routes a runtime may arrive by, in order.
+     *
+     * Read through the same kind of callback as the bundle list, for the same reason: a
+     * person who forces "artefact only" in the settings page expects the next reinstall to
+     * obey it, not the next desktop restart.
+     */
+    this.routes = options.routes ?? (() => undefined)
+    /** Registry a node resolves through; `undefined` means the node's own npm configuration. */
+    this.npmRegistry = options.npmRegistry ?? (() => undefined)
     /**
      * The bundle list a node composes.
      *
@@ -282,8 +304,7 @@ export class Fleet {
         }
         runtime.phase = 'install'
         this.#publish()
-        // The gate decides; the installer only carries it out. Doing the comparison
-        // here rather than inside `install` keeps the reason available to the settings
+        // The gate decides; the installer only carries it out. Doing the comparison        // here rather than inside `install` keeps the reason available to the settings
         // page, which is what the user reads when a connect refuses to proceed.
         const installed = await runtime.host.inspectRuntime()
         const gate = decideGate({
@@ -292,8 +313,12 @@ export class Fleet {
           nodeVersion: installed.version,
           nodeBrain: runtime.provision?.brainVersion,
           // A tree on the right version but packed by a different build is still wrong:
-          // the version says which release it is, the stamp says who packed it.
+          // the version says which release it is, the stamp says which rules packed it.
           nodeRuntime: installed.usable ? undefined : installed.reason,
+          // Reported, never judged: a tree the node resolved itself is as good as a
+          // downloaded one, but "this node builds its own runtime" explains why it behaves
+          // differently from its neighbours.
+          nodeVia: installed.via,
         })
         runtime.gate = gate
         if (gate.action === GATE.AHEAD || gate.action === GATE.UNKNOWN) {
@@ -304,10 +329,20 @@ export class Fleet {
         // rewritten unconditionally in the provision phase below — reinstalling 169 MB
         // to change a few hundred KB of bundle would be the wrong 8 seconds.
         if (gate.action === GATE.INSTALL) {
-          const installedRuntime = await runtime.host.install(runtime.facts, { mirrors: this.mirrors })
+          runtime.phase = 'install'
+          this.#publish()
+          const installedRuntime = await runtime.host.install(runtime.facts, {
+            mirrors: this.mirrors,
+            routes: this.routes(),
+            registry: this.npmRegistry(),
+          })
+          runtime.runtimeVia = installedRuntime.via
           runtime.log?.(
             `resident DSH ${installedRuntime.version} installed (${installedRuntime.via})`,
           )
+          if (installedRuntime.engineWarning !== undefined) {
+            runtime.log?.(installedRuntime.engineWarning)
+          }
         }
         // Customise the node BEFORE starting it: install the plugins the user chose,
         // restore the brain bundle, point the profile at the list, and write the model

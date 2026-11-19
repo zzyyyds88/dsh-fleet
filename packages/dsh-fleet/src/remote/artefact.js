@@ -90,11 +90,63 @@ export const RELEASE_BASE = 'releases/download'
  * archive layout changes.** It is written into the installed tree and compared on
  * connect; a node whose stamp is missing or older is reinstalled even though its version
  * matches.
+ *
+ * Build 3 changes what a tree contains, not just how it is packed: the packer now resolves
+ * with `--ignore-scripts`, so a released archive no longer carries the **packing machine's**
+ * native build output. Measured on the rc.5 archive built the old way: 48 `.exe`/`.cmd`/
+ * `.dll`/`.lib` files and 147 `koffi/build/win32_x64/**` entries inside a `linux-x64`
+ * artefact, because koffi's `install` script compiles for `process.platform` — the
+ * packer's, not the node's. The stamp format changed in the same build (see
+ * {@link stampJson}), and a tree stamped `2` is packed by the old rules either way.
  */
-export const RUNTIME_BUILD = 2
+export const RUNTIME_BUILD = 3
 
 /** The stamp file, relative to the runtime directory. */
 export const BUILD_STAMP = '.fleet-artefact.json'
+
+/**
+ * The stamp one install writes.
+ *
+ * Two facts, because one was not enough: **which build packed it** decides whether the tree
+ * can be trusted (see {@link RUNTIME_BUILD}), and **how it got there** is what a person needs
+ * when a node behaves differently from its neighbours — a tree the node resolved itself has
+ * the node's own native packages, a downloaded artefact has the packer's.
+ *
+ * JSON rather than a bare integer so `via` could be added without a second file. Trees
+ * stamped by build 2 hold `2` alone; {@link parseStamp} still reads those, because a node
+ * already in service must not be judged unusable by a format change.
+ *
+ * @param {{ build?: number, via: 'artefact' | 'npm' }} input
+ * @returns {string}
+ */
+export function stampJson({ build = RUNTIME_BUILD, via }) {
+  return JSON.stringify({ build, via })
+}
+
+/**
+ * Read a stamp written by {@link stampJson} or by an earlier build.
+ *
+ * @param {string | undefined} text
+ * @returns {{ build: number | undefined, via: 'artefact' | 'npm' | undefined }}
+ */
+export function parseStamp(text) {
+  const trimmed = String(text ?? '').trim()
+  if (trimmed === '') return { build: undefined, via: undefined }
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      const build = Number.parseInt(String(parsed?.build ?? ''), 10)
+      const via = parsed?.via === 'npm' || parsed?.via === 'artefact' ? parsed.via : undefined
+      return { build: Number.isFinite(build) ? build : undefined, via }
+    } catch {
+      // A half-written stamp is the same as no stamp: the tree gets reinstalled.
+      return { build: undefined, via: undefined }
+    }
+  }
+  // Build 2 and earlier: a bare integer, with no record of where the tree came from.
+  const legacy = Number.parseInt(trimmed, 10)
+  return { build: Number.isFinite(legacy) ? legacy : undefined, via: undefined }
+}
 
 /**
  * How long a download may sit below {@link FETCH_FLOOR_BYTES} per second before curl gives up.
@@ -326,8 +378,117 @@ rm -rf "$previous"
 if [ -d "$runtime" ]; then mv "$runtime" "$previous"; fi
 mv "$staging" "$runtime"
 rm -f "$archive" "$archive.sha256"
-printf '%s\n' '${build}' > "$runtime/${BUILD_STAMP}"
+printf '%s\n' '${stampText({ build, via: 'artefact' })}' > "$runtime/${BUILD_STAMP}"
 node "${shellPath(cli)}" --version
+`.trim()
+}
+
+/**
+ * Escape a stamp for a single-quoted shell string.
+ *
+ * The stamp is JSON, which contains double quotes — harmless in `'…'` — but a `'` inside it
+ * would end the string early. Nothing writes one today; this keeps the script generator from
+ * depending on that.
+ * @param {{ build?: number, via: 'artefact' | 'npm' }} input
+ */
+function stampText(input) {
+  const json = stampJson(input)
+  if (json.includes("'")) throw new Error(`a build stamp may not contain a quote: ${json}`)
+  return json
+}
+
+/**
+ * npm's platform flags for one node, from its own `uname` and libc.
+ *
+ * This is the half that makes a **node-side** resolve produce the right native packages:
+ * with `--os/--cpu/--libc` npm picks `@img/sharp-linux-x64`, `sherpa-onnx-linux-x64` and
+ * `@koromix/koffi-linux-x64` instead of whatever the resolving machine happens to be.
+ * Measured: `npm ci` with these flags on a Windows machine skips `@img/sharp-win32-x64`
+ * and `sherpa-onnx-win-x64` and installs the Linux ones.
+ *
+ * **Empty means "let npm decide from the process it runs in"** — which is correct on the
+ * node, because the node's own npm *is* running on the node. That is the one place where
+ * guessing is unnecessary rather than dangerous. It is used when the probe could not name
+ * the platform.
+ *
+ * @param {{ os?: string, arch?: string, libc?: string }} facts
+ * @returns {string[]}
+ */
+export function npmPlatformFlags(facts) {
+  const os = PLATFORM_ALIASES[String(facts?.os ?? '').toLowerCase()]
+  const cpu = PLATFORM_ALIASES[String(facts?.arch ?? '').toLowerCase()]
+  if (os === undefined || cpu === undefined) return []
+  const flags = [`--os=${os}`, `--cpu=${cpu}`]
+  // Only Linux splits its prebuilds by C library (`glibc` vs `musl`): koffi and sharp both
+  // ship both, and asking for the wrong one installs a binary that cannot be loaded. npm
+  // rejects the flag on other platforms, so it is not passed there.
+  if (os === 'linux') {
+    const libc = String(facts?.libc ?? '').toLowerCase()
+    flags.push(`--libc=${libc.includes('musl') ? 'musl' : 'glibc'}`)
+  }
+  return flags
+}
+
+/**
+ * The shell script that resolves a runtime **on the node itself**.
+ *
+ * The fallback route, not the preferred one: an artefact is one download with no registry
+ * and no decision, while this is a full resolve. It exists so that a release with no
+ * published artefact is a slower connect rather than a dead end — which is what makes an
+ * upstream DSH bump something this project can follow without anyone pre-building a tree.
+ *
+ * Three things it does that a plain `npm install` would not:
+ *
+ * 1. `--engine-strict=false` — **fail-open on the engine declaration, on purpose.**
+ *    `@deepseek-ai/dsh` declares `engines.node: ">=24.9.0"` for every 0.2.2 release
+ *    (`rc.1` through `rc.5`, all four checked), while the node in service runs
+ *    Node v22.20.0 and has been running rc.3 on it. A gate the artefact route never applied
+ *    cannot become a hard stop just because the install came from npm; the version is
+ *    reported instead (see `engineWarning`) so the mismatch is visible without being fatal.
+ * 2. The install **is** the node's own platform, so build scripts are allowed to run —
+ *    unlike the packer, which must not run them (they would build for the wrong machine).
+ * 3. It writes the same {@link BUILD_STAMP} the artefact route writes. Without it,
+ *    `inspectRuntime` reads the tree as "predates build stamps" and reinstalls it on every
+ *    connect: a one-minute install becomes a permanent one-minute connect.
+ *
+ * @param {object} options
+ * @param {string} options.version - the exact release, never a range.
+ * @param {string} options.runtime
+ * @param {string} options.cli
+ * @param {string[]} [options.flags] - `npmPlatformFlags()` output.
+ * @param {string} [options.registry] - omit to use the node's own npm configuration.
+ * @param {number} [options.build]
+ * @returns {string}
+ */
+export function npmInstallScript({
+  version, runtime, cli, flags = [], registry, build = RUNTIME_BUILD,
+}) {
+  const dir = shellPath(runtime)
+  const registryFlag = typeof registry === 'string' && registry !== ''
+    ? ` --registry='${registry.replace(/'/gu, '')}'`
+    : ''
+  return `
+set -eu
+runtime="${dir}"
+mkdir -p "$runtime"
+cd "$runtime"
+if [ ! -f package.json ]; then
+  printf '%s\n' '{"name":"dsh-fleet-runtime","private":true}' > package.json
+fi
+npm install --no-audit --no-fund --loglevel=error --engine-strict=false${registryFlag} ${flags.join(' ')} "@deepseek-ai/dsh@${version}" >&2
+node "${shellPath(cli)}" --version
+printf '%s\n' '${stampText({ build, via: 'npm' })}' > "$runtime/${BUILD_STAMP}"
+node -e '
+const fs = require("fs")
+const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+const wanted = String(manifest.engines?.node ?? "").replace(/^[^0-9]*/u, "")
+const running = process.versions.node.split(".").map(Number)
+const floor = wanted.split(".").map(Number)
+const ok = wanted === "" || running[0] > floor[0]
+  || (running[0] === floor[0] && running[1] > (floor[1] || 0))
+  || (running[0] === floor[0] && running[1] === (floor[1] || 0) && running[2] >= (floor[2] || 0))
+process.stdout.write(ok ? "" : "ENGINE_MISMATCH " + process.versions.node + " " + wanted)
+' "$runtime/node_modules/@deepseek-ai/dsh/package.json"
 `.trim()
 }
 
@@ -365,28 +526,42 @@ export function installedBuildScript(runtime) {
  *
  * @param {object} input
  * @param {string | undefined} input.version - the version the tree reports.
- * @param {string | undefined} input.build - the stamp the tree carries.
+ * @param {string | undefined} input.build - the stamp the tree carries, in any format
+ *   {@link parseStamp} reads.
  * @param {string} input.wantedVersion
- * @returns {{ usable: boolean, reason: string }}
+ * @returns {{ usable: boolean, reason: string, via: 'artefact' | 'npm' | undefined }}
  */
 export function inspectRuntime({ version, build, wantedVersion }) {
+  const stamp = parseStamp(build)
   if (version !== wantedVersion) {
-    return { usable: false, reason: version === undefined ? 'no runtime installed' : `runtime is ${version}` }
-  }
-  if (build === undefined || build.trim() === '') {
-    return { usable: false, reason: 'this runtime predates build stamps' }
-  }
-  const installed = Number.parseInt(build.trim(), 10)
-  if (!Number.isFinite(installed)) {
-    return { usable: false, reason: `unreadable build stamp ${build.trim()}` }
-  }
-  if (installed !== RUNTIME_BUILD) {
     return {
       usable: false,
-      reason: `runtime was packed by build ${String(installed)}, this plugin packs build ${String(RUNTIME_BUILD)}`,
+      reason: version === undefined ? 'no runtime installed' : `runtime is ${version}`,
+      via: stamp.via,
     }
   }
-  return { usable: true, reason: 'in step' }
+  if (stamp.build === undefined) {
+    // Two different faults read the same from here, so the message says both: a tree from
+    // before stamps existed has no file, and a tree whose stamp was cut short has a broken
+    // one. Neither can be trusted, and both are repaired by the same reinstall.
+    return {
+      usable: false,
+      reason: String(build ?? '').trim() === ''
+        ? 'this runtime predates build stamps'
+        : `unreadable build stamp ${String(build).trim()}`,
+      via: undefined,
+    }
+  }
+  if (stamp.build !== RUNTIME_BUILD) {
+    return {
+      usable: false,
+      reason: `runtime was packed by build ${String(stamp.build)}, this plugin packs build ${String(RUNTIME_BUILD)}`,
+      via: stamp.via,
+    }
+  }
+  // `via` is reported, never judged: a tree the node resolved itself is as usable as a
+  // downloaded one, and the whole point of the npm route is that the two are interchangeable.
+  return { usable: true, reason: 'in step', via: stamp.via }
 }
 
 /**

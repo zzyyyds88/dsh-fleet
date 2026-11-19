@@ -27,10 +27,14 @@ import {
   FETCH_FLOOR_SECONDS,
   inspectRuntime,
   installScript,
+  npmInstallScript,
+  npmPlatformFlags,
+  parseStamp,
   platformTag,
   rollbackScript,
+  stampJson,
 } from '../src/remote/artefact.js'
-import { pluginInstallScript, remoteLayout } from '../src/remote/daemon.js'
+import { detectLibc, pluginInstallScript, remoteLayout } from '../src/remote/daemon.js'
 import {
   installedPlugins,
   isLocalSpec,
@@ -421,13 +425,77 @@ const check = (ok, label, detail) => {
     urls: ['https://mirror/x.tar.gz'],
   })
   check(script.includes(BUILD_STAMP), 'the install writes the build stamp', BUILD_STAMP)
-  check(script.includes(`'${String(RUNTIME_BUILD)}'`), 'with the build this plugin packs')
+  check(script.includes(`"build":${String(RUNTIME_BUILD)}`), 'with the build this plugin packs')
 }
 
-// ---- the fallback rules, exercised through the real RemoteHost.install ---------
-// These are the decision points a person hits when an accelerator dies, and every one of
-// them used to end in a silent 1.3 GB npm install or a 1.8-hour direct download. The
-// connection is a stub: what is being proved is *which commands run*, not SSH.
+// ---- the stamp format: JSON now, a bare integer on trees already in service -----
+{
+  check(parseStamp(stampJson({ via: 'artefact' })).build === RUNTIME_BUILD,
+    'a stamp this build writes carries the current build', String(RUNTIME_BUILD))
+  check(parseStamp(stampJson({ via: 'npm' })).via === 'npm',
+    'and records that the node resolved its own tree')
+  check(parseStamp(stampJson({ via: 'artefact' })).via === 'artefact',
+    'or that it came from a published artefact')
+  // Build 2 wrote the bare integer. A node already in service must not be judged unusable
+  // by a format change — that would reinstall every node on the planet for one upgrade.
+  check(parseStamp('2').build === 2, 'a build-2 stamp still reads as build 2')
+  check(parseStamp('2').via === undefined, 'and claims no route, because it recorded none')
+  check(parseStamp('').build === undefined && parseStamp('   ').build === undefined,
+    'an absent or blank stamp is no build at all')
+  check(parseStamp('garbage').build === undefined, 'a stamp that is not a stamp is no build either')
+  check(parseStamp('{"build":').build === undefined,
+    'and neither is one that was cut off mid-write')
+
+  // `via` is reported, never judged: a node that built its own runtime is not reinstalled
+  // for having done so.
+  const built = inspectRuntime({
+    version: '0.2.2-rc.3', build: stampJson({ via: 'npm' }), wantedVersion: '0.2.2-rc.3',
+  })
+  check(built.usable, 'a tree the node resolved itself is as usable as a downloaded one', built.reason)
+  check(built.via === 'npm', 'while the stamp still says how it got there')
+  check(inspectRuntime({ version: '0.2.2-rc.3', build: '2', wantedVersion: '0.2.2-rc.3' }).usable === false,
+    'a build-2 tree is still reinstalled, because build 3 packs different bytes')
+
+  // The npm script has to write the same stamp, or the tree it installs reads as unstamped
+  // and every connect reinstalls it: a one-minute install becomes a permanent one-minute
+  // connect.
+  const npmScript = npmInstallScript({
+    version: '0.2.2-rc.3',
+    runtime: '/root/.dsh-fleet/runtime',
+    cli: '/root/.dsh-fleet/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    flags: ['--os=linux', '--cpu=x64', '--libc=glibc'],
+  })
+  check(npmScript.includes(BUILD_STAMP), 'the npm install writes the stamp too')
+  check(npmScript.includes(`"build":${String(RUNTIME_BUILD)}`) && npmScript.includes('"via":"npm"'),
+    'with the same build and its own route')
+  check(npmScript.includes('--os=linux --cpu=x64 --libc=glibc'),
+    'and resolves for the platform it was told, not the one it happens to run on')
+  check(npmScript.includes('--engine-strict=false'),
+    'and fails open on engines, which the artefact route never checked either')
+  check(!npmScript.includes('--ignore-scripts'),
+    'while letting build scripts run: on the node they build for the node')
+
+  // The platform flags are derived from the probe, so the npm route resolves the same
+  // native packages the packer would have.
+  check(npmPlatformFlags({ os: 'Linux', arch: 'x86_64', libc: 'glibc' }).join(' ')
+    === '--os=linux --cpu=x64 --libc=glibc', 'a glibc x86_64 node asks for glibc x64')
+  check(npmPlatformFlags({ os: 'Linux', arch: 'aarch64', libc: 'musl' }).join(' ')
+    === '--os=linux --cpu=arm64 --libc=musl', 'an Alpine arm64 node asks for musl arm64')
+  check(npmPlatformFlags({ os: 'Darwin', arch: 'arm64' }).join(' ') === '--os=darwin --cpu=arm64',
+    'and a Mac is never given a Linux libc flag')
+  check(npmPlatformFlags({ os: 'Plan9', arch: 'mips' }).length === 0,
+    'a platform it cannot name passes no flags, letting the node decide for itself')
+}
+
+// ---- the two routes, exercised through the real RemoteHost.install ---------------
+// The connection is a stub: what is being proved is *which commands run, in what order, and
+// what happens to the one that did not work* — not SSH.
+//
+// The rule these pin down: a tree that could not be **had** falls through to the next
+// route, and a tree that arrived and was **wrong** does not. The first is "no artefact
+// published for this release yet", which must not be a dead end — it is what an upstream
+// DSH bump looks like before anyone packs it. The second is a real fault, and re-resolving
+// the same broken release from a registry would download more, take longer, and hide it.
 {
   const { RemoteHost } = await import('../src/remote/daemon.js')
   const stub = (answers = {}) => {
@@ -444,62 +512,107 @@ const check = (ok, label, detail) => {
   }
   const facts = {
     nodeUsable: true, nodeVersion: 'v24.21.0', curlPath: '/usr/bin/curl', wgetPath: '',
-    npmPath: '/usr/bin/npm', os: 'Linux', arch: 'x86_64',
+    npmPath: '/usr/bin/npm', os: 'Linux', arch: 'x86_64', libc: 'glibc',
   }
-  const failure = async (options, installFacts = facts) => {
+  const attempt = async (options, installFacts = facts) => {
     const connection = stub({ 'ARTEFACT-UNAVAILABLE-NEVER-MATCHES': { code: 0 }, ...options.answers })
     const host = new RemoteHost({ connection, version: '0.2.2-rc.3', log: () => {} })
     let error
-    try { await host.install(installFacts, options.install ?? {}) } catch (caught) { error = caught }
-    return { error, calls: connection.calls }
+    let result
+    try { result = await host.install(installFacts, options.install ?? {}) } catch (caught) { error = caught }
+    return { error, result, calls: connection.calls }
   }
+  const ranNpm = calls => calls.some(call => call.includes('npm install'))
+  const npmCall = calls => calls.find(call => call.includes('npm install')) ?? ''
 
-  // 1. A download failure reports and stops. No npm, no direct GitHub, and the message
-  //    names the accelerators it tried so a person knows what to swap.
-  const refused = await failure({ answers: { 'ARTEFACT_UNAVAILABLE': { code: 3, stderr: 'ARTEFACT_UNAVAILABLE' } } })
-  check(refused.error !== undefined, 'a failed download throws instead of falling through')
-  check(!refused.calls.some(call => call.includes('npm install')),
-    'and never runs npm — a 1.3 GB registry install would hide which source failed')
-  // Every URL the script was given has to go *through* an accelerator. An accelerator URL
-  // contains `github.com` as its suffix (that is how prefixing works), so the test looks
-  // at where each URL starts, not at whether the words appear.
+  // 1. When no accelerator can serve the artefact, the node resolves the same release
+  //    itself. This is the whole point: an upstream bump with no artefact is a slower
+  //    connect, not a dead end.
+  const refused = await attempt({ answers: { 'ARTEFACT_UNAVAILABLE': { code: 3, stderr: 'ARTEFACT_UNAVAILABLE' } } })
+  check(refused.error === undefined, 'a missing artefact is not an error any more',
+    String(refused.error?.message).slice(0, 90))
+  check(refused.result?.via === 'npm', 'the node resolves that release itself instead', refused.result?.via)
+  check(ranNpm(refused.calls), 'which means npm really runs on the node')
+  check(npmCall(refused.calls).includes('"@deepseek-ai/dsh@0.2.2-rc.3"'),
+    'for the exact release, never a range')
+  check(npmCall(refused.calls).includes('--os=linux --cpu=x64 --libc=glibc'),
+    'resolved for the node platform, not whichever machine runs npm')
+  check(npmCall(refused.calls).includes('.fleet-artefact.json'),
+    'and it writes the stamp, so the next connect does not reinstall it')
+  // Every URL the artefact script was given goes *through* an accelerator. An accelerator
+  // URL contains `github.com` as its suffix (that is how prefixing works), so this looks at
+  // where each URL starts, not at whether the words appear.
   const scriptUrls = refused.calls
     .flatMap(call => [...call.matchAll(/'(https:\/\/[^']+)'/gu)].map(match => match[1]))
   check(scriptUrls.length > 0 && scriptUrls.every(url => !url.startsWith('https://github.com/')),
-    'and no URL it builds starts at GitHub directly',
+    'and the artefact route it tried first still never starts at GitHub directly',
     scriptUrls.find(url => url.startsWith('https://github.com/')))
   check(scriptUrls.every(url => DEFAULT_MIRRORS.some(mirror => url.startsWith(mirror))),
     'every URL it builds goes through a configured accelerator')
-  check(String(refused.error?.message).includes(DEFAULT_MIRRORS[0]),
-    'the error names the accelerators it tried', String(refused.error?.message).slice(0, 90))
 
-  // 2. A checksum mismatch still rolls back and reports (unchanged behaviour, guarded
-  //    here because the fallback rewrite touched the same branch).
-  const mismatch = await failure({
+  // 2. A checksum mismatch is *not* the same thing. The bytes arrived and were wrong, so
+  //    the previous runtime is rolled back and the failure is reported: re-resolving the
+  //    same broken release from a registry would hide which of the two failed.
+  const mismatch = await attempt({
     answers: { 'ARTEFACT_CHECKSUM_MISMATCH': { code: 4, stderr: 'ARTEFACT_CHECKSUM_MISMATCH a b' } },
   })
   check(mismatch.calls.some(call => call.includes('.previous')),
     'a bad checksum rolls the previous runtime back')
   check(String(mismatch.error?.message).includes('installing the resident host failed'),
-    'and reports rather than retrying npm')
+    'and reports rather than resolving it again from npm')
+  check(!ranNpm(mismatch.calls),
+    'so a broken artefact never becomes a registry download')
 
-  // 3. No downloader on a platform this build publishes for: report, do not npm.
-  const noDownloader = await failure({}, { ...facts, curlPath: '', wgetPath: '' })
-  check(String(noDownloader.error?.message).includes('no curl and no wget'),
-    'a node with no downloader is a named error', String(noDownloader.error?.message).slice(0, 60))
-  check(!noDownloader.calls.some(call => call.includes('npm install')),
-    'and it does not slide into npm either')
+  // 3. With no downloader the artefact route cannot even start — but npm needs no
+  //    downloader, so this is a machine that upgrades instead of a machine that cannot.
+  const noDownloader = await attempt({}, { ...facts, curlPath: '', wgetPath: '' })
+  check(ranNpm(noDownloader.calls), 'a node with no curl and no wget still installs through npm')
+  check(noDownloader.error === undefined, 'and that is not an error',
+    String(noDownloader.error?.message).slice(0, 60))
 
-  // 4. An empty accelerator list is a configuration error, not a direct download.
-  const noMirrors = await failure({ install: { mirrors: [] } })
-  check(String(noMirrors.error?.message).includes('no accelerator configured'),
-    'an empty accelerator list throws before any download', String(noMirrors.error?.message).slice(0, 60))
+  // 4. An empty accelerator list means "the artefact route is switched off", which the npm
+  //    route already covers — not a configuration error that blocks the install.
+  const noMirrors = await attempt({ install: { mirrors: [] } })
+  check(ranNpm(noMirrors.calls), 'an empty accelerator list falls through to npm')
+  check(noMirrors.error === undefined, 'instead of failing the connect',
+    String(noMirrors.error?.message).slice(0, 60))
 
-  // 5. npm remains reachable for the one legitimate case: a platform this build never
-  //    published an artefact for. That is not a download failure.
-  const untaggable = await failure({}, { ...facts, os: 'Plan9', arch: 'mips' })
+  // 5. Both routes can be forced, which is what makes a failure attributable: the settings
+  //    page can say "this node must use an artefact" and then a download failure is real.
+  const artefactOnly = await attempt({
+    install: { routes: ['artefact'] },
+    answers: { 'ARTEFACT_UNAVAILABLE': { code: 3, stderr: 'ARTEFACT_UNAVAILABLE' } },
+  })
+  check(artefactOnly.error !== undefined, 'artefact-only reports a failed download instead of falling through')
+  check(!ranNpm(artefactOnly.calls), 'and never runs npm')
+  check(String(artefactOnly.error?.message).includes(DEFAULT_MIRRORS[0]),
+    'naming the accelerators it tried', String(artefactOnly.error?.message).slice(0, 90))
+  check(String(artefactOnly.error?.message).includes('artefact:'),
+    'and labelling which route failed')
+
+  const npmOnly = await attempt({ install: { routes: ['npm'] } })
+  check(!npmOnly.calls.some(call => call.includes('dsh-0.2.2-rc.3-')),
+    'npm-only builds no artefact URL at all')
+  check(npmOnly.result?.via === 'npm', 'and installs through npm', npmOnly.result?.via)
+
+  // 6. A platform this build has never published for is still the ordinary npm case.
+  const untaggable = await attempt({}, { ...facts, os: 'Plan9', arch: 'mips' })
   check(untaggable.calls.some(call => call.includes('npm install')),
     'an untaggable platform still installs through npm')
+  // …and a platform it cannot tag is also one it cannot give flags for: asking npm for
+  // `--os=...` from a name it does not recognise would install the wrong native packages.
+  const untaggableNpm = untaggable.calls.find(call => call.includes('npm install')) ?? ''
+  check(!untaggableNpm.includes('--os=') && !untaggableNpm.includes('--libc='),
+    'and passes no platform flags it could not derive, letting the node decide')
+
+  // 7. When *nothing* works the message has to name both routes, not just the last one:
+  //    "install curl" and "install npm" are different actions for whoever reads it.
+  const nothing = await attempt({}, { ...facts, curlPath: '', wgetPath: '', npmPath: '' })
+  check(nothing.error !== undefined, 'a machine with neither a downloader nor npm is an error')
+  const nothingText = String(nothing.error?.message)
+  check(nothingText.includes('neither curl nor wget'), 'which names the missing downloader',
+    nothingText.slice(0, 120))
+  check(nothingText.includes('no npm on PATH'), 'and the missing npm')
 }
 
 if (failures.length > 0) {

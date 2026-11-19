@@ -100,6 +100,10 @@ export const GATE = Object.freeze({
  * @param {string | undefined} input.nodeBrain - the brain build found on the node, if any.
  * @param {string | undefined} [input.nodeRuntime] - why the installed tree is not usable
  *   as-is, when it is on the right version but was packed differently.
+ * @param {'artefact' | 'npm' | undefined} [input.nodeVia] - how that tree arrived. Reported
+ *   in the message only: the two routes write the same build stamp, so neither is a
+ *   reason to reinstall, but "this node built its own runtime" is what explains a node
+ *   that behaves differently from its neighbours.
  * @returns {{ action: string, reason: string, message: string }}
  */
 export function decideGate(input) {
@@ -144,7 +148,13 @@ export function decideGate(input) {
     }
     const order = hostBrain === undefined ? 0 : compareVersions(nodeBrain, hostBrain)
     if (order === 0) {
-      return { action: GATE.CURRENT, reason: 'in-step', message: 'node is in step with this desktop' }
+      return {
+        action: GATE.CURRENT,
+        reason: 'in-step',
+        message: input.nodeVia === 'npm'
+          ? 'node is in step with this desktop (it built its own runtime)'
+          : 'node is in step with this desktop',
+      }
     }
     if (order < 0) {
       return {
