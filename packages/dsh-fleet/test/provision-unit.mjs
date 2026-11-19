@@ -174,8 +174,12 @@ const emptyOverlay = renderBrainPatch({ rows: [], version: '0.2.2-rc.3' })
 check(emptyOverlay.trimEnd().endsWith('[]'),
   'an overlay with no rows still writes a top-level array', JSON.stringify(emptyOverlay.slice(-40)))
 if (YAML !== undefined) {
-  check(Array.isArray(YAML.load(emptyOverlay)),
-    'and it parses to an array, not null', JSON.stringify(YAML.load(emptyOverlay)))
+  // `parse`, not `load`: the parser this test borrows is the `yaml` package, whose entry point
+  // exposes `parse`/`stringify`. `YAML.load` only exists on the older `js-yaml` shape, and
+  // calling it threw a TypeError instead of running the check — the one assertion that proves an
+  // empty roster still boots the node was the one not running.
+  check(Array.isArray(YAML.parse(emptyOverlay)),
+    'and it parses to an array, not null', JSON.stringify(YAML.parse(emptyOverlay)))
 }
 
 if (YAML === undefined) {
