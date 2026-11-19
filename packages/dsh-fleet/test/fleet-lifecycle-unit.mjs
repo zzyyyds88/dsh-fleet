@@ -14,9 +14,21 @@
  *
  * Usage: node test/fleet-lifecycle-unit.mjs
  */
-import { Fleet, NODE_STATE } from '../src/host/fleet.js'
-import { classifyFailure } from '../src/core/errors.js'
-import { RemoteWorkspaces } from '../src/host/remote-workspaces.js'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+// **Before anything imports the registry.** `NodeRegistry` writes to `$DSH_HOME/fleet/nodes.json`,
+// so a suite that builds real `Fleet` objects would otherwise append its fake nodes to the
+// machine's own node list. Measured the hard way: three `fake` records landed in the developer's
+// `~/.dsh/fleet/nodes.json` and every later e2e run picked the wrong node. A private home makes
+// this suite safe to run anywhere, including next to a live profile.
+const sandbox = mkdtempSync(join(tmpdir(), 'fleet-lifecycle-'))
+process.env.DSH_HOME = sandbox
+
+const { Fleet, NODE_STATE } = await import('../src/host/fleet.js')
+const { classifyFailure } = await import('../src/core/errors.js')
+const { RemoteWorkspaces } = await import('../src/host/remote-workspaces.js')
 
 let failed = 0
 const check = (ok, label, detail) => {
@@ -158,6 +170,7 @@ function memoryCredentials() {
 }
 
 await sleep(10)
+rmSync(sandbox, { recursive: true, force: true })
 if (failed > 0) {
   process.stdout.write(`\n[fleet-lifecycle] FAILED: ${String(failed)} check(s)\n`)
   process.exitCode = 1

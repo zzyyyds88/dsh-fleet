@@ -17,6 +17,10 @@ const KEEPALIVE_INTERVAL_MS = 15_000
 const KEEPALIVE_COUNT_MAX = 3
 const MAX_RETRIES = 3
 const BASE_DELAY_MS = 400
+/** Attempts to re-open a channel while the server's per-connection budget is full. */
+const CHANNEL_RETRIES = 4
+/** How long each wait grows: 250, 500, 750, 1000 ms. */
+const CHANNEL_BACKOFF_MS = 250
 
 /** Stable failure categories a caller can branch on without parsing text. */
 export const SSH_FAILURE = Object.freeze({
@@ -25,6 +29,25 @@ export const SSH_FAILURE = Object.freeze({
   TIMEOUT: 'timeout',
   NETWORK: 'network',
   CLOSED: 'closed',
+  /**
+   * The server refused to open another channel on this connection.
+   *
+   * `sshd` limits **session** channels per connection (`MaxSessions`, default 10), and every
+   * `exec` and every `direct-tcpip` forward is one. Measured on the reference node while one
+   * long-lived session was held (the shape of `workspace/follow`):
+   *
+   *   5 concurrent execs → 5 ok
+   *   8 concurrent execs → 8 ok
+   *   10 concurrent execs → 8 ok, 2 refused (`Channel open failure: open failed`)
+   *   12 concurrent execs → 8 ok, 4 refused
+   *
+   * So the ceiling is **real and reachable**: one long-lived session plus a burst of tool calls
+   * or picker calls on the same node runs out of channels even though the connection is
+   * healthy. The error is ssh2's `Channel open failure: open failed`, which classifies as
+   * `unknown` unless it is named here — and an `unknown` failure is not retried, so it reached
+   * the user as a bare "Unable to exec".
+   */
+  CHANNEL: 'channel',
   UNKNOWN: 'unknown',
 })
 
@@ -35,6 +58,11 @@ export function classifySshError(error) {
     return SSH_FAILURE.AUTH
   }
   if (/host key|hostkey|man-in-the-middle|fingerprint/u.test(text)) return SSH_FAILURE.HOST_KEY
+  // Before the network rule, and before `unknown`: this is the server declining a channel,
+  // not the network failing, and it is the one refusal that a retry can fix.
+  if (/channel open failure|open failed|unable to exec|unable to open shell|channel is not open|administratively prohibited/u.test(text)) {
+    return SSH_FAILURE.CHANNEL
+  }
   if (/timed out|timeout|ready timeout/u.test(text)) return SSH_FAILURE.TIMEOUT
   if (/econnrefused|econnreset|enotfound|ehostunreach|enetunreach|connect|network|socket hang up/u.test(text)) {
     return SSH_FAILURE.NETWORK
@@ -49,9 +77,18 @@ export function toSshError(error, category = classifySshError(error)) {
   return Object.assign(new Error(message, { cause: error }), { category, sshCategory: category })
 }
 
-/** True for categories worth retrying on a fresh client. */
+/**
+ * True for categories worth retrying.
+ *
+ * `CHANNEL` belongs here for a different reason than the rest: the connection is fine, it is
+ * the server's per-connection channel budget that ran out. The retry that helps is therefore
+ * a short wait on the **same** connection (see `#openWithChannelBudget`), not a new handshake —
+ * a new handshake would drop the long-lived streams that are part of the reason the budget is
+ * tight, and losing a `workspace/follow` to open one `exec` is a worse trade than waiting.
+ */
 export function isRetryable(category) {
-  return category === SSH_FAILURE.NETWORK || category === SSH_FAILURE.TIMEOUT || category === SSH_FAILURE.CLOSED
+  return category === SSH_FAILURE.NETWORK || category === SSH_FAILURE.TIMEOUT
+    || category === SSH_FAILURE.CLOSED || category === SSH_FAILURE.CHANNEL
 }
 
 /**
@@ -168,15 +205,9 @@ export class SshConnection {
    * @returns {Promise<{ code: number | null, signal: string | undefined, stdout: string, stderr: string, truncated: boolean }>}
    */
   async exec(request) {
-    const client = await this.client()
     const command = posixCommand(request.argv, request.cwd)
     const maxBytes = request.maxBytes ?? 4 * 1024 * 1024
-    const channel = await new Promise((resolve, reject) => {
-      client.exec(command, (error, opened) => {
-        if (error) reject(toSshError(error))
-        else resolve(opened)
-      })
-    })
+    const channel = await this.#openSession(command)
     return await new Promise((resolve, reject) => {
       const out = []
       const err = []
@@ -248,6 +279,51 @@ export class SshConnection {
   }
 
   /**
+   * Open one session channel, waiting out a full channel budget instead of failing.
+   *
+   * The ceiling is `MaxSessions` (default 10) per **connection**, and this Host holds
+   * long-lived channels: one per `workspace/follow`, one per terminal, one per forwarded HTTP
+   * exchange in flight. A burst therefore hits the ceiling on a connection that is perfectly
+   * healthy, and ssh2 reports it as `Channel open failure: open failed`.
+   *
+   * Two decisions, both measured:
+   *
+   * - **Wait and retry, rather than re-handshake.** Dropping the client would free the budget,
+   *   but it would also kill every stream riding that connection — losing a node's workspace
+   *   feed to open one `mkdir` is a worse trade than a few hundred milliseconds of waiting.
+   * - **Retry a bounded number of times with a short backoff.** A channel frees up as soon as
+   *   any in-flight exec finishes, so the wait is bounded in practice. After the last attempt
+   *   the refusal is reported as `CHANNEL`, which the connect ladder treats as retryable and
+   *   the settings page renders as "the node is busy" rather than an unexplained failure.
+   *
+   * @param {string} command
+   * @returns {Promise<import('ssh2').Channel>}
+   */
+  async #openSession(command) {
+    let lastError
+    for (let attempt = 0; attempt <= CHANNEL_RETRIES; attempt += 1) {
+      const client = await this.client()
+      try {
+        return await new Promise((resolve, reject) => {
+          client.exec(command, (error, opened) => {
+            if (error) reject(toSshError(error))
+            else resolve(opened)
+          })
+        })
+      } catch (error) {
+        lastError = error
+        if (error?.sshCategory !== SSH_FAILURE.CHANNEL || attempt === CHANNEL_RETRIES) throw error
+        this.target.log?.(
+          `ssh: the server's channel budget is full (${error.message}); `
+          + `waiting ${String(CHANNEL_BACKOFF_MS)}ms before attempt ${String(attempt + 2)}`,
+        )
+        await new Promise(resolve => setTimeout(resolve, CHANNEL_BACKOFF_MS * (attempt + 1)))
+      }
+    }
+    throw lastError
+  }
+
+  /**
    * Open one direct-tcpip channel to an address reachable from the remote host.
    * @param {string} host - destination as seen from the remote machine.
    * @param {number} port
@@ -255,14 +331,24 @@ export class SshConnection {
    * @returns {Promise<{ stream: import('node:stream').Duplex, close: () => void }>}
    */
   async forwardOut(host, port, signal) {
-    const client = await this.client()
     signal?.throwIfAborted()
-    const stream = await new Promise((resolve, reject) => {
-      client.forwardOut('127.0.0.1', 0, host, port, (error, channel) => {
-        if (error) reject(toSshError(error))
-        else resolve(channel)
-      })
-    })
+    let stream
+    for (let attempt = 0; attempt <= CHANNEL_RETRIES; attempt += 1) {
+      const client = await this.client()
+      try {
+        stream = await new Promise((resolve, reject) => {
+          client.forwardOut('127.0.0.1', 0, host, port, (error, channel) => {
+            if (error) reject(toSshError(error))
+            else resolve(channel)
+          })
+        })
+        break
+      } catch (error) {
+        // A forwarded channel is a channel: the same ceiling, the same wait.
+        if (error?.sshCategory !== SSH_FAILURE.CHANNEL || attempt === CHANNEL_RETRIES) throw error
+        await new Promise(resolve => setTimeout(resolve, CHANNEL_BACKOFF_MS * (attempt + 1)))
+      }
+    }
     return {
       stream,
       close: () => {
