@@ -85,9 +85,15 @@ window.__ModuleLoader__.load({
           phases: {
             probe: '正在识别远端环境',
             install: '正在安装远端 Harness',
+            build: '正在由节点自行构建运行时',
             provision: '正在下发模型与凭据',
             start: '正在启动远端服务',
             verify: '正在验证远端会话通道',
+          },
+          /** How a node's runtime arrived. Shown only when the Host reported it. */
+          runtimeVia: {
+            artefact: '运行时来源：下载的制品',
+            npm: '运行时来源：节点自行构建',
           },
           missingSecret: '还没有保存密码或私钥。',
           plugins: '插件同步',
@@ -184,9 +190,15 @@ window.__ModuleLoader__.load({
           phases: {
             probe: 'Identifying the remote environment',
             install: 'Installing the remote Harness',
+            build: 'Building the runtime on the node',
             provision: 'Sending models and credentials',
             start: 'Starting the remote service',
             verify: 'Verifying the remote session channel',
+          },
+          /** How a node's runtime arrived. Shown only when the Host reported it. */
+          runtimeVia: {
+            artefact: 'Runtime: downloaded artefact',
+            npm: 'Runtime: built on the node',
           },
           missingSecret: 'No password or private key is stored yet.',
           plugins: 'Plugin sync',
@@ -556,12 +568,20 @@ window.__ModuleLoader__.load({
       return T.idle
     }
 
-    /** One phase timeline while a node connects. */
-    function PhaseList({ phase }) {
+    /**
+     * One phase timeline while a node connects.
+     *
+     * There is no separate "build" row: whether the runtime arrives as a download or as a
+     * resolve on the node is decided inside `install`, and a row that never lights up reads
+     * as a step that was skipped. What changes instead is the **label** of the install row,
+     * once the Host knows which route it took (`runtimeVia`) — the same slot, the true name.
+     */
+    function PhaseList({ phase, runtimeVia }) {
       const order = ['probe', 'install', 'provision', 'start', 'verify']
       const at = order.indexOf(phase ?? '')
+      const label = id => (id === 'install' && runtimeVia === 'npm' ? T.phases.build : T.phases[id] ?? id)
       return h('div', { style: styles.phases },
-        order.map((id, index) => h('div', { key: id, style: styles.phase(index === at) }, T.phases[id] ?? id)))
+        order.map((id, index) => h('div', { key: id, style: styles.phase(index === at) }, label(id))))
     }
 
     /**
@@ -1292,7 +1312,15 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', style: styles.link, onClick: () => setConfirming(false) }, T.cancel))
           : null,
         connecting && node.phase !== undefined
-          ? h('div', { style: styles.cardReason }, h(PhaseList, { phase: node.phase }))
+          ? h('div', { style: styles.cardReason },
+              h(PhaseList, { phase: node.phase, runtimeVia: node.runtimeVia }))
+          : null,
+        // A node that built its own runtime says so on its own line: it is the one fact
+        // that explains why this machine behaves differently from its neighbours, and it is
+        // not something a person could infer from the version.
+        connected && node.runtimeVia !== undefined && T.runtimeVia[node.runtimeVia] !== undefined
+          ? h('div', { style: styles.cardReason, title: T.runtimeVia[node.runtimeVia] },
+              h('span', { style: styles.meta }, T.runtimeVia[node.runtimeVia]))
           : null,
         expanded && connected
           ? h('div', { style: styles.cardReason },
