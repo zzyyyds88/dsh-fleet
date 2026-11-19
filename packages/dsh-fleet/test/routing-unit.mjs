@@ -155,6 +155,22 @@ function fakeFleet(nodeId, gateway) {
   const unrelated = router.toLocal({ id: BARE, label: 'not an identity field' }, NODE)
   check(unrelated.id === BARE, 'a bare uuid outside a Session field is left alone')
 
+  // A relayed Host event names its Session **by position**, so there is no field
+  // name for `toLocal` to read. Measured: a subagent's `api-session/status` arrived
+  // here as `[bareUuid, true]`, was passed through unwrapped, and the sidebar looked
+  // the child up by its wrapped id — a parent row showed "0 subagents running" for a
+  // whole remote turn.
+  const status = router.toLocalEventArgs('api-session/status', [BARE, true], NODE)
+  check(status[0] === `fleet_${NODE}_${BARE}`, 'a status event wraps a bare subagent id in first position', status[0])
+  check(status[1] === true, 'a status event keeps its running flag')
+  const activity = router.toLocalEventArgs('api-session/activity', [SESSION, 12], NODE)
+  check(activity[0] === WRAPPED, 'an activity event wraps a marked session id', activity[0])
+  check(activity[1] === 12, 'an activity event keeps its sequence number')
+  const added = router.toLocalEventArgs('api-session/added', [{ sessionId: BARE, cwd: '/root/z' }], NODE)
+  check(added[0].sessionId === `fleet_${NODE}_${BARE}`, 'an added event still wraps by field name')
+  const again = router.toLocalEventArgs('api-session/status', [`fleet_${NODE}_${BARE}`, false], NODE)
+  check(again[0] === `fleet_${NODE}_${BARE}`, 'an already-wrapped event id is not wrapped twice', again[0])
+
   const workspace = router.toLocalWorkspace({ workspace: { workspaceId: 'ws-1', path: '/root/w' } }, NODE)
   check(workspace.workspace.workspaceId === `fleet_${NODE}_ws-1`, 'toLocalWorkspace wraps a workspace id')
   check(workspace.workspace.path === '/root/w', 'toLocalWorkspace leaves the path alone')

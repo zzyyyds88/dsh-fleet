@@ -52,6 +52,49 @@ const BARE_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 const SESSION_FIELDS = Object.freeze(new Set(['sessionId', 'childSessionId', 'parentSessionId']))
 
 /**
+ * Relayed Host events whose **first positional argument** is a Session identity.
+ *
+ * `toLocal` decides whether to wrap a bare uuid by the field name it sits under,
+ * which is right for a snapshot (`{ sessionId: '…' }`) and useless for a
+ * positional argument — there is no field name to read.
+ *
+ * That distinction is not academic. `api-session/status` is emitted as
+ * `(sessionId, running)`, and a **subagent's** Session has no `session-` marker,
+ * so the first argument arrived here as a bare uuid, fell through unwrapped, and
+ * was re-emitted with an id the sidebar does not know:
+ *
+ *   node sends   ["84a0d391-8ee9-46e4-b8af-1ea0ea998d91", true]
+ *   session/list fleet_n00a5f7394401_84a0d391-…
+ *
+ * The row looked its children up by the wrapped id (`tree.ts` in the workspace UI:
+ * `statuses.get(child.id)?.running`), found nothing, and a parent row sat at
+ * "0 subagents running" for the whole turn. Measured on a real remote turn.
+ */
+const SESSION_FIRST_ARGUMENT = Object.freeze(new Set([
+  'api-session/activity',
+  'api-session/error',
+  'api-session/removed',
+  'api-session/status',
+]))
+
+/**
+ * The caller's `AbortSignal`, if the last positional argument is one.
+ *
+ * `args.at(-1)` looked right for endpoints that do take a signal, but most do not:
+ * `agentPresets/select(agent, agentPreset)` ends with a preset name, and passing
+ * that to `router.call` as the signal crashed inside the Gateway with
+ * `signal?.throwIfAborted is not a function`. A shape test is the honest one.
+ *
+ * @param {unknown[]} args
+ * @returns {AbortSignal | undefined}
+ */
+function signalOf(args) {
+  const last = args.at(-1)
+  if (last === null || typeof last !== 'object') return undefined
+  return typeof Reflect.get(last, 'throwIfAborted') === 'function' ? last : undefined
+}
+
+/**
  * Pull the Session identity out of one request object.
  * @param {Record<string, unknown> | undefined} request
  * @returns {string | undefined}
@@ -257,6 +300,30 @@ export class Router {
   }
 
   /**
+   * Turn one relayed Host event's positional arguments into the local form.
+   *
+   * For the events in {@link SESSION_FIRST_ARGUMENT} the first argument is a Session
+   * identity by position, so it is wrapped whether or not it carries a marker — that
+   * is the only way a subagent's bare-uuid id arrives wrapped. Every other event
+   * keeps `toLocal`'s field-name rule, which is what the rest of the pipeline relies
+   * on.
+   *
+   * @param {string} event - the Host event name, e.g. `api-session/status`.
+   * @param {unknown[]} args
+   * @param {string} nodeId
+   * @returns {unknown[]}
+   */
+  toLocalEventArgs(event, args, nodeId) {
+    const sessionFirst = SESSION_FIRST_ARGUMENT.has(event)
+    return args.map((argument, index) => {
+      if (sessionFirst && index === 0 && typeof argument === 'string') {
+        return isRemoteId(argument) ? argument : encodeRemoteId(nodeId, argument)
+      }
+      return this.toLocal(argument, nodeId)
+    })
+  }
+
+  /**
    * Call one unary endpoint on a node and unwrap its result.
    * @param {string} nodeId
    * @param {string} endpoint
@@ -352,7 +419,7 @@ export class Router {
         if (value === undefined) continue
         payload[name] = name === 'request' ? router.toRemote(value, decoded.nodeId) : value
       }
-      const value = await router.call(decoded.nodeId, endpoint, payload, args.at(-1))
+      const value = await router.call(decoded.nodeId, endpoint, payload, signalOf(args))
       return wrap ? router.toLocal(value, decoded.nodeId) : value
     }
   }

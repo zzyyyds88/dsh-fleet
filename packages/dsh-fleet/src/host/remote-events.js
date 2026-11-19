@@ -305,12 +305,16 @@ export class RemoteEvents {
   /**
    * Re-emit one node event locally with this Host's identity encoding.
    *
-   * Wrapping is `Router.toLocal`, the same walk `session/list` uses, so a remote
-   * identity reads the same whether it arrived in a snapshot or in an event.
+   * Wrapping is `Router#toLocalEventArgs`, which is `toLocal` plus the one thing a
+   * positional argument needs: the events in this list name a Session **by
+   * position**, so a subagent's marker-less id is wrapped there instead of being
+   * passed through. `toLocal` alone cannot see that identity — there is no field
+   * name to read — and the measured cost was a parent row that never showed its
+   * running children for the whole turn.
    */
   #relay(nodeId, event, args) {
     if (this.disposed) return
-    const wrapped = args.map(argument => this.router.toLocal(argument, nodeId))
+    const wrapped = this.router.toLocalEventArgs(event, args, nodeId)
     try {
       this.emit(event, wrapped)
     } catch (error) {
