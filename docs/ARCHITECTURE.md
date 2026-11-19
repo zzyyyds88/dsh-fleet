@@ -583,10 +583,14 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 
 实测代价对比（参考节点 192.168.3.93，glibc 2.35，Node v22.20.0，registry 指向 `npmmirror`）：
 
-| 路线 | 耗时 | 额外依赖 |
-|---|---|---|
-| 制品 | 一次 165 MiB 下载，加速站 4.97 MiB/s 约 34 s | 加速站可达 |
-| 节点自建 | `npm install` 26–33 s / 673 包；第二次同版本 1 s | registry 可达；首次 275.7 MiB npm 缓存 |
+| 路线 | 耗时 | 树大小 | 额外依赖 |
+|---|---|---|---|
+| 制品 | 一次 165 MiB 下载，加速站 4.97 MiB/s 约 34 s | 680.2 MiB / 51 520 文件（打包时裁过） | 加速站可达 |
+| 节点自建 | `npm install` 26–33 s / 673 包；第二次同版本 1 s | 958 MiB / 93 983 文件（未裁） | registry 可达；首次 275.7 MiB npm 缓存 |
+
+两条树的 277 MiB / +40.8% 差在打包脚本的 `STRIPPED`：`.map`（9 933 个）、`.d.ts`（16 144 个）、
+`.md`、per-package 的 test 目录都不进制品，而 npm 装出来的是完整包。这只影响节点的磁盘占用，
+不影响能不能跑；真要省，制品路线就是省的那条。
 
 **制品必须按平台分。** DSH 不是纯 JS：`node-pty`、`sharp`、`sherpa-onnx`、`koffi` 带原生二进制，
 安装树里就写着平台（`sherpa-onnx-win-x64`、`@img/sharp-linux-x64`、`@koromix/koffi-linux-x64`）。

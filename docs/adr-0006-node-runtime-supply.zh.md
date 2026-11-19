@@ -88,13 +88,22 @@ npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/
 参考节点 `192.168.3.93`：Linux x86_64 / glibc 2.35 / Node v22.20.0 / npm 10.9.3 /
 registry 指向 `npmmirror`（metadata 0.148 s）。
 
-| 路线 | 耗时 | 额外依赖 | 备注 |
-|---|---|---|---|
-| 制品 | 一次 165 MiB 下载，加速站 4.97 MiB/s 约 34 s | 加速站可达 | 可离线 |
-| 节点自建 | `npm install` 26–33 s / 673 包 | registry 可达 | 首次 275.7 MiB npm 缓存；同版本第二次 1 s |
+| 路线 | 耗时 | 树大小 | 额外依赖 | 备注 |
+|---|---|---|---|---|
+| 制品 | 一次 165 MiB 下载，加速站 4.97 MiB/s 约 34 s | 680.2 MiB / 51 520 文件 | 加速站可达 | 可离线；打包时裁过 |
+| 节点自建 | `npm install` 26–33 s / 673 包 | 958 MiB / 93 983 文件 | registry 可达 | 首次 275.7 MiB npm 缓存；同版本第二次 1 s |
 
 本机（Windows，跨平台解析 `--os=linux --cpu=x64 --libc=glibc`）实测 83.2 s / 968.2 MiB /
 94106 文件；`npm ci` 加平台标志 53.4 s，正确跳过 win32 的包。
+
+两条树差 277 MiB（+40.8%），差在 `STRIPPED`：`.map` 9 933 个、`.d.ts` 16 144 个、`.md` 与
+per-package 的 test 目录都不进制品。只影响节点磁盘占用，不影响可用性。
+
+**真机验收证据**：`test/npm-install-acceptance.mjs` 在参考节点上两次通过（22 项断言，含戳、
+原生包、`koffi/build` 缺席、`spawn-helper` 可执行）；`run-all.mjs --layer e2e --only
+session,node-control` 在一个真 Host 上跑了 112.4 s 全绿，之后节点上的
+`~/.dsh-fleet/runtime/.fleet-artefact.json` 是 `{"build":3,"via":"npm"}`、版本 `0.2.2-rc.5` ——
+也就是说这次连走的就是兜底路线，并且没有触发第二次安装。
 
 结论：**路线顺序不该反过来**。npm 慢一点、多一个依赖，但它换来的是「不等任何人」。
 
