@@ -158,14 +158,32 @@ export class NodeRuntime {
       this.connection.target.auth = { kind: this.record.auth.kind }
       return
     }
+    // **Only a real change may tear the connection down.** `adopt()` runs at the start of every
+    // `connect()`, and it used to call `invalidate()` whenever a client existed — so a reconnect
+    // of an already-connected node killed the socket it was about to use, and a settings-page
+    // save killed a working node's link. Measured: after a drop, the recovery ladder reconnected
+    // successfully and then immediately logged `invalidate() drops the connection (at
+    // NodeRuntime.adopt)`, dropping the node again. The comparison is on the parts that decide
+    // the handshake; a changed host/port/username has to reconnect too, because the client is
+    // bound to them.
+    const previous = this.connection.target
+    const changed = previous.auth.kind !== auth.kind
+      || previous.auth.password !== auth.password
+      || previous.auth.privateKey !== auth.privateKey
+      || previous.auth.passphrase !== auth.passphrase
+      || previous.host !== this.record.host
+      || previous.port !== this.record.port
+      || previous.username !== this.record.username
     this.connection.target.auth = auth
     this.connection.target.host = this.record.host
     this.connection.target.port = this.record.port
     this.connection.target.username = this.record.username
     this.connection.target.label = this.record.name
     this.host.layout = remoteLayout(this.record.remoteRoot)
-    this.gateway.reset()
-    if (this.connection.ready) this.connection.invalidate()
+    if (this.connection.ready && changed) {
+      this.gateway.reset()
+      this.connection.invalidate()
+    }
   }
 
   /** Whether the stored secret is enough to attempt a connection. */
