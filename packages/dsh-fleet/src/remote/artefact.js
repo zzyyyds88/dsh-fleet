@@ -19,8 +19,9 @@
  *
  * - the file name carries the platform (`dsh-<version>-linux-x64.tar.gz`);
  * - the plugin asks for the artefact matching **the node's** `uname`, not its own;
- * - a platform with no published artefact falls back to npm, which resolves natives
- *   correctly by construction.
+ * - a platform with no artefact at all (an `uname` this plugin cannot tag) is the one
+ *   case that goes to npm, which resolves natives correctly by construction. A platform
+ *   this build *does* publish for never falls back: failing to download is reported.
  *
  * Two more decisions:
  *
@@ -34,8 +35,36 @@
  * @module @greatbaby/dsh-fleet/remote/artefact
  */
 
-/** Default accelerator; overridable so a fork or a private mirror can be used. */
-export const DEFAULT_MIRROR = 'https://git.yylx.win/'
+/**
+ * Default accelerators, best first; overridable so a fork or a private mirror can be used.
+ *
+ * These are the hosts a node actually downloads from, and they die: a proxy that answers
+ * today can refuse the connection tomorrow. **Measured on the test node**, full archive
+ * (172 683 323 bytes), not a HEAD request:
+ *
+ *   git.yylx.win     connection refused on :443 right now, but it is the project's
+ *                    first-choice accelerator (AGENTS.md §13) and a refused connection
+ *                    costs one instant attempt, so it stays first — when it comes back
+ *                    this is the fastest path again;
+ *   gh.inkchills.cn  70.8 s  (~2.4 MB/s)   ← the one that actually carries today;
+ *   tvv.tw           ~2.3 MB/s;
+ *   ghfast.top       ~0.7 MB/s;
+ *   (direct GitHub)  ~27 KB/s — **deliberately not in this list**, see artefactUrls().
+ *
+ * Order matters only for healthy hosts: the install script tries them in turn and a
+ * connection refused costs milliseconds. What it must never do is end at GitHub direct,
+ * where 165 MiB is 1.8 hours.
+ *
+ * `github.akams.cn` is the catalog these alternatives come from, not a proxy itself:
+ * asking it for `/https://github.com/…` answers 404. Look there for a replacement when a
+ * host here stops working.
+ */
+export const DEFAULT_MIRRORS = Object.freeze([
+  'https://git.yylx.win/',
+  'https://gh.inkchills.cn/',
+  'https://tvv.tw/',
+  'https://ghfast.top/',
+])
 
 /** GitHub repository the releases come from. */
 export const DEFAULT_REPOSITORY = 'zzyyyds88/dsh-fleet'
@@ -144,26 +173,47 @@ export function artefactName(version, platform) {
 /**
  * Absolute URLs of one artefact, best candidate first.
  *
- * The accelerator works by prefixing the original URL, which is why this is a prefix
- * rather than a rewrite: `https://git.yylx.win/https://github.com/…`. The direct URL is
- * kept as the second candidate because the accelerator is a third-party hop — when it
- * is down, a node that *can* reach GitHub should still connect.
+ * An accelerator works by prefixing the original URL, which is why this is a prefix
+ * rather than a rewrite: `https://gh.inkchills.cn/https://github.com/…`.
+ *
+ * **There is no direct-GitHub candidate, on purpose.** Falling back to `github.com`
+ * looks harmless and is not: measured on the test node it runs at ~27 KB/s, so a failed
+ * accelerator turns into 1.8 hours of apparent hang — the failure that started this. A
+ * host that cannot reach any accelerator is also a host where GitHub is slow or blocked,
+ * so "try GitHub anyway" is the one fallback that is guaranteed to be worse than
+ * reporting. When every accelerator fails the install reports `ARTEFACT_UNAVAILABLE`
+ * and the list gets fixed by hand, which is a decision a person makes once, not a
+ * silent 1.8-hour wait on every connect.
  *
  * @param {object} options
  * @param {string} options.version
  * @param {string} options.platform - a `platformTag()` result.
  * @param {string} [options.repository]
- * @param {string} [options.mirror] - empty string means "go direct".
- * @param {string} [options.tag] - release tag; defaults to `v<version>`.
+ * @param {string[]} [options.mirrors] - accelerator prefixes; at least one is required.
+ * @param {string} [options.tag] - release tag; defaults to `v${version}`.
  * @returns {string[]} candidate URLs, best first.
+ * @throws when the configured accelerator list yields no candidate — a missing
+ *   accelerator is a configuration error, not a reason to download from GitHub directly.
  */
-export function artefactUrls({ version, platform, repository = DEFAULT_REPOSITORY, mirror = DEFAULT_MIRROR, tag }) {
+export function artefactUrls({
+  version, platform, repository = DEFAULT_REPOSITORY, mirrors = DEFAULT_MIRRORS, tag,
+}) {
   const name = artefactName(version, platform)
   const releaseTag = tag ?? `v${version}`
   const official = `https://github.com/${repository}/${RELEASE_BASE}/${releaseTag}/${name}`
-  if (mirror === '') return [official]
-  const prefix = mirror.endsWith('/') ? mirror : `${mirror}/`
-  return [`${prefix}${official}`, official]
+  const candidates = []
+  for (const mirror of mirrors) {
+    if (mirror === '') continue
+    candidates.push(`${mirror.endsWith('/') ? mirror : `${mirror}/`}${official}`)
+  }
+  if (candidates.length === 0) {
+    throw new Error(
+      'no accelerator configured: the node runtime is downloaded only through the '
+      + 'accelerator list, never straight from GitHub (see DEFAULT_MIRRORS). '
+      + 'Add at least one accelerator to `mirrors`.',
+    )
+  }
+  return [...new Set(candidates)]
 }
 
 /**
@@ -184,10 +234,11 @@ export function artefactUrls({ version, platform, repository = DEFAULT_REPOSITOR
  * | code | meaning | what the caller does |
  * |---|---|---|
  * | 0 | installed | start the node |
- * | 3 | no artefact published for this platform/version | fall back to npm |
+ * | 3 | every accelerator failed (`ARTEFACT_UNAVAILABLE`) | report the list it tried; never npm, never direct GitHub |
  * | 4 | checksum mismatch | roll back, report |
  * | 5 | archive is not a DSH runtime | roll back, report |
- *
+ */
+
 /**
  * Turn a `~`-rooted path into something a shell expands inside double quotes.
  *

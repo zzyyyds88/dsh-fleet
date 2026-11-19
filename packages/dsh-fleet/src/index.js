@@ -121,7 +121,7 @@ function localDshVersion() {
  * decorators, and the management API a settings surface reads.
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {{ enabled?: boolean, autoConnect?: boolean, mirror?: string }} [config]
+ * @param {{ enabled?: boolean, autoConnect?: boolean, mirrors?: string[] }} [config]
  */
 export function apply(ctx, config = {}) {
   if (config.enabled === false) return
@@ -143,7 +143,7 @@ export function apply(ctx, config = {}) {
     credentials: ctx.credentials,
     version,
     brainVersion,
-    mirror: config.mirror,
+    mirrors: config.mirrors,
     configEditor: () => configEditor,
     // Read on every connect and every sync: a switch flipped in the settings surface has
     // to reach a running node now, not on the next connect.
@@ -258,7 +258,7 @@ export function apply(ctx, config = {}) {
             if (decision.action === 'ahead' || decision.action === 'unknown') {
               throw apiError('node-ahead', decision.message, 409)
             }
-            await runtime.host.install(runtime.facts, { mirror: config.mirror })
+            await runtime.host.install(runtime.facts, { mirrors: config.mirrors })
           } finally {
             runtime.phase = undefined
           }

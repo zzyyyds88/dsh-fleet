@@ -157,21 +157,52 @@ verification: "`node --check <file>`；`node -e \"import('./src/index.js')\"`"
 
 以下地址于 2026-11-16 在本机实测可用。安装、克隆、下载前先用这里的源；换源与失败处理按 §2-10、§2-6。
 
-### GitHub 资源（不是只用于 git）
+### GitHub 资源加速（不止用于 clone）
 
-`https://git.yylx.win/` 是 GitHub 资源加速，支持 `github.com`、`raw.githubusercontent.com`、`gist.githubusercontent.com`，不限于 clone。
+**加速入口**（按优先级）
 
-- 统一写法：原地址前拼接 `https://git.yylx.win/`；也可把原域名换成该域名，两种都可用，优先前者。
-- 克隆：`git clone https://git.yylx.win/https://github.com/<owner>/<repo>.git`
-- 私有仓库：`git clone https://<user>:<token>@git.yylx.win/https://github.com/<owner>/<repo>.git`
-- raw 文件：`curl -LO https://git.yylx.win/https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<file>`
-- 分支归档：`https://git.yylx.win/https://github.com/<owner>/<repo>/archive/refs/heads/<branch>.zip`
-- Release 资产：`https://git.yylx.win/https://github.com/<owner>/<repo>/releases/download/<tag>/<file>`
-- Gist：`https://git.yylx.win/https://gist.githubusercontent.com/<user>/<gist_id>/raw/<file>`
-- 不支持 SSH 克隆；只支持 HTTPS。
-- 实测：`ls-remote`、raw 文件、archive 可用；`/releases/latest` 这类页面返回 400，只代理具体文件。
-- 本机配了 `127.0.0.1` 代理而代理未启动时，git 会报连不上，这不是加速地址失效；先加 `-c http.proxy= -c https.proxy=` 再执行。
+| 地址 | 用途 |
+|---|---|
+| `https://git.yylx.win/` | 主力。支持 `github.com`、`raw.githubusercontent.com`、`gist.githubusercontent.com`，可代理 clone、raw、archive、Release 资产、Gist |
+| `https://gh.inkchills.cn/` | 备用加速 |
+| `https://github.akams.cn/` | 加速站汇总目录，前两个不可用时来这里找替代 |
 
+**统一拼接规则**
+
+- 首选拼接式：在完整原始 URL 前加 `https://git.yylx.win/`；也可以把原域名替换成该域名，两种都可用，优先拼接。
+- 下载失败时**不要直接放弃、也不要转人工另找站点**，先按上表顺序换入口、按规定写法重试，用不走官方直连，实在不行你就自己去网上找。
+
+**常用写法**
+
+```bash
+# 克隆
+git clone https://git.yylx.win/https://github.com/<owner>/<repo>.git
+
+# 私有仓库（HTTPS）
+git clone https://<user>:<token>@git.yylx.win/https://github.com/<owner>/<repo>.git
+
+# raw 文件
+curl -LO https://git.yylx.win/https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<file>
+
+# 分支归档
+https://git.yylx.win/https://github.com/<owner>/<repo>/archive/refs/heads/<branch>.zip
+
+# Release 资产
+https://git.yylx.win/https://github.com/<owner>/<repo>/releases/download/<tag>/<file>
+
+# Gist
+https://git.yylx.win/https://gist.githubusercontent.com/<user>/<gist_id>/raw/<file>
+```
+
+**限制与排障**
+
+- 只支持 HTTPS，不支持 SSH 克隆。
+- 只代理具体文件：`/releases/latest` 这类页面 URL 会返回 400，要换成具体资产地址。
+- 本机配置了 `127.0.0.1` 代理但代理未启动时，git 会报连接失败——这不是加速站失效。先绕过本地代理再试：
+
+```bash
+git -c http.proxy= -c https.proxy= clone https://git.yylx.win/https://github.com/<owner>/<repo>.git
+```
 ### Docker / OCI 镜像
 
 - 前缀拉取：`docker pull git.yylx.win/<registry>/<image>:<tag>`，省略 registry 时按 `docker.io` 处理。

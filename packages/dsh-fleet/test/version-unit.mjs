@@ -21,7 +21,7 @@ import {
   RUNTIME_BUILD,
   artefactName,
   artefactUrls,
-  DEFAULT_MIRROR,
+  DEFAULT_MIRRORS,
   FETCH_CEILING_SECONDS,
   FETCH_FLOOR_BYTES,
   FETCH_FLOOR_SECONDS,
@@ -123,20 +123,36 @@ const check = (ok, label, detail) => {
   check(artefactName('0.2.2', 'linux-x64') === 'dsh-0.2.2-linux-x64.tar.gz',
     'the file name carries version and platform', artefactName('0.2.2', 'linux-x64'))
 
+  // A node reaches the artefact through a **list** of accelerators, because a single host
+  // is a single point of failure: measured here, the old default (`git.yylx.win`) refused
+  // every connection and each install silently fell through to direct GitHub at ~27 KB/s,
+  // which for 172 683 323 bytes is ~1.8 hours — "connecting a node hangs".
+  //
+  // There is deliberately **no direct-GitHub candidate**: "try GitHub anyway" is the one
+  // fallback guaranteed to be worse than reporting, so an empty accelerator list is a
+  // configuration error that throws instead of a quiet slow download.
   const urls = artefactUrls({ version: '0.2.2-rc.3', platform: 'linux-x64' })
-  check(urls.length === 2, 'two candidate URLs are produced', String(urls.length))
-  check(urls[0].startsWith(`${DEFAULT_MIRROR}https://github.com/`),
-    'the accelerator is a prefix, not a rewrite', urls[0])
-  check(urls[0].endsWith('/releases/download/v0.2.2-rc.3/dsh-0.2.2-rc.3-linux-x64.tar.gz'),
-    'the tag and file name carry the version and platform', urls[0].slice(-64))
-  check(urls[1] === 'https://github.com/zzyyyds88/dsh-fleet/releases/download/v0.2.2-rc.3/dsh-0.2.2-rc.3-linux-x64.tar.gz',
-    'the second candidate is the official URL', urls[1])
-  check(new Set(urls).size === 2, 'the candidates are distinct')
-  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirror: '' }).length === 1,
-    'an empty mirror means "go direct"')
-  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirror: 'https://m.example/' })[0]
-    .startsWith('https://m.example/https://github.com/'), 'a custom mirror is used verbatim')
-  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', repository: 'a/b', tag: 'nightly' })[0]
+  check(urls.length === DEFAULT_MIRRORS.length,
+    'exactly one candidate per accelerator', String(urls.length))
+  check(urls[0].startsWith(`${DEFAULT_MIRRORS[0]}https://github.com/`),
+    'the first accelerator is a prefix, not a rewrite', urls[0])
+  check(DEFAULT_MIRRORS.every((mirror, index) => urls[index].startsWith(mirror)),
+    'the candidates keep the accelerators\' order')
+  check(!urls.some(url => url.startsWith('https://github.com/')),
+    'GitHub direct is never a candidate — a slow fallback reads as a hang', urls.at(-1))
+  check(urls.every(url => url.includes('/releases/download/v0.2.2-rc.3/dsh-0.2.2-rc.3-linux-x64.tar.gz')),
+    'every candidate points at the same tag and file name')
+  check(new Set(urls).size === urls.length, 'the candidates are distinct')
+  let emptyThrew = ''
+  try { artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: [] }) }
+  catch (error) { emptyThrew = String(error.message) }
+  check(emptyThrew.includes('no accelerator configured'),
+    'no accelerators is a named error, not a silent direct download', emptyThrew.slice(0, 80))
+  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: ['https://m.example/'] })[0]
+    .startsWith('https://m.example/https://github.com/'), 'a custom accelerator is used verbatim')
+  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: ['https://a/', ''] })
+    .length === 1, 'an empty entry in the list is not a candidate of its own')
+  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: DEFAULT_MIRRORS, repository: 'a/b', tag: 'nightly' })[0]
     .includes('/a/b/releases/download/nightly/'), 'the repository and tag are configurable')
 }
 
@@ -406,6 +422,84 @@ const check = (ok, label, detail) => {
   })
   check(script.includes(BUILD_STAMP), 'the install writes the build stamp', BUILD_STAMP)
   check(script.includes(`'${String(RUNTIME_BUILD)}'`), 'with the build this plugin packs')
+}
+
+// ---- the fallback rules, exercised through the real RemoteHost.install ---------
+// These are the decision points a person hits when an accelerator dies, and every one of
+// them used to end in a silent 1.3 GB npm install or a 1.8-hour direct download. The
+// connection is a stub: what is being proved is *which commands run*, not SSH.
+{
+  const { RemoteHost } = await import('../src/remote/daemon.js')
+  const stub = (answers = {}) => {
+    const calls = []
+    return {
+      calls,
+      async exec(request) {
+        calls.push(request.argv.join(' '))
+        const script = request.argv.at(-1) ?? ''
+        const answer = Object.entries(answers).find(([needle]) => script.includes(needle))?.[1]
+        return { code: answer?.code ?? 0, stdout: answer?.stdout ?? '', stderr: answer?.stderr ?? '' }
+      },
+    }
+  }
+  const facts = {
+    nodeUsable: true, nodeVersion: 'v24.21.0', curlPath: '/usr/bin/curl', wgetPath: '',
+    npmPath: '/usr/bin/npm', os: 'Linux', arch: 'x86_64',
+  }
+  const failure = async (options, installFacts = facts) => {
+    const connection = stub({ 'ARTEFACT-UNAVAILABLE-NEVER-MATCHES': { code: 0 }, ...options.answers })
+    const host = new RemoteHost({ connection, version: '0.2.2-rc.3', log: () => {} })
+    let error
+    try { await host.install(installFacts, options.install ?? {}) } catch (caught) { error = caught }
+    return { error, calls: connection.calls }
+  }
+
+  // 1. A download failure reports and stops. No npm, no direct GitHub, and the message
+  //    names the accelerators it tried so a person knows what to swap.
+  const refused = await failure({ answers: { 'ARTEFACT_UNAVAILABLE': { code: 3, stderr: 'ARTEFACT_UNAVAILABLE' } } })
+  check(refused.error !== undefined, 'a failed download throws instead of falling through')
+  check(!refused.calls.some(call => call.includes('npm install')),
+    'and never runs npm — a 1.3 GB registry install would hide which source failed')
+  // Every URL the script was given has to go *through* an accelerator. An accelerator URL
+  // contains `github.com` as its suffix (that is how prefixing works), so the test looks
+  // at where each URL starts, not at whether the words appear.
+  const scriptUrls = refused.calls
+    .flatMap(call => [...call.matchAll(/'(https:\/\/[^']+)'/gu)].map(match => match[1]))
+  check(scriptUrls.length > 0 && scriptUrls.every(url => !url.startsWith('https://github.com/')),
+    'and no URL it builds starts at GitHub directly',
+    scriptUrls.find(url => url.startsWith('https://github.com/')))
+  check(scriptUrls.every(url => DEFAULT_MIRRORS.some(mirror => url.startsWith(mirror))),
+    'every URL it builds goes through a configured accelerator')
+  check(String(refused.error?.message).includes(DEFAULT_MIRRORS[0]),
+    'the error names the accelerators it tried', String(refused.error?.message).slice(0, 90))
+
+  // 2. A checksum mismatch still rolls back and reports (unchanged behaviour, guarded
+  //    here because the fallback rewrite touched the same branch).
+  const mismatch = await failure({
+    answers: { 'ARTEFACT_CHECKSUM_MISMATCH': { code: 4, stderr: 'ARTEFACT_CHECKSUM_MISMATCH a b' } },
+  })
+  check(mismatch.calls.some(call => call.includes('.previous')),
+    'a bad checksum rolls the previous runtime back')
+  check(String(mismatch.error?.message).includes('installing the resident host failed'),
+    'and reports rather than retrying npm')
+
+  // 3. No downloader on a platform this build publishes for: report, do not npm.
+  const noDownloader = await failure({}, { ...facts, curlPath: '', wgetPath: '' })
+  check(String(noDownloader.error?.message).includes('no curl and no wget'),
+    'a node with no downloader is a named error', String(noDownloader.error?.message).slice(0, 60))
+  check(!noDownloader.calls.some(call => call.includes('npm install')),
+    'and it does not slide into npm either')
+
+  // 4. An empty accelerator list is a configuration error, not a direct download.
+  const noMirrors = await failure({ install: { mirrors: [] } })
+  check(String(noMirrors.error?.message).includes('no accelerator configured'),
+    'an empty accelerator list throws before any download', String(noMirrors.error?.message).slice(0, 60))
+
+  // 5. npm remains reachable for the one legitimate case: a platform this build never
+  //    published an artefact for. That is not a download failure.
+  const untaggable = await failure({}, { ...facts, os: 'Plan9', arch: 'mips' })
+  check(untaggable.calls.some(call => call.includes('npm install')),
+    'an untaggable platform still installs through npm')
 }
 
 if (failures.length > 0) {

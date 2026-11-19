@@ -272,16 +272,20 @@ export class RemoteHost {
   /**
    * Install or upgrade the resident DSH under the node's root.
    *
-   * Two routes, tried in this order:
+   * Two routes, never mixed:
    *
    * 1. **A published artefact** for exactly this release. The desktop ships a tarball
    *    it was tested against, so the node ends up on identical bytes without compiling
-   *    or resolving anything. Downloads go through the GitHub accelerator first
-   *    (`https://git.yylx.win/`), which is the difference between "one minute" and
-   *    "cannot reach GitHub at all" on a Chinese LAN.
-   * 2. **npm**, when the artefact is not published (a source checkout, an unreleased
-   *    release candidate). This is the old path, kept because refusing to connect just
-   *    because nobody uploaded a tarball would be worse than a slow install.
+   *    or resolving anything. Downloads go through the **accelerator list**
+   *    (`DEFAULT_MIRRORS`) and nowhere else: `artefactUrls()` has no direct-GitHub
+   *    candidate, because GitHub direct measures ~27 KB/s here and 165 MiB at that speed
+   *    is 1.8 hours — that is the "connecting hangs" failure, not a fallback. When every
+   *    accelerator fails this **throws** with the list it tried, so a person swaps in a
+   *    working accelerator. It does not slide into npm either: a 1.3 GB registry install
+   *    on top of a broken accelerator makes it impossible to see which of the two failed.
+   * 2. **npm**, only when the platform has no artefact at all (an `uname` this plugin
+   *    cannot tag). That is not a download failure, it is "this build never published a
+   *    tarball for that machine", and npm resolves native packages by construction.
    *
    * A failed artefact install rolls the previous runtime back, so a node never ends up
    * with a mixture of two releases.
@@ -293,7 +297,7 @@ export class RemoteHost {
    * to npm instead of guessing.
    *
    * @param {{ npmPath?: string, nodeUsable: boolean, nodeVersion?: string, curlPath?: string, wgetPath?: string, os?: string, arch?: string }} facts
-   * @param {{ mirror?: string }} [options]
+   * @param {{ mirrors?: string[] }} [options]
    */
   async install(facts, options = {}) {
     if (!facts.nodeUsable) {
@@ -305,12 +309,22 @@ export class RemoteHost {
     const platform = platformTag(facts)
     const urls = platform === undefined
       ? []
-      : artefactUrls({ version: this.version, platform, mirror: options.mirror })
+      : artefactUrls({ version: this.version, platform, mirrors: options.mirrors })
     if (platform === undefined) {
       this.log(`this machine reports ${String(facts.os)}/${String(facts.arch)}; using npm instead of an artefact`)
     }
     const canDownload = (facts.curlPath ?? '') !== '' || (facts.wgetPath ?? '') !== ''
-    if (urls.length > 0 && canDownload) {
+    if (urls.length > 0 && !canDownload) {
+      // This machine has a platform this build publishes for, so the artefact route is
+      // the right one — it just cannot start. Going on to npm here would be exactly the
+      // fallback this route forbids: a 1.3 GB registry install that hides the real fault.
+      throw toSshError(new Error(
+        `this machine has no curl and no wget, so the resident DSH ${this.version} cannot be `
+        + 'downloaded from an accelerator. Install curl (or wget) and connect again — this '
+        + 'route never falls back to npm.',
+      ))
+    }
+    if (urls.length > 0) {
       const script = installScript({
         version: this.version,
         runtime: this.layout.runtime,
@@ -336,12 +350,24 @@ export class RemoteHost {
         }).catch(() => undefined)
         throw toSshError(new Error(`installing the resident host failed: ${detail.slice(-600)}`))
       }
-      this.log(`no published artefact for DSH ${this.version}; falling back to npm`)
+      // Every accelerator failed. Report it — do **not** fall back to npm, and do not
+      // fall back to direct GitHub either (that URL is not a candidate at all any more:
+      // it runs at tens of KB/s here, so it would turn this into an apparent 1.8-hour
+      // hang). A person fixes the accelerator list once; a silent 1.3 GB npm install on
+      // top of a broken accelerator hides which of the two actually failed.
+      throw toSshError(new Error(
+        `could not download the resident DSH ${this.version} for ${platform} from any `
+        + `accelerator (tried ${String(urls.length)}):\n${urls.map(url => `  ${url}`).join('\n')}\n`
+        + 'Check that the node can reach one of them, or add a working accelerator to the '
+        + '`mirrors` config — this route never falls back to GitHub directly or to npm. '
+        + `The node said: ${detail.slice(-400)}`,
+      ))
     }
     if ((facts.npmPath ?? '') === '') {
       throw toSshError(new Error(
-        'this machine has no npm and no downloader, so the resident DSH cannot be installed. '
-        + 'Install Node.js 22 or newer (which ships npm and curl) and connect again.',
+        `this machine reports ${String(facts.os)}/${String(facts.arch)}, which this build publishes `
+        + 'no artefact for, and it has no npm either — so the resident DSH cannot be installed. '
+        + 'Install Node.js 22 or newer and connect again.',
       ))
     }
     const script = `

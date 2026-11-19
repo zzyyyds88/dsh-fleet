@@ -146,6 +146,7 @@ export class Fleet {
    * @param {() => readonly string[]} [options.nodeBundles] - the bundle list a node composes,
    *   read at connect and sync time so a plugin switched on reaches a node without a restart.
    * @param {() => { specOf: (bundle: string) => string | undefined, isLocal: (bundle: string) => boolean, localFiles: (bundle: string) => Record<string, string> } | undefined} [options.pluginSpecs] - where a plugin comes from and how it travels.
+   * @param {string[]} [options.mirrors] - accelerator prefixes, best first; an empty list means "go direct".
    * @param {(message: string) => void} [options.log]
    */
   constructor(options) {
@@ -153,8 +154,8 @@ export class Fleet {
     this.version = options.version
     /** The brain build this plugin would install: its own package version. */
     this.brainVersion = options.brainVersion ?? '0.0.0'
-    /** GitHub accelerator for artefact downloads; empty means "go direct". */
-    this.mirror = options.mirror
+    /** GitHub accelerator prefixes for artefact downloads, best first; empty means "go direct". */
+    this.mirrors = options.mirrors
     /**
      * The bundle list a node composes.
      *
@@ -303,7 +304,7 @@ export class Fleet {
         // rewritten unconditionally in the provision phase below — reinstalling 169 MB
         // to change a few hundred KB of bundle would be the wrong 8 seconds.
         if (gate.action === GATE.INSTALL) {
-          const installedRuntime = await runtime.host.install(runtime.facts, { mirror: this.mirror })
+          const installedRuntime = await runtime.host.install(runtime.facts, { mirrors: this.mirrors })
           runtime.log?.(
             `resident DSH ${installedRuntime.version} installed (${installedRuntime.via})`,
           )
