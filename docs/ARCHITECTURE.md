@@ -332,6 +332,33 @@ packages/dsh-fleet-brain/
 
 provision 阶段内部顺序也是语义的：**组合先于启动**（profile 必须已经指向 brain bundle）、**配置先于启动**（模型行必须已在盘上）、**凭据晚于启动**（只能通过节点自己的 Remote API 推，需要它已经在应答）。
 
+**失败时 phase 不清空，而且要分类。** 原来 `catch` 里把 `runtime.phase` 抹成 `undefined`，于是「解包运行时失败」和「SSH 握手失败」在界面上长得一样：一行红字加一个重试按钮 —— 而重试按钮只对其中一种有意义。现在两件事：
+
+- phase 保留，所以 `PhaseList` 能停在失败的那一格上；
+- `classifyFailure(error, { phase })`（`src/core/errors.js`）给出 `{ code, message, action, retryable, detail }`。判定顺序是**显式 code > SSH category > phase 推断 > unknown**，越具体越优先。`action` 是一个封闭集合（`fix-credential` / `review-host-key` / `check-network` / `retry` / `upgrade-node` / `upgrade-desktop` / `reinstall` / `inspect-log`），客户端把它翻成按钮；`retryable` 是**关于原因的事实**，所以密码错不配重试按钮 —— 按了只会得到同一次失败。`offline/errors` 套件（88 项）守住这四条以及下面日志的脱敏。
+
+### 断线要看得见，重连要成阶梯
+
+在 2026-11-19 之前，SSH socket 掉了之后 `state` **一直是 `connected`**：`SshConnection` 清掉自己的 client 就完事，没有任何人被告知。后果是卡片一直是绿的、侧栏还列着那台机器的工作区，而任何调用都回 `fleet/node-offline` —— 一个界面上从未出现过的状态。`disconnect()` 和 `invalidate()` 也会触发 `close`，所以「主动断开」和「掉线」必须分开：`#ending` 这个 WeakSet 记下自己主动结束的 client，只有不在其中的 `close` 才算掉线。
+
+掉线后的阶梯是 `2s / 4s / 8s` 三次，之后每 **2 分钟**，直到成功或用户点「断开」。实测：`systemctl restart ssh` 两秒回来（第一档就成），整机重启 21 s 回来（落在第三或第四档）。阶梯期间**不报错**：状态是 `idle` + `droppedAt`，卡片写「已断线，正在重连」。用户点断开是唯一「别试了」的表达，所以 `disconnect()` 先取消定时器。
+
+**工作区行在掉线时保留。** 原来 `RemoteWorkspaces.sync()` 只要节点不在 `routable()` 里就把整份 baseline 丢掉 —— 于是断线那一刻侧栏里整台机器的工作区消失，一分钟重连成功后又回来，读起来就是「我的东西没了」。现在只有**记录被删**才丢行；只是连不上时行留着并标 `offline`（`nodeStates()` 能区分「这台机器没有工作区」和「这台机器现在不应答」）。
+
+### 主机密钥：首次记录，之后每次都验
+
+`SshConnection` 的 `hostVerifier` 从写下的第一天起就在读 `target.hostFingerprint`，但**全仓库没有任何地方给它赋过值** —— 于是 `expected` 永远是 `undefined`，每次都走「首次」分支并 `verify(true)`。也就是说这条链是死代码，中间人可以无条件接管连接。
+
+现在：`NodeRecord.hostKey`（`SHA256:…`，OpenSSH 形式）在首次握手时由 `Fleet.#recordHostKey` 写进注册表，`#runtimeOf` 每次把记录里的值同步给已有的 `SshConnection`（否则重连时还在看 `undefined`，每次都是「首次」）。之后每握手比对一次，不符则拒绝并把两侧指纹写进该节点的日志。
+
+这是 **trust-on-first-use**，不是完整的主机身份验证：首次连接仍然可能被中间人。它买到的是「之后每一次都可证明」，以及「密钥变了要人来确认」——插件不会自动接受新密钥，也没有忽略开关。`SECURITY.md` 里写明了这个局限。
+
+### 节点自带日志
+
+`ctx.logger` 写的是桌面端的总日志，出了问题的人找不到它，找到了也被别的节点和插件混在一起。所以每个 `NodeRuntime` 还有一个 `NodeLog`（`src/host/node-log.js`）：最近 100 行，带 ISO 时间戳与级别，**写入时脱敏**（不是读取时——已经存下来的东西已经泄露了），路由是 `/fleet/api/nodes/<id>/log`，卡片上可展开、可复制。
+
+脱敏规则有顺序要求：`Bearer` 那条必须在 `key=value` 那条**之前**。反过来会让 `Authorization: Bearer abc.def` 被 `authorization` 规则吃掉前一半、把 token 本身留在行里 —— 实测就是这个结果，`offline/errors` 里有一条断言守着它。
+
 ### 开机自动连接：先取凭据，再判断
 
 `autoConnect` 曾经是这个形状：遍历记录 → `if (!runtime.credentialsReady()) continue` → `connect()`。看起来是"没有凭据就别白连一次"，实际上**每次开机都一个都连不上**：`runtime.secret` 只由 `put()` 和 `connect()` 填充，刚构造出来的 runtime 一律是"没有凭据"，于是这个 `continue` 把每个节点都跳过了。实测症状：重启后设置页全显示「未连接」、侧栏里一个远程工作区都没有 —— 和「插件坏了」完全无法区分；而手动点「连接」就能连上，那正是 autoConnect 要省掉的动作。
@@ -628,34 +655,55 @@ Windows 是空操作，`--owner/--group` 改了也没用。所以 `installScript
 （否则会真的建一个叫 `~` 的目录）；下载器 `curl`/`wget` 二选一；校验和在下载时失败而不是首次
 使用时失败；解压到 `runtime.incoming` 后整体 rename，失败回滚到 `runtime.previous`。
 
-**加速站必须是列表，不能是一个；而且不许回退直连。** 候选 URL 只有一条路：`DEFAULT_MIRRORS`
-里的加速站依次试。原来只有一个默认加速站 `git.yylx.win`，它一旦挂掉（实测：节点上 443 端口直接
+**发到哪：CNB 主源，GitHub 加速站灾备。** 加速站只能**前缀**一个 GitHub URL，表达不了 CNB 的
+路径形状（`https://cnb.cool/<org>/<repo>/-/releases/download/<tag>/<file>`），所以 `artefactUrls()`
+的参数从「前缀数组」变成「源对象数组」：`{kind:'template', template}` 填
+`{version}/{platform}/{tag}/{file}`，`{kind:'prefix', prefix}` 仍做拼接。`DEFAULT_SOURCES`
+是 CNB 在前、四个加速站在后；`mirrors: string[]` 保留（只换加速站），`mirrors: []` 仍是
+「关掉制品路线」的写法。
+
+**抖动才是问题，不是平均速度。** 参考节点拉整档 170 092 405 字节：CNB 4 311 729 B/s，
+重复测量抖动 <1%；同一时段 `gh.inkchills.cn` 178 047 B/s，四个加速站的历史区间是
+0.2–9.6 MB/s —— **40 倍**。同样的节点、同样的归档，有时 34 s 有时一小时，读起来就是「连接卡住了」。
+
+发布侧有四个实测撞过的坑，全在 `scripts/publish-runtime.mjs --cnb` 里：
+`target_commitish` 必填且必须解析成提交对象（空仓库要先 push 一次 `main`）；重复建同名
+release 返回 **409** 且响应体没有 id（要按 tag 再查）；**`PUT` 到预签名地址返回 200 不等于
+附件已关联**，必须再 `POST` 一次返回里的 `verify_url`，否则 assets 一直为空、匿名下载 404；
+`ttl` 最大 180 天、`0` 是永久。`version-unit` 断言了「第一条是 CNB 且形状
+正确」「其余是加速站前缀」「没有任何一条以 `https://github.com/` 开头」「模板占位符全部代入」
+「未知 kind 报错而不是被跳过」。
+
+**加速站必须是列表，不能是一个；而且不许回退直连。** 候选 URL 只有一条路：源列表里的条目
+依次试。原来只有一个默认加速站 `git.yylx.win`，它一旦挂掉（实测：节点上 443 端口直接
 connection refused），每次安装都静默落到直连 —— 直连实测 ~27 KB/s，172 683 323 字节要 **1.8 小时**，
 对用户就是「连节点卡住了」。
 
 **所以「直连 GitHub」从候选里删掉了，不是压到最后。** 这条是用户明确要求、也有实测支撑的取舍：
 能在加速站层面失败的机器，恰恰也是直连又慢又被挡的机器，直连是**唯一必然更糟**的兜底 —— 它把
-「加速站挂了」这个可判断的故障，变成 1.8 小时的静默等待。现在全部加速站失败时**由 npm 路线接手**
+「加速站挂了」这个可判断的故障，变成 1.8 小时的静默等待。现在所有源都失败时**由 npm 路线接手**
 （见上表），而不是直连，也不是报死。`artefact: only` 时才抛错，逐条列出试过的 URL + 节点原文，
-由人换一个可用加速站。
+由人换一个可用源。
 
 顺序只在「所有站都活着」时有意义：连不上的站一次 connection refused 是毫秒级代价，所以项目
-既定的首选加速站 `git.yylx.win`（AGENTS.md §13）仍然排第一 —— 它今天在测试节点上 443 拒绝连接，
-但恢复后就是最快的那条路。以下是这张**实测过的**列表（从测试节点拉完整归档，不是 HEAD）：
+既定的首选加速站 `git.yylx.win`（AGENTS.md §13）仍然排在**加速站里的第一位** —— 它今天在测试
+节点上 443 拒绝连接，但恢复后就是最快的加速路径。以下是这张**实测过的**列表（从测试节点拉
+完整归档，不是 HEAD）：
 
-| 加速站 | 完整 172 683 323 字节耗时 | 吞吐 |
-|---|---|---|
-| `git.yylx.win`（首选） | 今天 connection refused | — |
-| `gh.inkchills.cn` | 70.8 s | ~2.4 MB/s |
-| `tvv.tw` | — | ~2.3 MB/s |
-| `ghfast.top` | — | ~0.7 MB/s |
-| 直连 GitHub（**已不是候选**） | 1.8 小时 | ~27 KB/s |
+| 源 | 完整 170 092 405 字节耗时 | 吞吐 | 抖动 |
+|---|---|---|---|
+| CNB（`cnb.cool`，公开仓库，匿名 302 → `asset.cnb.cool`，Range/206） | ~40 s | 4 311 729 B/s | <1% |
+| `git.yylx.win`（加速站首选） | 今天 connection refused | — | — |
+| `gh.inkchills.cn` | 70.8 s | 178 047 B/s – 2.4 MB/s | 大 |
+| `tvv.tw` | — | ~2.3 MB/s | 大 |
+| `ghfast.top` | — | ~0.7 MB/s | 大 |
+| 直连 GitHub（**已不是候选**） | 1.8 小时 | ~27 KB/s | — |
 
 `github.akams.cn` 是这些替代站的**汇总目录，不是代理**：`https://github.akams.cn/https://github.com/…`
 回 404，可用的是它目录里的那些域名（换站去那里找）。
-`artefactUrls()` 因此接受 `mirrors: string[]`，空列表抛 `no accelerator configured` ——
+`artefactUrls()` 因此接受 `sources` 与 `mirrors`，两者都为空时抛 `no artefact source configured` ——
 `install()` 捕获它并当成「制品路线关掉了」落到 npm。
-`version-unit` 断言了「每个加速站各一条」「顺序不变」「**没有任何一条以 `https://github.com/` 开头**」
+`version-unit` 断言了「每个源各一条」「顺序不变」「**没有任何一条以 `https://github.com/` 开头**」
 「空项不算候选」「重复项去重」「空列表报命名错误」，并用桩连接跑 `RemoteHost.install` 证明
 下载失败会落到 npm、而坏制品不会。
 
@@ -787,6 +835,17 @@ DSH 一起带来。这条不是可选的兼容开关 —— 去掉它，任何�
 设备页里，选了节点就多出一行「这台设备上已有项目？添加到侧栏 ›」，点开列出**那台机器上已有的
 工作区**（按 `fleet_<nodeId>_` 前缀筛合并后的 baseline），点一条直接交接路径 —— 已存在的目录不必
 再浏览一遍去找。这是 zcode 表单里那一行的等价物。
+
+**每台设备记住上次用的目录。** 入口页在盘符/根之上多一行「上次使用 · `<path>`」，点一条直接带着
+它回到表单。理由很直白：项目基本都在一个地方，「加一个工作区」几乎总是「把同一个文件夹再加一次」，
+而每次都要走两级目录才回到原处是这个过程唯一慢的地方。按**设备**记，因为路径不能跨机器复用 ——
+`/root/project` 在桌面端什么都不是。存在 `localStorage` 而不是节点记录里：它是一个只在这个浏览器
+profile 里有意义的小便利，写进注册表会让每条节点记录都带一个只有 UI 读的字段；`localStorage` 在
+某些隐私窗口里会抛，所以读写都包了 try —— 记不住路径的目录选择器仍然要能打开。
+
+**设备列表按最近连接排，超过两个才给搜索框。** 想要的顺序不是字母序：常用的是刚连上的那台。
+`lastConnectedAt` 由注册表在每次成功连接时写，所以这个排序不需要额外状态，也能跨重启。搜索框只在
+两个以上才出现 —— 一个只有两台机器时还占一行的输入框，花掉的注意力比省下的多。
 
 ### 视觉口径：用壳的 token，不自己造型
 

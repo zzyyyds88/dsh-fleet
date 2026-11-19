@@ -253,20 +253,34 @@ CNB 那种自有路径布局的源），只换加速站改 `DEFAULT_MIRRORS`。`
 ### 安装
 
 ```bash
-# 1. 从 npm 装（推荐）
-dsh plugin --profile desktop add -w @greatbaby/dsh-fleet
+# 1. 一条 URL（推荐，不需要 npm 账号，也不需要先下载）
+dsh plugin --profile desktop add -w https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v<版本>/greatbaby-dsh-fleet-<版本>.tgz
 
-# 2. 或从打包好的 tarball 装（离线环境）
-npm pack --pack-destination dist        # 在 packages/dsh-fleet 下执行
-dsh plugin --profile desktop add -w ./dist/greatbaby-dsh-fleet-<version>.tgz
+# 2. 从 npm 装（0.5.1 及更早发过的版本仍然可用）
+dsh plugin --profile desktop add -w @greatbaby/dsh-fleet
 
 # 3. 或从源码目录装（开发时用，pnpm 会记成 link:）
 dsh plugin --profile desktop add -w <本仓库的绝对路径>/packages/dsh-fleet
 ```
 
-三种形态都由 DSH 自己的安装器支持；安装后 profile 的 `dsh.profile.bundles` 里必须把
-本插件排在 `@deepseek-ai/dsh-base` 之后（桌面端还要排在 `dsh-web-app` 之后）。
-`engines.dsh` 钉住了运行时范围，DSH 版本不匹配时安装会被直接拒绝，而不是只组合一半。
+第 1 种就是 DSH 安装器的原生形态：`install-spec.js` 里对 `https://…/*.tgz` 有明确分支
+（`URL must point at a git repository or a tarball`），所以 tarball 放哪都行 —— 这里放 CNB 的
+Release，因为它是公开仓库、匿名可下、而且不依赖 npm 上还留着哪个版本。
+
+**让 agent 装。** 桌面端会话里有 `plugin_manager` 工具，`install_bundle` 接受同一个 tarball URL，
+所以可以对 agent 说「装远程节点插件」，它自己完成安装：
+
+```
+plugin_manager(action='install_bundle',
+  target='https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v<版本>/greatbaby-dsh-fleet-<版本>.tgz')
+```
+
+这条路**只能在桌面端会话里走**：中转插件的 `HARNESS_REMOTE_ALLOWLIST` 里有
+`pluginManager/updateBundle`，没有 install —— 手机端装不了插件，它负责的是装好之后连节点。
+
+安装后 profile 的 `dsh.profile.bundles` 里必须把本插件排在 `@deepseek-ai/dsh-base` 之后
+（桌面端还要排在 `dsh-web-app` 之后）。`engines.dsh` 钉住了运行时范围，DSH 版本不匹配时安装会
+被直接拒绝，而不是只组合一半。
 
 **从 0.5.0 之前的版本升级**：包名变了（`@local/dsh-fleet` → `@greatbaby/dsh-fleet`），
 旧名已无法安装也不会再更新。先 `dsh plugin --profile <p> remove @local/dsh-fleet`，
@@ -281,11 +295,15 @@ dsh plugin --profile desktop add -w <本仓库的绝对路径>/packages/dsh-flee
 
 节点要求：Node ≥ 22，以及 `curl`（或 `wget`）与 `npm` **至少有一个**。别的都由插件准备。
 
-节点上的 DSH 有两条来路，按顺序试：先下 Release 制品（一次 165 MiB 下载，可离线复用），
+节点上的 DSH 有两条来路，按顺序试：先下 Release 制品（一次 ~162 MiB 下载，可离线复用），
 拿不到就让节点自己 `npm install` 同版本（实测 26–33 s / 673 包）。所以上游发新版、制品还没打
 时不会卡住，最坏是一次慢一点的连接。两条路都会把版本戳写进树里，下次连接认得出来；
 **制品字节坏了**（校验和不符、归档里没有 CLI）仍然报错并回滚，不会从 registry 再下一次。
 配置 `runtime: 'artefact'` 或 `'npm'` 可强制单条路线，排查时用。
+
+制品的源按顺序试：**CNB 在前**（公开仓库，匿名可下，实测 4.3 MB/s、重复测量抖动 <1%），
+四个 GitHub 加速站在后做灾备（历史区间 0.2–9.6 MB/s，抖动 40 倍）。加源或换源改
+`DEFAULT_SOURCES`；只换加速站改 `DEFAULT_MIRRORS`；`mirrors: []` 是「关掉制品路线」的写法。
 
 ### 在手机上用
 
@@ -339,6 +357,7 @@ node packages/dsh-fleet/test/run-all.mjs --layer e2e
 | [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md) | DSH / 中转 / DSH Go 三条升级链各自要重跑什么 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么、谁受影响 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 怎么跑测试、怎么自己构建节点运行时、改代码时的硬约束 |
+| [`SECURITY.md`](SECURITY.md) | 威胁模型、主机密钥、凭据与日志的处置、发布链，以及明确不做的四件事 |
 | [`AGENTS.md`](AGENTS.md) | 本仓库的协作规则与硬约束 |
 
 ## 七、许可

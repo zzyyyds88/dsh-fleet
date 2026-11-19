@@ -4,6 +4,7 @@ packages/*/node_modules/
 
 # 本地构建产物（如有）
 packages/*/dist/
+dist/
 packages/*/lib/*.map
 
 # 上游参考源码：各自是独立 git 仓库，克隆在本地即可
