@@ -8,8 +8,10 @@
  *
  *   1. `directoryPicker/list` answers — on a desktop the composed backend is `native`,
  *      whose capability has no `list`, so an inherited method would refuse here;
- *   2. `/@fleet` lists the nodes and `/@fleet/<id>/…` lists that machine's real folders,
- *      each entry spelled back with the namespace so the phone can ask again;
+ *   2. a browser that names **no path** lands on the device layer (this machine + every
+ *      connected node), which is the only level the phone can reach without already
+ *      knowing a namespace path; `/@fleet` is that same level, and `/@fleet/<id>/…`
+ *      lists a machine's real folders, each entry spelled back with the namespace;
  *   3. `workspace/create` with such a path puts the workspace **on the node**, and the
  *      empty directory chain the relay created on this desktop before dispatching is gone
  *      afterwards — no `<drive>:\@fleet` left behind.
@@ -17,7 +19,8 @@
  * Usage: node test/picker-flow.mjs <hostBase> <launchToken>
  */
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { homedir } from 'node:os'
+import { isAbsolute, join, resolve } from 'node:path'
 import { authenticate, call as rawCall } from './carrier.mjs'
 import { nodeExec } from './node.mjs'
 import { PICKER_PREFIX, decodePickerPath, localShadowOf, pruneShadow } from '../src/host/picker-paths.js'
@@ -68,25 +71,79 @@ if (remote.state !== 'connected') {
   }
 }
 
-// ---- 1. the namespace itself ----------------------------------------------
+// ---- 1. the device layer: where a phone that names no path lands -----------
 
+// The phone opens its folder browser with no path at all, so this call is the one screen
+// a user actually sees first. It has to be the machine list: a home directory here is a
+// level with no way out, because the only row the browser can follow is one it renders.
+const home = await call('directoryPicker/list', {})
+check(typeof home?.path === 'string' && Array.isArray(home?.crumbs),
+  'a listing with no path still answers a full level', JSON.stringify(home).slice(0, 100))
+check(home?.path === PICKER_PREFIX, 'and that level is the device layer, not this machine\'s home',
+  String(home?.path))
+check(home?.home === PICKER_PREFIX,
+  'so the browser\'s home action comes back here, not to a directory', String(home?.home))
+check(Array.isArray(home?.crumbs) && home.crumbs.length === 1 && home.crumbs[0]?.path === PICKER_PREFIX,
+  'one crumb, so the phone cannot walk above the machine list', JSON.stringify(home?.crumbs))
+const deviceRows = Array.isArray(home?.entries) ? home.entries : []
+// The row is identified by its **path**, not its name: the Host half has no locale, so the
+// name is whatever this machine calls itself (`localMachineName()` — its hostname). Pinning
+// a name here would make the suite fail on a machine with a different hostname, which says
+// nothing about whether the level works.
+const thisDevice = deviceRows[0]
+check(thisDevice !== undefined, 'this machine is a row, not a header the browser cannot tap',
+  deviceRows.map(row => row.name).join(','))
+check(typeof thisDevice?.path === 'string' && isAbsolute(thisDevice.path),
+  'and its path is an absolute local path, so opening it is the same call as opening a node',
+  String(thisDevice?.path))
+check(resolve(thisDevice.path) === resolve(homedir()),
+  'that path is this machine\'s home, which is what an empty path used to mean',
+  `${String(thisDevice?.path)} vs ${homedir()}`)
+check(typeof thisDevice?.name === 'string' && thisDevice.name.length > 0,
+  'the row carries a name the phone can render', String(thisDevice?.name))
+check(deviceRows.some(row => row.path === `${PICKER_PREFIX}/${remote.id}`),
+  `the connected node is a row too: ${PICKER_PREFIX}/<id>`, deviceRows.map(row => row.path).join(','))
+check(deviceRows.every(row => row.path === thisDevice?.path || decodePickerPath(row.path) !== undefined),
+  'every row is a path this Host can decode or list again',
+  deviceRows.map(row => `${row.name}=${row.path}`).join(' | ').slice(0, 200))
+const nodeRows = deviceRows.filter(row => decodePickerPath(row.path) !== undefined)
+check(nodeRows.every((row, index) => index === 0 || nodeRows[index - 1].name.localeCompare(row.name) <= 0),
+  'the nodes keep the order the node list gives them', nodeRows.map(row => row.name).join(','))
+
+// The same level is reachable by naming it, which is how a crumb comes back to it.
 const top = await call('directoryPicker/list', { path: PICKER_PREFIX })
 check(typeof top?.path === 'string', 'directoryPicker/list answers for the namespace', JSON.stringify(top).slice(0, 120))
 check(top?.path === PICKER_PREFIX, 'and reports the namespace as its own path', String(top?.path))
 check(top?.home === PICKER_PREFIX,
   'the browser roots its breadcrumbs here, not at this machine\'s home', String(top?.home))
-check(Array.isArray(top?.crumbs) && top.crumbs.length === 1 && top.crumbs[0]?.path === PICKER_PREFIX,
-  'one crumb, so the phone cannot walk above the namespace', JSON.stringify(top?.crumbs))
+check(top?.path === home?.path && top?.home === home?.home
+  && JSON.stringify(top?.crumbs) === JSON.stringify(home?.crumbs)
+  && top?.entries?.[0]?.path === thisDevice?.path,
+  'naming the namespace and naming nothing are the same screen',
+  JSON.stringify({ path: top?.path, home: top?.home, first: top?.entries?.[0]?.name }).slice(0, 120))
 const rows = Array.isArray(top?.entries) ? top.entries : []
 check(rows.some(row => row.path === `${PICKER_PREFIX}/${remote.id}`),
   `the node is listed as ${PICKER_PREFIX}/<id>`, rows.map(row => row.path).join(','))
 
-// An absent path still answers: the phone opens the browser with no path at all.
-const home = await call('directoryPicker/list', {})
-check(typeof home?.path === 'string' && Array.isArray(home?.crumbs),
-  'a listing with no path still answers a full level', JSON.stringify(home).slice(0, 100))
-check((home?.entries ?? []).every(row => row.path.startsWith(home.path) || decodePickerPath(row.path) !== undefined),
-  'and every local entry is an absolute local path', String(home?.path))
+// Following the "this machine" row is what makes the level useful: it has to be an
+// ordinary local listing, and it has to keep a crumb back to the machine list or the
+// browser is stuck on one machine forever.
+const local = await call('directoryPicker/list', { path: thisDevice?.path })
+check(typeof local?.path === 'string' && resolve(local.path) === resolve(thisDevice?.path),
+  'opening this machine lists its own directory', String(local?.path))
+check(local?.home === thisDevice?.path, 'and its home is still the local home, as "this machine" means',
+  String(local?.home))
+check(Array.isArray(local?.entries) && local.entries.length > 0, 'it has folders in it',
+  `${String((local?.entries ?? []).length)} row(s)`)
+check((local?.entries ?? []).every(row => isAbsolute(row.path) && decodePickerPath(row.path) === undefined),
+  'and its rows are plain absolute local paths, not namespace paths',
+  (local?.entries ?? []).slice(0, 3).map(row => row.path).join(' '))
+check((local?.crumbs ?? [])[0]?.path === PICKER_PREFIX,
+  'the crumb row starts at the device layer, so a node is still reachable from here',
+  JSON.stringify((local?.crumbs ?? []).map(crumb => crumb.path)))
+check((local?.crumbs ?? []).at(-1)?.path === local?.path,
+  'and the crumb row still reaches the directory being listed',
+  JSON.stringify((local?.crumbs ?? []).map(crumb => crumb.path)))
 
 // ---- 2. one node's own filesystem ------------------------------------------
 

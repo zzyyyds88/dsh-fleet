@@ -860,9 +860,15 @@ export class Fleet {
     const record = this.registry.get(nodeId)
     if (record === undefined) return
     if (record.hostKey === fingerprint) return
-    this.registry.put({ ...record, hostKey: fingerprint })
+    const written = this.registry.put({ ...record, hostKey: fingerprint })
     const runtime = this.runtimes.get(nodeId)
-    if (runtime !== undefined) runtime.connection.target.hostFingerprint = fingerprint
+    if (runtime !== undefined) {
+      // The runtime's own copy is what `describe()` reads, and it is only refreshed by
+      // `list()`/`get()`. Without this line the key is recorded but the settings page keeps
+      // showing the record from before the handshake until something else re-reads the list.
+      runtime.record = written
+      runtime.connection.target.hostFingerprint = fingerprint
+    }
     this.log(`[${record.name}] recorded SSH host key ${fingerprint}`)
   }
 

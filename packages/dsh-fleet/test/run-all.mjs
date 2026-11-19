@@ -136,6 +136,14 @@ const SUITES = [
     proves: 'version gate branches, artefact URLs, install script, per-node layout, switch semantics',
   },
   {
+    name: 'fleet-lifecycle',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'fleet-lifecycle-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 60_000,
+    proves: 'a dropped socket becomes idle with a timestamp, the reconnect ladder arms and a deliberate disconnect cancels it, the first host key is recorded and handed back, a failed connect keeps its phase, and an unreachable node keeps its workspace rows',
+  },
+  {
     name: 'errors',
     layer: 'offline',
     file: ['packages', 'dsh-fleet', 'test', 'errors-unit.mjs'],

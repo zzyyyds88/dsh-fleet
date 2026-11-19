@@ -13,8 +13,15 @@
  *
  * @module @greatbaby/dsh-fleet/host/decorators
  */
+import { homedir, hostname } from 'node:os'
 import { mergeControlStream } from './remote-control.js'
-import { ensureRemoteDirectory, listLocal, listRemote, makeLocalDirectory, makeRemoteDirectory } from './browse.js'
+import {
+  ensureRemoteDirectory,
+  listLocal,
+  listRemote,
+  makeLocalDirectory,
+  makeRemoteDirectory,
+} from './browse.js'
 import {
   PICKER_PREFIX,
   decodePickerPath,
@@ -908,22 +915,42 @@ export function decorateDirectoryPickerController(service, router) {
      * The shape is the upstream `DirectoryListing`: `path`, `home`, `crumbs`,
      * `entries`, `truncated`. `home` is where the browser's breadcrumb row starts, so a
      * node listing roots it at the namespace instead of the desktop's home.
+     *
+     * A caller that names no path gets the **device layer**, not this machine's home: a
+     * phone opens its folder browser with no path at all and can only tap a row, so
+     * "which machine" has to be a level it can reach. Every row on that level is a path
+     * this same method accepts back — an absolute local path for this machine, a
+     * `PICKER_PREFIX/<id>` path for a node — which is what keeps "open" a plain
+     * recursive call.
      */
     list: local => async function list(path, signal) {
       const target = decodePickerPath(path)
       if (target === undefined) {
+        // `undefined`, `''` and whitespace all mean "no path named yet". Any other
+        // non-path value can only mean the same thing, because the alternatives are this
+        // machine's tree (a string) or the namespace (decoded above).
+        if (typeof path !== 'string' || path.trim().length === 0) return deviceListing(router)
         // Not ours: the desktop's own tree, answered from the filesystem directly so the
         // result does not depend on which picker backend this composition resolved.
-        const listing = await listLocal(typeof path === 'string' ? path : undefined)
+        const listing = await listLocal(path)
         return {
           path: listing.path,
           home: listing.home,
-          crumbs: listing.crumbs,
+          // The device layer sits above every local tree. Without this crumb a caller
+          // that entered this machine could never reach a node again, because `home`
+          // here is the local home by definition (that is what "this machine" means).
+          crumbs: [
+            { name: PICKER_PREFIX, path: PICKER_PREFIX, hidden: false },
+            ...listing.crumbs,
+          ],
           entries: listing.entries.map(entry => ({ name: entry.name, path: entry.path, hidden: false })),
           truncated: listing.truncated,
         }
       }
-      if (target.kind === 'nodes') return { ...nodeListing(router), home: PICKER_PREFIX }
+      // The namespace itself and an absent path are the same screen: the phone's
+      // breadcrumb can only come back here by naming it, and a level it cannot reach is
+      // a dead end for the one row ("this machine") that is not a node.
+      if (target.kind === 'nodes') return deviceListing(router)
       const runtime = router.node(target.nodeId)
       const listing = await listRemote(runtime.connection, target.remotePath)
       const prefix = encodePickerPath(target.nodeId, '/')
@@ -979,5 +1006,66 @@ function nodeListing(router) {
     crumbs: [{ name: PICKER_PREFIX, path: PICKER_PREFIX, hidden: false }],
     entries,
     truncated: false,
+  }
+}
+
+/**
+ * The level a browser opens on when it has named no path: this machine, then every
+ * connected node.
+ *
+ * It exists because a caller can only tap a row. The phone's folder browser opens with
+ * no path at all, and the answer to "no path" used to be this machine's home — a level
+ * nothing above which is a machine, so a node was unreachable from the screen no matter
+ * how well its path decoded. Making "which machine" the first level is what turns
+ * `PICKER_PREFIX` from a path somebody has to know into a screen somebody can reach.
+ *
+ * This machine is a row rather than a header for the same reason the nodes are: `entries`
+ * is the only part of a listing a browser renders. Its path is an ordinary absolute local
+ * path, which `list` already answers — so opening it is the same recursive call as
+ * opening a node, and the caller needs no second kind of "open".
+ *
+ * **The row's name is the machine's own hostname, not "此设备".** The Host half has no
+ * locale: it cannot know whether the phone that will render this list speaks Chinese, and
+ * a name is the one part of a listing that is not a path, so getting it wrong is the only
+ * mistake here that cannot be fixed by asking again. A hostname is also more useful on a
+ * screen that is choosing between several machines — "this device" only says which one is
+ * nearest, not which one it is.
+ *
+ * @param {import('./router.js').Router} router
+ * @returns {{ path: string, home: string, crumbs: Array<{name: string, path: string, hidden: false}>, entries: Array<{name: string, path: string, hidden: false}>, truncated: false }}
+ */
+function deviceListing(router) {
+  const nodes = nodeListing(router)
+  return {
+    path: PICKER_PREFIX,
+    home: PICKER_PREFIX,
+    // One crumb, at the namespace: no caller can walk above the machine list, and the
+    // browser's "home" action lands here rather than on this machine's home directory.
+    crumbs: nodes.crumbs,
+    entries: [
+      // The same directory an empty path means (see `normalizeLocal`), spelled out: a
+      // row has to carry the path a caller sends back, not "the default".
+      { name: localMachineName(), path: homedir(), hidden: false },
+      ...nodes.entries,
+    ],
+    truncated: false,
+  }
+}
+
+/**
+ * How this machine is named on the device layer.
+ *
+ * The hostname, because it is the only name this Host already has and it is the same word
+ * the machine answers to everywhere else. A failure to read it is not worth a failed
+ * listing: the row still has to exist, and `localhost` is what an unnamed machine is.
+ *
+ * @returns {string}
+ */
+function localMachineName() {
+  try {
+    const name = hostname()
+    return name.length > 0 ? name : 'localhost'
+  } catch {
+    return 'localhost'
   }
 }
