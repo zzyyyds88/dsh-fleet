@@ -152,6 +152,14 @@ const SUITES = [
     proves: 'the manifest a bundle is installed from is self-consistent: every patch file exists, files covers every runtime artefact, the detail page is real',
   },
   {
+    name: 'autoconnect',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'autoconnect-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 60_000,
+    proves: 'a restarted Host connects its nodes without a click: autoConnect adopts the stored credential first, and still skips nodes that have none',
+  },
+  {
     name: 'fleet-control',
     layer: 'offline',
     file: ['packages', 'dsh-fleet', 'test', 'fleet-control-unit.mjs'],

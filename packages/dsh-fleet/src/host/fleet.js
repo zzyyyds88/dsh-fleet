@@ -421,14 +421,34 @@ export class Fleet {
 
   /**
    * Connect every enabled node at startup without blocking the Host.
+   *
+   * **The secret has to be adopted here, not only in `connect()`.** `credentialsReady()`
+   * reads `runtime.secret`, which is filled by `put()` and by `connect()` — so on a Host
+   * that just started, every runtime still reads "no credential" and this loop skipped
+   * every node. Measured: after a restart the settings page showed all nodes `未连接`
+   * and no remote workspace ever appeared, which is indistinguishable from "the plugin
+   * is not working". A person's fix was to click 连接 by hand, which is exactly the
+   * manual step autoConnect exists to remove.
+   *
+   * The read is per node and non-fatal: a node whose credential cannot be read is
+   * reported by `connect()` itself (it adopts again and throws the named error), so a
+   * broken store must not take the whole loop down.
    */
   autoConnect(delayMs = 2_000) {
     return setTimeout(() => {
-      for (const runtime of this.list()) {
-        if (!runtime.record.enabled) continue
-        if (!runtime.credentialsReady()) continue
-        void this.connect(runtime).catch(() => undefined)
-      }
+      void (async () => {
+        for (const runtime of this.list()) {
+          if (!runtime.record.enabled) continue
+          try {
+            await this.#adoptSecret(runtime)
+          } catch (error) {
+            this.log(`[${runtime.record.name}] could not read its stored credential: ${error instanceof Error ? error.message : String(error)}`)
+            continue
+          }
+          if (!runtime.credentialsReady()) continue
+          void this.connect(runtime).catch(() => undefined)
+        }
+      })()
     }, delayMs)
   }
 
