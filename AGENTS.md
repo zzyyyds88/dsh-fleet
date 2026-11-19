@@ -143,7 +143,8 @@ verification: "`node packages/dsh-fleet/test/routing-unit.mjs && node packages/d
 - 生成物链：`sync-from-upstream.mjs` → `cordis.patch.yml` + `presets/` → `embed-into-fleet.mjs` → `dsh-fleet/src/host/brain-bundle.generated.js`。改组合只能改脚本或 `src/runtime.js`。
 - 节点上的 DSH 是**独立安装**（版本与桌面完全相等），有自己的 `~/.dsh`。它没有 provider、没有 API key，所以 provisioning 是连接流程的一部分，不是可选优化。
 - 节点运行时有**两条有序路线**（`RUNTIME_ROUTES = ['artefact', 'npm']`）：先下 Release 制品，制品**拿不到**才让节点自己 `npm install`。判据是「拿不到 ≠ 拿到了是坏的」：校验和/解包失败仍要回滚后抛错，不许从 registry 再下一次。两条路必须写同一枚构建戳（`stampJson`），否则 `inspectRuntime` 判无戳 → 每次连接重装。见 `docs/adr-0006-node-runtime-supply.zh.md`。
-- 上游 `@deepseek-ai/dsh` 声明 `engines.node: ">=24.9.0"`，本项目 `MINIMUM_NODE_MAJOR = 22`。**这条闸门报而不拦**（`--engine-strict=false` + `engineWarning`）：制品路线从来没读过这个字段，不能因为换成 npm 就变成硬停。要改 `MINIMUM_NODE_MAJOR` 先确认现场机器的 Node 版本。
+- 上游 `@deepseek-ai/dsh` 声明 `engines.node: ">=24.9.0"`，本项目 `MINIMUM_NODE_MAJOR = 22`。**这条闸门报而不拦**（`--engine-strict=false` + `engineWarning`）：制品路线从来没读过这个字段，不能因为换成 npm 就变成硬停。**2026-11-19 已核实：保持 22，不升 24。** 依据（305 个依赖包里真正的 Node 24 API 是 0 处、唯一的 `await using` 命中是 acorn 里的字符串字面量、`workflow-ptc` 在节点组合里 `disabled: true`）写在 `docs/adr-0006-node-runtime-supply.zh.md` §四-2。什么时候该重开：依赖闭包里出现真正的 Node 24 语法或 API，或上游开始用 `engines` 之外的机制强制版本。
+- **制品的源是对象数组，不是前缀数组**（`DEFAULT_SOURCES`）：`{kind:'template', template}` 填 `{version}/{platform}/{tag}/{file}`（CNB 那种自有路径布局），`{kind:'prefix', prefix}` 才做 GitHub URL 的前缀拼接。CNB 排第一（实测 4.3 MB/s、抖动 <1%），四个加速站是灾备（0.2–9.6 MB/s，抖动 40 倍）。`mirrors: []` 仍是「关掉制品路线」。**发布侧有个坑：CNB 的 `PUT` 返回 200 不等于附件已关联，必须再 `POST` 一次 `verify_url`。**
 
 ### toolchain/node-esm
 
