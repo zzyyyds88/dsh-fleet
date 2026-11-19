@@ -991,8 +991,14 @@ cat ${this.layout.log}
   /** Stop the resident host if this plugin started one. */
   async stop() {
     const existing = await this.status()
+    // The fallback pattern is bracketed on purpose: `pkill -f` matches **any** command line
+    // containing the pattern, and the `sh -c` that runs this very command carries it in its own
+    // argv. Measured on the reference node — plain pattern → the shell killed itself and the
+    // channel died with no exit status (`{"out":"","code":null}`), bracketed pattern → it
+    // survived and reported (`{"out":"SURVIVED","code":0}`). A `[.]` is one character in the
+    // regex, so it still matches `bin.js` in the resident host's own argv.
     const script = existing === undefined
-      ? `pkill -f 'dsh-fleet/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js' 2>/dev/null || true; rm -f ${this.layout.status}`
+      ? `pkill -f 'dsh-fleet/runtime/node_modules/@deepseek-ai/dsh/lib/bin[.]js' 2>/dev/null || true; rm -f ${this.layout.status}`
       : `
 kill ${String(existing.pid)} 2>/dev/null || true
 i=0
