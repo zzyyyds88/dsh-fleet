@@ -661,9 +661,23 @@ export function apply(ctx, config = {}) {
   })
 
   // ---- Boot and teardown ----------------------------------------------------
+  // One subscription drives every merged picture that is *not* a per-call read:
+  // the forwarded events, the per-Session control blocks, and the workspace
+  // registry. The workspace half belongs here for the same reason the other two
+  // do — a page that attached before the node connected never reads the merged
+  // baseline again, so without this its sidebar keeps the pre-connect picture
+  // until someone reloads. Measured: a node that finished connecting four
+  // seconds after the page painted showed no workspaces at all; reloading the
+  // same page showed every one of them.
+  //
+  // `sync()` is idempotent and publishes only when the node set or a node's row
+  // count actually changed, so a noisy lifecycle event costs nothing.
   disposers.push(fleet.subscribe(() => {
     remoteEvents.sync()
     control.sync()
+    void workspaces.sync().catch(error => {
+      log(`fleet: refreshing merged workspaces failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
   }))
   disposers.push(ctx.effect(() => () => {
     remoteEvents.dispose()

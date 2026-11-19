@@ -176,15 +176,23 @@ export class RemoteWorkspaces {
    *
    * Called before any merged read so a node that connected since the last call
    * has its baseline available; a node that left has its rows dropped.
+   *
+   * A change here is **published**, and that is not a nicety: a subscriber that
+   * attached before the node connected (`workspace/follow` opens its stream once)
+   * otherwise keeps the picture it was handed, and its remote rows only appear
+   * after a page reload. Measured: a node connected four seconds after the page
+   * painted showed no workspaces in the sidebar, and reloading the same page
+   * showed all of them. `mergeWorkspaceStream` turns this frame into a full
+   * merged picture, so this publishes the remote half only.
    */
   async sync() {
     if (this.disposed) return
+    const before = this.#signature()
     const live = new Set(this.fleet.routable().map(runtime => runtime.record.id))
     for (const [nodeId, node] of [...this.nodes]) {
       if (live.has(nodeId)) continue
       node.close()
       this.nodes.delete(nodeId)
-      this.#publish({ type: 'replace', value: this.baseline() })
     }
     const opened = []
     for (const runtime of this.fleet.routable()) {
@@ -199,6 +207,27 @@ export class RemoteWorkspaces {
       opened.push(node.open().then(() => node.ready()).catch(() => undefined))
     }
     await Promise.all(opened)
+    // Once, after the awaits: a `replace` published mid-loop would race the
+    // baseline it is meant to describe.
+    if (this.#signature() !== before) this.#publish({ type: 'replace', value: this.baseline() })
+  }
+
+  /**
+   * What the merged picture is made of right now.
+   *
+   * Node identity plus each node's row count is enough to tell "nothing changed"
+   * from "a node arrived, left, or filled in its baseline", which is the only
+   * distinction `sync()` needs. Comparing rows themselves would republish on
+   * every ordered field change, and `sync()` runs on every merged read.
+   *
+   * @returns {string}
+   */
+  #signature() {
+    const parts = []
+    for (const [nodeId, node] of this.nodes) {
+      parts.push(`${nodeId}:${node.baseline === null ? '-' : String(node.baseline.items.length)}`)
+    }
+    return parts.join('|')
   }
 
   /** Every local workspace id this module currently knows about. */

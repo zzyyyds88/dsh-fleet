@@ -295,6 +295,18 @@ export function decorateWorkspaceController(service, router, workspaces) {
  * rows; if the local stream ends first (the Host is shutting down) the merged
  * stream ends with it.
  *
+ * The trap is `replace`, and it is the same one `mergeControlStream` documents:
+ * a client reads **any** baseline-shaped frame as "this is now the whole
+ * picture". `RemoteWorkspaces` publishes `replace` when its node set changes, so
+ * forwarding that frame unchanged would hand the client a picture holding only
+ * the remote rows — every local workspace would vanish from the sidebar the
+ * moment a node connected. Measured: connecting a node to an open page left the
+ * sidebar with no local rows at all until a reload.
+ *
+ * So exactly one baseline-shaped frame leaves this function per change: the
+ * local picture last seen, re-expanded with the current remote rows. The remote
+ * half's own picture is folded in through `mergeBaseline`, never forwarded.
+ *
  * @param {AsyncIterable<unknown>} local
  * @param {import('./remote-workspaces.js').RemoteWorkspaces} workspaces
  * @param {AbortSignal | undefined} signal
@@ -306,31 +318,93 @@ function mergeWorkspaceStream(local, workspaces, signal) {
       const queue = new AsyncQueue()
       let opened = false
       let stopped = false
+      /** The local half's last picture, kept so a remote change can re-merge. */
+      let localBaseline
       const first = () => {
-        const merged = workspaces.mergeBaseline(undefined)
         opened = true
-        return { type: 'baseline', value: merged }
+        return { type: 'baseline', value: workspaces.mergeBaseline(localBaseline) }
+      }
+      /**
+       * A remote change, re-expanded over the local picture.
+       *
+       * Before the local baseline this is deliberately **not** forwarded: the
+       * client's snapshot stream refuses a `replace` as its opening frame, and a
+       * remote-only picture would flash empty rows for the local side. The
+       * pending change is picked up by the opening baseline instead, which reads
+       * the merged picture at that moment.
+       */
+      const remerge = () => {
+        if (!opened) return
+        queue.push({ type: 'replace', value: workspaces.mergeBaseline(localBaseline) })
       }
       const unsubscribe = workspaces.subscribe(frame => {
         if (stopped) return
-        if (!opened) queue.push(first())
+        if (Reflect.get(frame ?? {}, 'type') === 'replace') {
+          remerge()
+          return
+        }
+        if (!opened) return
         queue.push(frame)
       })
       const onAbort = () => { stopped = true }
       signal?.addEventListener('abort', onAbort, { once: true })
+
+      /** Fold one local frame into `localBaseline` so a later re-merge keeps it. */
+      const adoptLocal = frame => {
+        const type = Reflect.get(frame ?? {}, 'type')
+        if (type === 'baseline' || type === 'replace') {
+          const value = Reflect.get(frame, 'value')
+          localBaseline = value !== null && typeof value === 'object' ? value : undefined
+          return
+        }
+        if (localBaseline === undefined) return
+        if (type === 'upsert') {
+          const workspace = Reflect.get(frame, 'workspace')
+          const id = Reflect.get(workspace ?? {}, 'workspaceId')
+          if (typeof id !== 'string') return
+          const items = Array.isArray(localBaseline.items) ? [...localBaseline.items] : []
+          const index = items.findIndex(item => Reflect.get(item ?? {}, 'workspaceId') === id)
+          if (index === -1) items.push(workspace)
+          else items[index] = workspace
+          localBaseline = { ...localBaseline, items }
+          return
+        }
+        if (type === 'remove') {
+          const id = Reflect.get(frame, 'workspaceId')
+          const items = Array.isArray(localBaseline.items) ? localBaseline.items : []
+          localBaseline = {
+            ...localBaseline,
+            items: items.filter(item => Reflect.get(item ?? {}, 'workspaceId') !== id),
+          }
+          return
+        }
+        if (type === 'archived') {
+          localBaseline = { ...localBaseline, archivedSessionIds: Reflect.get(frame, 'archivedSessionIds') }
+          return
+        }
+        if (type === 'pinned') {
+          localBaseline = { ...localBaseline, pinnedSessionIds: Reflect.get(frame, 'pinnedSessionIds') }
+        }
+      }
 
       const pump = async () => {
         try {
           await workspaces.sync()
           for await (const frame of local) {
             if (stopped) return
-            if (!opened && Reflect.get(frame ?? {}, 'type') === 'baseline') {
+            const type = Reflect.get(frame ?? {}, 'type')
+            adoptLocal(frame)
+            if (type === 'baseline' || type === 'replace') {
               opened = true
-              queue.push({ type: 'baseline', value: workspaces.mergeBaseline(Reflect.get(frame, 'value')) })
-            } else {
-              if (!opened) queue.push(first())
-              queue.push(frame)
+              queue.push({ type: 'baseline', value: workspaces.mergeBaseline(localBaseline) })
+              continue
             }
+            if (!opened) {
+              // A remote change may have arrived before this baseline; it was
+              // folded into `workspaces`, so the opening frame already has it.
+              queue.push(first())
+            }
+            queue.push(frame)
           }
         } catch (error) {
           queue.fail(error)
