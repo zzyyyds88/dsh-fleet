@@ -123,8 +123,22 @@ const ctx = {
     },
   },
 }
+// The browser half also resolves the shell's own control set through the module table.
+// `StateDot` and the icon components are all this test needs from it: the real module is
+// in the shell bundle, so a stub that renders a placeholder element is enough to prove
+// the plugin asks for the right names.
+const primitives = {
+  StateDot: () => null,
+  Button: () => null,
+}
+for (const name of [
+  'IconChevronLeftOutlineRegular', 'IconChevronRightOutlineRegular',
+  'IconChevronsUpDownOutlineRegular', 'IconFolderCloseRegular', 'IconPlusOutlineRegular',
+]) primitives[name] = props => ({ type: 'svg', props: props ?? {}, children: [] })
+
 const mod = factory(specifier => {
   if (specifier === 'react') return React
+  if (specifier === '@deepseek-ai/dsh-client-ui-primitives') return primitives
   throw new Error(`unexpected require: ${specifier}`)
 })
 check(typeof mod?.apply === 'function', 'the module exports apply()')
@@ -200,14 +214,34 @@ function render(node, depth = 0) {
   for (const child of node.children ?? []) render(child, depth + 1)
 }
 
+// The directory-flow slots are dialogs: mounted with `open: false` they render nothing,
+// which would prove nothing. Opening them exercises the form page — the device control and
+// the source-folder card — and that is where a broken JSX shape or a missing caption
+// surfaces. Later pages are reached by state, and the stub `useState` never advances, so
+// the device list itself is covered by the source check further down instead.
 for (const call of calls) {
+  const props = FLOW_SLOTS.includes(call.name) ? { open: true } : {}
   try {
-    render(React.createElement(call.registered.component, {}))
-    check(true, `the ${call.name} component renders`)
+    render(React.createElement(call.registered.component, props))
+    check(true, `the ${call.name} component renders${FLOW_SLOTS.includes(call.name) ? ' while open' : ''}`)
   } catch (error) {
     check(false, `the ${call.name} component renders`, error.message)
   }
 }
+
+// ---- 5. the device step exists in the shipped text -----------------------
+// The folder flow has to ask "which machine" before "which folder", and the answer for this
+// machine is its drive letters while a node's answer is that node's root. Those are the two
+// states that cannot be covered by rendering above, so they are checked as shipped copy and
+// as the one request that feeds them.
+for (const [needle, label] of [
+  ["if (page === 'device')", 'the flow has a device page'],
+  ["if (page === 'roots')", 'the flow has a per-device entry-point page'],
+  ['T.chooseDevice', 'the device page is titled'],
+  ['T.drivesHere', 'this device is described by its drives'],
+  ['T.nodeRootHint', 'a node is described by its root'],
+  ['T.browseAnywhere', 'a device entry-point page can still browse freely'],
+]) check(source.includes(needle), label)
 
 if (failures.length > 0) {
   log(`FAILED: ${failures.join(', ')}`)

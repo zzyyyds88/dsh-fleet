@@ -167,7 +167,23 @@ const clientEntry = typeof exportsMap['./client'] === 'string' ? exportsMap['./c
 if (clientEntry !== undefined && existsSync(join(root, clientEntry))) {
   const client = readFileSync(join(root, clientEntry), 'utf8')
   ok(client.length > 0, 'the client entry is not empty')
-  ok(!client.includes("@deepseek-ai/"), 'the client half imports nothing from the product: it reaches the Host through the plugin\'s own API')
+
+  // The browser half reaches the shell through the module table, so the only product
+  // module names it may contain are the ones declared in `dsh.client.inject`. An id used
+  // without being declared resolves to `undefined` at runtime — the component then throws
+  // on first render, which the Host side cannot see. Anything else prefixed
+  // `@deepseek-ai/` would mean importing product internals behind the module system.
+  const declared = Array.isArray(manifest.dsh?.client?.inject) ? manifest.dsh.client.inject : []
+  const used = new Set([...client.matchAll(/require\('([^']+)'\)/gu)].map(match => match[1])
+    .filter(specifier => specifier.startsWith('@deepseek-ai/')))
+  for (const specifier of used) {
+    ok(declared.includes(specifier),
+      `the client half only reaches ${specifier} because it declares it in dsh.client.inject`, specifier)
+  }
+  // The remaining product-shaped text must be string literals, never an import: a real
+  // `import`/`from` would make the bundle depend on the shell's build layout.
+  ok(!/^\s*import\s[^;]*@deepseek-ai\//mu.test(client) && !/\bfrom\s+'@deepseek-ai\//u.test(client),
+    'the client half has no static @deepseek-ai import: the module table is the only seam')
 }
 
 // ---- presets --------------------------------------------------------------

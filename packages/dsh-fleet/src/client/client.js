@@ -22,6 +22,19 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
     const { useCallback, useEffect, useMemo, useRef, useState } = React
+    // The shipped control set, resolved through the shell's module table rather
+    // than imported: this package has no build step and no dependency on the UI
+    // packages. Using it is what makes a dialog here behave like the shipped one
+    // (the same button heights, the same focus ring, the same modal chrome).
+    const ui = require('@deepseek-ai/dsh-client-ui-primitives')
+    const {
+      Button, StateDot,
+      IconChevronLeftOutlineRegular,
+      IconChevronRightOutlineRegular,
+      IconChevronsUpDownOutlineRegular,
+      IconFolderCloseRegular,
+      IconPlusOutlineRegular,
+    } = ui
 
     /** Where the Host half answers management calls. */
     const API = 'fleet/api'
@@ -91,7 +104,13 @@ window.__ModuleLoader__.load({
           pluginOffHint: '只在这台机器上运行',
           pickFolder: '选择工作区文件夹',
           machine: '在哪台机器上',
-          thisMachine: '本机',
+          chooseDevice: '选择设备',
+          thisDevice: '此设备',
+          deviceHint: '工作区所在的机器',
+          switchDevice: '更换',
+          drivesHere: '盘符',
+          nodeRootHint: '节点根目录',
+          browseAnywhere: '浏览全部目录',
           up: '上一级',
           go: '打开',
           loading: '正在读取…',
@@ -182,7 +201,13 @@ window.__ModuleLoader__.load({
           pluginFailed: 'The plugin list is not composed yet',
           pickFolder: 'Choose a workspace folder',
           machine: 'On which machine',
-          thisMachine: 'This machine',
+          chooseDevice: 'Choose a device',
+          thisDevice: 'This device',
+          deviceHint: 'The machine the workspace lives on',
+          switchDevice: 'Change',
+          drivesHere: 'Drives',
+          nodeRootHint: 'node root',
+          browseAnywhere: 'Browse every folder',
           up: 'Up',
           go: 'Open',
           loading: 'Reading…',
@@ -214,82 +239,291 @@ window.__ModuleLoader__.load({
           existingEmpty: 'This device has no workspaces yet.',
         }
 
-    /** Token-driven styles so light and dark both work. */
+    /**
+     * Token-driven styles, measured against the official settings pages rather than guessed.
+     *
+     * The values come from the shipped plugin-manager bundle
+     * (`@deepseek-ai/dsh-client-ui-plugin-manager/lib/client.js`, its `const css=` string),
+     * which is the page the complaint compared this one to. Its rhythm: the page is a
+     * `height:100%` column with `clamp(24px, 4vw, 48px)` side padding; the fixed head is
+     * `28px` above the title and the body starts `32px` below it; the body is the one
+     * scrolling child, with `gap:32px` between groups, `48px` under the last one, and every
+     * child capped at `960px`. A row is not a hairline list item but a `card`: a `48px` icon
+     * tile, a `14/20` 500-weight title, one `13/18` tertiary description line, an
+     * `inline-flex` end slot, `2px` between cards and a hover fill as the only chrome. The
+     * add button is `32px` tall on `--dsw-radius-md` at `13px`.
+     *
+     * Every variable named here is present in that bundle's token list — an
+     * undefined `var()` silently renders as nothing, which is how a font-family token the
+     * shipped sheet never defined produced an unexplained fallback font before.
+     */
     const styles = {
       /**
-       * The page is its own scroll viewport.
+       * The page is the official frame: a full-height column whose head is fixed and whose
+       * body is the one scrolling child.
        *
-       * The shell renders a `main` slot inside `mainPanel` → `centerCol`, and `centerCol`
-       * is `overflow: hidden`. A body taller than the frame is therefore **clipped with no
-       * scrollbar anywhere**: measured on a real page, `mainPanel` was 1026 px tall with a
-       * 10658 px `scrollHeight`, and neither it nor any ancestor scrolled. So the page
-       * takes the frame's height and scrolls itself, which is the only place this plugin
-       * can decide it — the shell's layout is not ours to change.
+       * That split is not decoration. The shell renders a `main` slot inside `mainPanel` →
+       * `centerCol`, and `centerCol` is `overflow: hidden`, so a body taller than the frame
+       * is **clipped with no scrollbar anywhere**: measured on a real page, `mainPanel` was
+       * 1026 px tall with a 10658 px `scrollHeight`, and neither it nor any ancestor
+       * scrolled. Giving the page the frame's height and letting `pageBody` scroll is the
+       * only place this plugin can decide it — the shell's layout is not ours to change —
+       * and it is exactly what the shipped plugin page does.
        */
       page: {
-        padding: '24px 28px', maxWidth: 880, boxSizing: 'border-box',
-        height: '100%', minHeight: 0, overflowY: 'auto', overflowX: 'hidden',
-        display: 'flex', flexDirection: 'column', gap: 24,
+        boxSizing: 'border-box', height: '100%', minHeight: 0,
+        padding: '0 clamp(24px, 4vw, 48px)',
+        color: 'var(--dsw-alias-label-primary)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
       },
-      h1: { fontSize: 20, fontWeight: 600, margin: 0, color: 'var(--dsw-alias-label-primary)' },
-      subtitle: { margin: '6px 0 0', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' },
-      groupHeader: { display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 8 },
-      groupTitle: { fontSize: 13, fontWeight: 600, color: 'var(--dsw-alias-label-primary)', margin: 0 },
-      groupHint: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', margin: 0 },
-      list: { border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 10, overflow: 'hidden' },
-      row: {
-        display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', minHeight: 52,
-        borderTop: '1px solid var(--dsw-alias-border-l1)',
+      /**
+       * The body bleeds back over the page's side padding so the scrollbar sits on the panel
+       * edge rather than inside the text column; the padding then comes back as its own, so
+       * every child still starts at the page inset. Copied from the official `.pageBody`,
+       * whose `calc(100% + 2 * inset)` / `margin-inline: -inset` pair does the same, and its
+       * `32px` top padding, which the official rule applies when the head is a sibling of the
+       * body rather than the first child inside it — the shape this page uses.
+       */
+      pageBody: {
+        boxSizing: 'border-box', flex: '1 1 auto', minHeight: 0,
+        width: 'calc(100% + 2 * clamp(24px, 4vw, 48px))',
+        marginInline: 'calc(-1 * clamp(24px, 4vw, 48px))',
+        padding: '32px clamp(24px, 4vw, 48px) 48px',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 32,
+        overflow: 'hidden auto',
       },
-      rowFirst: { borderTop: 'none' },
+      /**
+       * Every child of the scrolling column is capped at 960 px and centred. The official
+       * rule is `.pageBody > *`; inline styles have no child selector, so the two kinds of
+       * child — a group and the head — carry the cap themselves.
+       */
+      pageHead: {
+        boxSizing: 'border-box', flex: 'none', width: '100%', maxWidth: 960, paddingTop: 28,
+        display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between',
+        alignItems: 'flex-start', gap: 16,
+      },
+      pageHeading: { minWidth: 0, maxWidth: '100%' },
+      pageTitle: { margin: 0, fontSize: 20, fontWeight: 500, lineHeight: '28px' },
+      pageIntro: {
+        color: 'var(--dsw-alias-label-secondary)',
+        margin: '4px 0 0', fontSize: 13, lineHeight: '20px',
+      },
+      /**
+       * The head's optional right-hand slot for page-level actions. It is `flex: 0 auto`
+       * and never wraps its own label, so it shrinks to its content while the heading keeps
+       * the leftover width — the opposite of the old group head, where the growing sibling
+       * squeezed the title instead.
+       */
+      toolbar: {
+        flex: '0 auto', minWidth: 0, whiteSpace: 'nowrap',
+        display: 'flex', flexWrap: 'wrap', alignItems: 'center',
+        justifyContent: 'flex-end', gap: '8px 16px',
+      },
+
+      // ---- group + card ---------------------------------------------------------
+      //
+      // The official list is not hairline rows: a group is a title line followed by cards,
+      // and a card is an icon tile, a title, one description line and an end slot, with the
+      // 2 px gap between cards and a rounded hover-free surface as the only chrome.
+      group: { width: '100%', maxWidth: 960, display: 'flex', flexDirection: 'column', gap: 8 },
+      groupHead: { display: 'flex', alignItems: 'center', gap: 8 },
+      /**
+       * `flex: 0 0 auto` + `nowrap` are the fix for the worst layout bug this page shipped:
+       * with `flex: 1` and a growing hint beside it, the title was squeezed to a 23 px wide
+       * column and its four characters stacked vertically. A group title never wraps.
+       */
+      groupTitle: {
+        flex: '0 0 auto', margin: 0, fontSize: 14, fontWeight: 500, lineHeight: '22px',
+        whiteSpace: 'nowrap',
+      },
+      /**
+       * The hint yields instead: it takes the leftover width and ellipsises on one line.
+       *
+       * One line is what keeps the head at the official 22 px title height; a wrapping hint
+       * is precisely what used to make the head 68 px tall and squeeze the title into a
+       * vertical strip. The full sentence stays reachable through `title`.
+       */
+      groupHint: {
+        flex: '1 1 auto', minWidth: 0, margin: 0,
+        fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      },
+      /**
+       * A wrapping caption for the dialogs, where the text is the only content and clipping
+       * it would hide an instruction. `groupHint` cannot do this job: it is single-line by
+       * design, because inside a group head a wrapping hint is what used to squeeze the
+       * title into a vertical strip.
+       */
+      hint: {
+        margin: 0, fontSize: 12, lineHeight: '18px',
+        color: 'var(--dsw-alias-label-tertiary)',
+      },
+      cards: {
+        display: 'flex', flexDirection: 'column', gap: 2,
+        margin: 0, padding: 0, listStyle: 'none',
+      },
+      /**
+       * The negative inline margin is what lets the card's hover/press surface extend past
+       * the text column without moving its content; `--dsw-radius-xl` is the official card
+       * radius, and the card itself has no background and no border.
+       */
+      card: { borderRadius: 'var(--dsw-radius-xl)', minWidth: 0, margin: '0 -8px' },
+      /** The official hover fill for an interactive card; the radius above exists for it. */
+      cardHover: { background: 'var(--dsw-alias-interactive-bg-hover)' },
+      cardHead: { display: 'flex', alignItems: 'center', gap: 14, padding: 8 },
+      /** A 48 px tile is the official icon size; a bare glyph would read as a different row. */
+      cardIcon: {
+        width: 48, height: 48, flex: 'none',
+        border: '0.5px solid var(--dsw-alias-border-l3)',
+        borderRadius: 'var(--dsw-radius-lg)',
+        color: 'var(--dsw-alias-label-secondary)',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      },
+      cardMain: { display: 'flex', flexDirection: 'column', flex: 1, gap: 4, minWidth: 0 },
+      cardTitle: {
+        fontSize: 14, fontWeight: 500, lineHeight: '20px',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      },
+      cardDesc: {
+        color: 'var(--dsw-alias-label-tertiary)',
+        fontSize: 13, lineHeight: '18px',
+        display: '-webkit-box', WebkitLineClamp: 1, WebkitBoxOrient: 'vertical',
+        overflow: 'hidden',
+      },
+      cardEnd: { display: 'inline-flex', alignItems: 'center', gap: 8, flex: 'none' },
+      /**
+       * Sub-content inside a card — a phase timeline, an expanded workspace list, an error.
+       * The official `.card > .reason` indents by icon + gap + inset (8 + 48 + 14 = 70 px),
+       * so anything hanging below a card lines up with the text it belongs to.
+       */
+      cardReason: { padding: '0 8px 8px 70px' },
       dot: size => ({ width: size ?? 8, height: size ?? 8, borderRadius: '50%', flex: '0 0 auto' }),
-      name: { fontSize: 14, color: 'var(--dsw-alias-label-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-      meta: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      name: { fontSize: 14, lineHeight: '20px', color: 'var(--dsw-alias-label-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+      meta: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
       grow: { flex: '1 1 auto', minWidth: 0 },
+      /**
+       * The official button height: 32 px on `--dsw-radius-md` at 13 px. The dialog's
+       * secondary and primary buttons share it, so a dialog footer and the page's add
+       * button are the same size — before this, page rows were 28 px while the shipped
+       * add button was 32, which is exactly the "two designs" the complaint named.
+       */
       button: {
-        appearance: 'none', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
-        background: 'transparent', color: 'var(--dsw-alias-label-primary)', fontSize: 12,
-        padding: '5px 12px', cursor: 'pointer', lineHeight: 1.4,
+        appearance: 'none', boxSizing: 'border-box', height: 32, padding: '0 12px',
+        border: '0.5px solid var(--dsw-alias-border-l3)', borderRadius: 'var(--dsw-radius-md)',
+        background: 'transparent', color: 'var(--dsw-alias-label-primary)', fontSize: 13,
+        lineHeight: '20px', cursor: 'pointer', flex: '0 0 auto',
       },
       buttonPrimary: {
-        appearance: 'none', border: '1px solid transparent', borderRadius: 8,
-        background: 'var(--dsw-alias-brand-primary)', color: '#fff', fontSize: 12,
-        padding: '5px 12px', cursor: 'pointer', lineHeight: 1.4,
+        appearance: 'none', boxSizing: 'border-box', height: 32, padding: '0 12px',
+        border: '0.5px solid transparent', borderRadius: 'var(--dsw-radius-md)',
+        background: 'var(--dsw-alias-button-primary-fill)',
+        color: 'var(--dsw-alias-label-primary-foreground)', fontSize: 13,
+        lineHeight: '20px', cursor: 'pointer', flex: '0 0 auto',
       },
       buttonDanger: {
-        appearance: 'none', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
-        background: 'transparent', color: 'var(--dsw-alias-state-error-primary)', fontSize: 12,
-        padding: '5px 12px', cursor: 'pointer', lineHeight: 1.4,
+        appearance: 'none', boxSizing: 'border-box', height: 32, padding: '0 12px',
+        border: '0.5px solid var(--dsw-alias-border-l3)', borderRadius: 'var(--dsw-radius-md)',
+        background: 'transparent', color: 'var(--dsw-alias-label-error)', fontSize: 13,
+        lineHeight: '20px', cursor: 'pointer', flex: '0 0 auto',
       },
-      buttonDisabled: { opacity: 0.55, cursor: 'default' },
+      buttonDisabled: { opacity: 0.4, cursor: 'default' },
       errorBar: {
-        margin: '0 14px 10px', padding: '8px 10px', borderRadius: 8,
-        background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)',
-        color: 'var(--dsw-alias-state-error-primary)', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+        padding: '8px 10px', borderRadius: 'var(--dsw-radius-md)',
+        border: '0.5px solid var(--dsw-alias-border-l3)',
+        color: 'var(--dsw-alias-label-error)', fontSize: 12, lineHeight: '18px',
+        whiteSpace: 'pre-wrap', wordBreak: 'break-word',
       },
-      form: { display: 'flex', flexDirection: 'column', gap: 14, padding: 16, border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 10 },
+      form: {
+        display: 'flex', flexDirection: 'column', gap: 14, padding: 16,
+        borderRadius: 'var(--dsw-radius-xl)', border: '0.5px solid var(--dsw-alias-border-l2)',
+      },
       field: { display: 'flex', flexDirection: 'column', gap: 6 },
-      label: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' },
+      label: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-tertiary)' },
       input: {
-        width: '100%', boxSizing: 'border-box', padding: '7px 10px', fontSize: 13,
-        color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-1)',
-        border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8, outline: 'none',
+        width: '100%', boxSizing: 'border-box', height: 34, padding: '0 12px', fontSize: 13,
+        color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-3)',
+        border: '0.5px solid var(--dsw-alias-border-l4)', borderRadius: 'var(--dsw-radius-md)',
+        outline: 'none', fontFamily: 'inherit',
       },
       rowFields: { display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 96px', gap: 10 },
       actions: { display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' },
       link: {
         appearance: 'none', border: 'none', background: 'transparent', padding: 0, cursor: 'pointer',
-        fontSize: 12, color: 'var(--dsw-alias-label-secondary)', textDecoration: 'underline',
+        fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-secondary)',
       },
-      phases: { display: 'flex', flexDirection: 'column', gap: 4, padding: '4px 0 10px 26px' },
+      phases: { display: 'flex', flexDirection: 'column', gap: 4, padding: '0 0 6px' },
       phase: active => ({
-        fontSize: 12, color: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
-        fontWeight: active ? 600 : 400,
+        fontSize: 12, lineHeight: '18px',
+        color: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)',
+        fontWeight: active ? 500 : 400,
       }),
-      empty: { padding: '18px 14px', fontSize: 13, color: 'var(--dsw-alias-label-secondary)' },
-      workspaceRow: { display: 'flex', alignItems: 'center', gap: 10, padding: '7px 14px', borderTop: '1px solid var(--dsw-alias-border-l1)' },
-      addWorkspace: { display: 'flex', flexWrap: 'wrap', gap: 8, padding: '10px 14px', borderTop: '1px solid var(--dsw-alias-border-l1)' },
-      mono: { fontFamily: 'var(--dsw-alias-font-code, ui-monospace, monospace)', fontSize: 11, color: 'var(--dsw-alias-label-secondary)' },
+      /**
+       * The official `.empty` rule: no box, no padding, just the tertiary 13/20 line. The
+       * surrounding group's 8 px gap and the dialog frame's padding already place it, and a
+       * padded empty state here would shift every list that shows one.
+       */
+      empty: { margin: 0, fontSize: 13, lineHeight: '20px', color: 'var(--dsw-alias-label-tertiary)' },
+      /**
+       * A workspace line inside an expanded node card. No hairline: the official cards carry
+       * their separation as a 2 px gap, and a rule here would draw a box the page does not
+       * otherwise have.
+       */
+      workspaceRow: { display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0' },
+      addWorkspace: { display: 'flex', flexWrap: 'wrap', gap: 8, padding: '8px 0 0' },
+      mono: { fontFamily: 'var(--dsw-font-markdown-code-font-family)', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' },
+
+      // ---- dialog pieces ---------------------------------------------------------
+      //
+      // A 24 px square hit target for a glyph-only button, the way the shipped rows do it:
+      // a bare icon at 16 px would be a 16 px click target.
+      iconButton: {
+        appearance: 'none', boxSizing: 'border-box', display: 'inline-flex',
+        alignItems: 'center', justifyContent: 'center', width: 24, height: 24,
+        padding: 0, margin: 0, border: 'none', background: 'transparent',
+        borderRadius: 'var(--dsw-radius-sm)', cursor: 'pointer',
+        color: 'var(--dsw-alias-label-secondary)', flex: 'none',
+      },
+      /** One machine (or one drive) per row, with a name and a second line of detail. */
+      deviceRow: {
+        appearance: 'none', boxSizing: 'border-box', display: 'flex', alignItems: 'center',
+        gap: 10, width: '100%', padding: '10px 2px', textAlign: 'left', cursor: 'pointer',
+        border: 'none', borderBottom: '0.5px solid var(--dsw-alias-border-l2)',
+        background: 'transparent', color: 'var(--dsw-alias-label-primary)',
+        fontSize: 13, lineHeight: '20px',
+      },
+      deviceList: { display: 'flex', flexDirection: 'column', minHeight: 0, overflowY: 'auto' },
+      /** The same frame the shipped pickers put their folder list in. */
+      listFrame: {
+        flex: '1 1 auto', minHeight: 120, maxHeight: 260, overflowY: 'auto',
+        border: '0.5px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-md)', padding: 4,
+      },
+      /** The device picker on the form: a field-shaped button, not a `<select>`. */
+      deviceButton: {
+        appearance: 'none', boxSizing: 'border-box', display: 'flex', alignItems: 'center',
+        gap: 8, width: '100%', height: 34, padding: '0 10px', textAlign: 'left',
+        cursor: 'pointer', fontSize: 13,
+        color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-3)',
+        border: '0.5px solid var(--dsw-alias-border-l4)',
+        borderRadius: 'var(--dsw-radius-md)',
+      },
+      deviceIcon: { display: 'inline-flex', flex: 'none', color: 'var(--dsw-alias-label-tertiary)' },
+      /** A drive label: the same box as a small button, filled when it is the current root. */
+      chip: active => ({
+        appearance: 'none', boxSizing: 'border-box', height: 24, padding: '0 10px',
+        border: '0.5px solid var(--dsw-alias-border-l3)',
+        borderRadius: 'var(--dsw-radius-sm)', cursor: 'pointer',
+        fontSize: 12, lineHeight: '18px',
+        color: active === true ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
+        background: active === true ? 'var(--dsw-alias-interactive-bg-hover)' : 'transparent',
+      }),
+      /** The confirmed folder, boxed like an input so the form reads as one column. */
+      folderChoice: {
+        display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px',
+        border: '0.5px solid var(--dsw-alias-border-l4)',
+        borderRadius: 'var(--dsw-radius-md)',
+        background: 'var(--dsw-alias-bg-layer-3)',
+      },
     }
 
     /** Fetch JSON from the fleet API, surfacing the server's routable error. */
@@ -362,8 +596,9 @@ window.__ModuleLoader__.load({
       const asProject = props.origin === 'conversation.hero.workspace.directoryFlow'
         || props.origin === 'workspace.picker.directoryFlow'
       const [nodes, setNodes] = useState([])
-      const [nodeId, setNodeId] = useState('')
-      /** `form` | `browse` | `device` | `existing` */
+      /** The chosen device: `''` is this machine, otherwise a node id. */
+      const [deviceId, setDeviceId] = useState('')
+      /** `form` | `device` | `roots` | `browse` | `existing` | `addNode` */
       const [page, setPage] = useState('form')
       const [title, setTitle] = useState('')
       /** The folder the person confirmed: `{ path, name }`, absent until they pick one. */
@@ -378,6 +613,11 @@ window.__ModuleLoader__.load({
       const [newError, setNewError] = useState(undefined)
       /** Workspaces already on the selected device, while the "add to sidebar" page is up. */
       const [existing, setExisting] = useState(undefined)
+      /** The chosen device's entry points: drive letters here, `/` plus the home there. */
+      const [rootsInfo, setRootsInfo] = useState(undefined)
+      const [rootsLoading, setRootsLoading] = useState(false)
+      /** Where the browser should land when it opens: a drive here, `/` on a node. */
+      const [pendingRoot, setPendingRoot] = useState('')
 
       // Load the machine list when the dialog opens, not on mount: this component stays
       // mounted for the whole Session, and polling a node list that nobody is looking at
@@ -426,16 +666,36 @@ window.__ModuleLoader__.load({
         setTitle('')
         setChosen(undefined)
         setExisting(undefined)
+        setDeviceId('')
+        setRootsInfo(undefined)
+        setPendingRoot('')
       }, [open])
 
-      // The browser lands on the chosen machine's home directory: that is where a person's
-      // projects are on either side, and asking them to type a path first would make the
-      // remote case feel different from the local one again.
+      // The entry points of the chosen device. This is the step that makes the two sides
+      // symmetric: a person who said "this device" gets the drive letters, a person who
+      // said a node gets that node's root — never a shared list of POSIX paths that would
+      // only be right for one of them.
+      useEffect(() => {
+        if (!open || page !== 'roots') return
+        let live = true
+        setRootsInfo(undefined)
+        setRootsLoading(true)
+        const query = new URLSearchParams()
+        if (deviceId !== '') query.set('node', deviceId)
+        void api(`/browse?${query.toString()}`)
+          .then(body => { if (live) setRootsInfo(body) })
+          .catch(failure => { if (live) setError(failure.message) })
+          .finally(() => { if (live) setRootsLoading(false) })
+        return () => { live = false }
+      }, [open, page, deviceId])
+
+      // The browser lands where the device page pointed it: a drive root here, `/` on a
+      // node, or that machine's home when the person went straight to browsing.
       useEffect(() => {
         if (!open || page !== 'browse') return
         setListing(undefined)
-        void browse(nodeId, '')
-      }, [open, page, nodeId, browse])
+        void browse(deviceId, pendingRoot)
+      }, [open, page, deviceId, pendingRoot, browse])
 
       if (!open) return null
 
@@ -465,7 +725,7 @@ window.__ModuleLoader__.load({
           await api('/workspaces', {
             method: 'POST',
             body: JSON.stringify({
-              ...(nodeId === '' ? {} : { nodeId }),
+              ...(deviceId === '' ? {} : { nodeId: deviceId }),
               path: folder,
               title: wanted,
             }),
@@ -481,7 +741,7 @@ window.__ModuleLoader__.load({
       const goTyped = event => {
         event.preventDefault()
         if (typed.trim().length === 0) return
-        void browse(nodeId, typed.trim())
+        void browse(deviceId, typed.trim())
       }
 
       /** Create the folder being named, then stand inside it. */
@@ -494,14 +754,14 @@ window.__ModuleLoader__.load({
           const body = await api('/browse', {
             method: 'POST',
             body: JSON.stringify({
-              ...(nodeId === '' ? {} : { nodeId }),
+              ...(deviceId === '' ? {} : { nodeId: deviceId }),
               path: current,
               name,
             }),
           })
           setMakingFolder(false)
           setNewName('')
-          await browse(nodeId, body.path)
+          await browse(deviceId, body.path)
         } catch (failure) {
           setNewError(failure.message)
         }
@@ -509,13 +769,13 @@ window.__ModuleLoader__.load({
 
       /** List what the selected device already has, so an existing folder need not be found again. */
       const openExisting = async () => {
-        if (nodeId === '') return
+        if (deviceId === '') return
         setError(undefined)
         setPage('existing')
         setExisting(undefined)
         try {
           const body = await api('/workspaces')
-          const prefix = `fleet_${nodeId}_`
+          const prefix = `fleet_${deviceId}_`
           const items = body.baseline?.items ?? []
           setExisting(items.filter(item => typeof item.workspaceId === 'string'
             && item.workspaceId.startsWith(prefix)))
@@ -525,86 +785,160 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const nodeOptions = [{ id: '', label: T.thisMachine }, ...nodes.map(node => ({
-        id: node.id,
-        label: `${node.name} · ${node.host}`,
-      }))]
+      /** The machine label a page names: this device, or the node's own name. */
+      const deviceLabel = deviceId === ''
+        ? T.thisDevice
+        : (nodes.find(node => node.id === deviceId)?.name ?? deviceId)
 
+      // The shipped modal, measured: the mask is the blur plus the mask colour, the card
+// sits one layer above the page with the panel radius and the prominent elevation.
+      // A 1000 z-index is what the shell's own dialogs use, so this dialog covers the
+      // sidebar and the settings page alike.
       const overlay = {
-        position: 'fixed', inset: 0, zIndex: 60, display: 'flex',
+        position: 'fixed', inset: 0, zIndex: 1000, display: 'flex',
         alignItems: 'center', justifyContent: 'center',
-        background: 'color-mix(in srgb, var(--dsw-alias-bg-base) 62%, transparent)',
+        padding: 'max(24px, var(--dsh-frame-overlay-top, 24px)) 24px',
+        background: 'var(--dsw-alias-bg-mask-1)',
+        backdropFilter: 'var(--dsw-mask-blur)',
       }
       const dialog = {
-        width: 'min(560px, calc(100vw - 32px))', maxHeight: 'min(620px, calc(100vh - 64px))',
-        display: 'flex', flexDirection: 'column', gap: 12, padding: 18,
-        background: 'var(--dsw-alias-bg-layer-1)', color: 'var(--dsw-alias-label-primary)',
-        border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 12,
-        boxShadow: 'var(--dsw-shadow-lg, 0 18px 48px rgba(0,0,0,0.28))',
+        boxSizing: 'border-box', position: 'relative',
+        width: 'min(560px, 100%)', maxHeight: 'min(620px, calc(100vh - 72px))',
+        display: 'flex', flexDirection: 'column', gap: 14, padding: 20,
+        background: 'var(--dsw-alias-bg-layer-2)', color: 'var(--dsw-alias-label-primary)',
+        border: '0.5px solid var(--dsw-alias-border-l2)',
+        borderRadius: 'var(--dsw-radius-panel)',
+        boxShadow: 'var(--dsw-elevation-prominent)',
       }
       const rowStyle = {
         display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px', width: '100%',
         boxSizing: 'border-box', textAlign: 'left', cursor: 'pointer',
-        appearance: 'none', background: 'transparent', border: 'none', borderRadius: 6,
+        appearance: 'none', background: 'transparent', border: 'none',
+        borderRadius: 'var(--dsw-radius-sm)',
         color: 'var(--dsw-alias-label-primary)', fontSize: 13,
       }
       // A native `<select>` keeps the platform's square frame no matter what the box
-      // radius says, so the frame is drawn here and the arrow is our own glyph. Same for
-      // the paths: the two pickers have to look like one control.
-      const selectWrap = {
-        position: 'relative', display: 'flex', alignItems: 'center',
-        border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8,
-        background: 'var(--dsw-alias-bg-layer-1)',
-      }
-      const selectStyle = {
-        appearance: 'none', WebkitAppearance: 'none', MozAppearance: 'none',
-        flex: '1 1 auto', minWidth: 0, padding: '8px 30px 8px 10px', border: 'none',
-        borderRadius: 8, background: 'transparent', outline: 'none',
-        color: 'var(--dsw-alias-label-primary)', fontSize: 13, cursor: 'pointer',
-      }
-      const chipStyle = extra => ({
-        ...styles.button, padding: '3px 9px', fontSize: 12, borderRadius: 999, ...extra,
-      })
+      // radius says, and a select cannot hold "add a device" as an option honestly — so
+      // the device control is the field-shaped button in `styles.deviceButton` instead.
       /** The empty source-folder card: dashed, with the same wording the shipped form uses. */
       const folderSlot = {
         display: 'flex', alignItems: 'center', gap: 10, width: '100%', boxSizing: 'border-box',
         padding: '12px 14px', cursor: 'pointer', textAlign: 'left',
-        appearance: 'none', borderRadius: 10, fontSize: 13,
+        appearance: 'none', borderRadius: 'var(--dsw-radius-md)', fontSize: 13,
         border: '1px dashed var(--dsw-alias-border-l2)',
-        background: 'color-mix(in srgb, var(--dsw-alias-bg-layer-2) 55%, transparent)',
+        background: 'var(--dsw-alias-bg-layer-2)',
         color: 'var(--dsw-alias-label-primary)',
       }
       const title2 = asProject ? T.createProject : T.pickFolder
       const commitLabel = asProject ? T.create : T.addWorkspace
 
-      const header = (heading, withBack) => h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-        withBack
-          ? h('button', {
+      const header = (heading, back) => h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        back === undefined
+          ? null
+          : h('button', {
               type: 'button',
               'aria-label': T.back,
-              style: { ...styles.link, textDecoration: 'none', fontSize: 13 },
-              onClick: () => { setPage('form') },
-            }, `‹ ${T.back}`)
-          : null,
-        h('h2', { style: { margin: 0, fontSize: 15, fontWeight: 600 } }, heading),
+              title: T.back,
+              style: { ...styles.iconButton },
+              onClick: back,
+            }, h(IconChevronLeftOutlineRegular, { size: 16 })),
+        h('h2', { style: { margin: 0, fontSize: 14, lineHeight: '22px', fontWeight: 500 } }, heading),
         h('button', {
           type: 'button',
           style: { ...styles.link, marginLeft: 'auto' },
           onClick: () => props.onCancel?.(),
         }, T.cancel))
 
-      // ---- adding a remote device, from inside the device list -----------------
+      // ---- choose the device the folder lives on --------------------------------
+      // This is the step the shipped picker cannot have: it browses this machine only, so
+      // "where is the folder" has to be answered before "which folder". Each row is one
+      // machine; its root directory is one page deeper.
       if (page === 'device') {
+        const row = (key, label, hint, onPick, disabled) => h('button', {
+          key,
+          type: 'button',
+          style: { ...styles.deviceRow, ...(disabled === true ? styles.buttonDisabled : {}) },
+          disabled,
+          onClick: onPick,
+        },
+        h('span', { style: styles.deviceIcon, 'aria-hidden': true }, h(IconFolderCloseRegular, { size: 16 })),
+        h('span', { style: { flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 } },
+          h('span', { style: { fontSize: 13 } }, label),
+          h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, hint)),
+        deviceId === key
+          ? h(IconChevronRightOutlineRegular, { size: 14, style: { flex: 'none', color: 'var(--dsw-alias-label-tertiary)' } })
+          : null)
+
+        return h('div', { style: overlay, role: 'dialog', 'aria-label': T.chooseDevice },
+          h('div', { style: dialog },
+            header(T.chooseDevice, () => setPage('form')),
+            h('p', { style: styles.hint }, T.deviceHint),
+            h('div', { style: styles.deviceList },
+              row('', T.thisDevice, T.drivesHere, () => { setDeviceId(''); setPage('roots') }, false),
+              nodes.map(node => row(
+                node.id,
+                node.name,
+                `${node.host} · ${T.nodeRootHint}`,
+                () => { setDeviceId(node.id); setPage('roots') },
+                false,
+              ))),
+            h('div', { style: { ...styles.actions, marginTop: 'auto' } },
+              h('button', {
+                type: 'button',
+                style: styles.button,
+                onClick: () => setPage('addNode'),
+              }, T.addRemoteDevice))))
+      }
+
+      // ---- one device's entry points: drive letters here, `/` on a node --------
+      // The device page answers "which machine"; this page answers "where on that machine".
+      // The answers differ by kind on purpose: this PC has drives, and a node's tree starts
+      // at `/`. Showing a shared list of drive letters to a node — or POSIX paths to a
+      // Windows machine — is exactly the mix-up the device step exists to prevent.
+      if (page === 'roots') {
+        const roots = rootsInfo?.roots ?? []
+        return h('div', { style: overlay, role: 'dialog', 'aria-label': T.sourceFolder },
+          h('div', { style: dialog },
+            header(deviceLabel, () => setPage('device')),
+            h('div', { style: styles.deviceList },
+              rootsLoading
+                ? h('div', { style: styles.empty }, T.loading)
+                : roots.length === 0
+                  ? h('div', { style: styles.empty }, T.noFolders)
+                  : roots.map(root => h('button', {
+                      key: root,
+                      type: 'button',
+                      style: rowStyle,
+                      title: root,
+                      onClick: () => {
+                        setPendingRoot(root)
+                        setPage('browse')
+                      },
+                    },
+                    h('span', { style: styles.deviceIcon, 'aria-hidden': true }, h(IconFolderCloseRegular, { size: 16 })),
+                    h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, root)))),
+            h('div', { style: { ...styles.actions, marginTop: 'auto' } },
+              h('button', { type: 'button', style: styles.button, onClick: () => setPage('device') }, T.switchDevice),
+              h('button', {
+                type: 'button',
+                style: styles.buttonPrimary,
+                disabled: rootsLoading,
+                onClick: () => { setPendingRoot(''); setPage('browse') },
+              }, T.browseAnywhere))))
+      }
+
+      // ---- adding a remote device, from inside the device list -----------------
+      if (page === 'addNode') {
         return h('div', { style: overlay, role: 'dialog', 'aria-label': T.addRemoteDevice },
           h('div', { style: dialog },
-            header(T.addRemoteDevice, true),
+            header(T.addRemoteDevice, () => setPage('device')),
             h(NodeForm, {
               onSubmit: async draft => {
                 await api('/nodes', { method: 'POST', body: JSON.stringify(draft) })
                 await reloadNodes()
-                setPage('form')
+                setPage('device')
               },
-              onCancel: () => setPage('form'),
+              onCancel: () => setPage('device'),
             })))
       }
 
@@ -613,25 +947,21 @@ window.__ModuleLoader__.load({
         const rows = existing ?? []
         return h('div', { style: overlay, role: 'dialog', 'aria-label': T.existingOnDeviceAction },
           h('div', { style: dialog },
-            header(T.existingOnDeviceAction, true),
-            h('p', { style: { ...styles.groupHint, margin: 0 } }, T.existingOnDeviceHint),
-            existing === undefined
-              ? h('div', { style: styles.empty }, T.loading)
-              : rows.length === 0
-                ? h('div', { style: styles.empty }, T.existingEmpty)
-                : h('div', {
-                    style: {
-                      flex: '1 1 auto', minHeight: 120, maxHeight: 320, overflowY: 'auto',
-                      border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8, padding: 4,
+            header(T.existingOnDeviceAction, () => setPage('form')),
+            h('p', { style: styles.hint }, T.existingOnDeviceHint),
+            h('div', { style: styles.listFrame },
+              existing === undefined
+                ? h('div', { style: styles.empty }, T.loading)
+                : rows.length === 0
+                  ? h('div', { style: styles.empty }, T.existingEmpty)
+                  : rows.map(row => h('button', {
+                      key: row.workspaceId,
+                      type: 'button',
+                      style: rowStyle,
+                      title: row.path,
+                      onClick: () => { props.onPicked?.(row.path) },
                     },
-                  },
-                  rows.map(row => h('button', {
-                    key: row.workspaceId,
-                    type: 'button',
-                    style: rowStyle,
-                    title: row.path,
-                    onClick: () => { props.onPicked?.(row.path) },
-                  }, h('span', { 'aria-hidden': true, style: { opacity: 0.6 } }, '📁'),
+                    h('span', { style: styles.deviceIcon, 'aria-hidden': true }, h(IconFolderCloseRegular, { size: 16 })),
                     h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
                       row.title ?? row.path)))),
             error !== undefined ? h('div', { style: { ...styles.errorBar, margin: 0 } }, error) : null,
@@ -643,38 +973,19 @@ window.__ModuleLoader__.load({
       if (page === 'browse') {
         return h('div', { style: overlay, role: 'dialog', 'aria-label': T.chooseFolder },
           h('div', { style: dialog },
-            header(T.chooseFolder, true),
-
-            // The machine stays switchable here: a person may realize mid-browse that the
-            // folder is on the other side, and losing the name they typed to find that out
-            // would be a worse trade than one extra control.
-            h('label', { style: styles.field },
-              h('span', { style: styles.label }, T.machine),
-              h('span', { style: selectWrap },
-                h('select', {
-                  style: selectStyle,
-                  value: nodeId,
-                  disabled: loading,
-                  onChange: event => setNodeId(event.target.value),
-                }, nodeOptions.map(option => h('option', { key: option.id, value: option.id }, option.label))),
-                h('span', {
-                  'aria-hidden': true,
-                  style: {
-                    position: 'absolute', right: 11, pointerEvents: 'none',
-                    color: 'var(--dsw-alias-label-secondary)', fontSize: 10, lineHeight: 1,
-                  },
-                }, '▼'))),
+            header(`${deviceLabel} · ${T.chooseFolder}`, () => setPage('roots')),
 
             h('form', { style: { display: 'flex', gap: 8 }, onSubmit: goTyped },
               h('button', {
                 type: 'button',
                 style: { ...styles.button, flex: '0 0 auto' },
                 disabled: listing?.parent === undefined || loading,
-                onClick: () => { if (listing?.parent !== undefined) void browse(nodeId, listing.parent) },
+                onClick: () => { if (listing?.parent !== undefined) void browse(deviceId, listing.parent) },
               }, T.up),
               h('input', {
-                style: { ...styles.input, flex: '1 1 auto', fontFamily: 'var(--dsw-alias-font-code, ui-monospace, monospace)', fontSize: 12 },
+                style: { ...styles.input, flex: '1 1 auto', fontFamily: 'var(--dsw-font-markdown-code-font-family)', fontSize: 12 },
                 placeholder: current.length === 0 ? T.pathPlaceholder : current,
+                'aria-label': T.pathPlaceholder,
                 value: typed,
                 onChange: event => setTyped(event.target.value),
               }),
@@ -689,9 +1000,10 @@ window.__ModuleLoader__.load({
                   roots.map(root => h('button', {
                     key: root,
                     type: 'button',
-                    style: chipStyle(current === root ? { borderColor: 'var(--dsw-alias-brand-primary)' } : {}),
+                    style: styles.chip(current === root),
+                    'aria-pressed': current === root,
                     disabled: loading,
-                    onClick: () => { void browse(nodeId, root) },
+                    onClick: () => { void browse(deviceId, root) },
                   }, root)))
               : null,
 
@@ -721,39 +1033,36 @@ window.__ModuleLoader__.load({
               : h('div', { style: { display: 'flex', justifyContent: 'flex-start' } },
                   h('button', {
                     type: 'button',
-                    style: styles.button,
+                    style: { ...styles.button, display: 'inline-flex', alignItems: 'center', gap: 4 },
                     disabled: current.length === 0 || loading,
                     onClick: () => { setMakingFolder(true); setNewError(undefined) },
-                  }, `＋ ${T.newFolder}`)),
+                  }, h(IconPlusOutlineRegular, { size: 14 }), T.newFolder)),
 
             newError !== undefined
               ? h('div', { style: { ...styles.errorBar, margin: 0 } }, `${T.newFolderFailed}: ${newError}`)
               : null,
 
-            h('div', {
-              style: {
-                flex: '1 1 auto', minHeight: 120, maxHeight: 260, overflowY: 'auto',
-                border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 8, padding: 4,
-              },
-            },
-            loading
-              ? h('div', { style: styles.empty }, T.loading)
-              : (listing?.entries ?? []).length === 0
-                ? h('div', { style: styles.empty }, T.noFolders)
-                : (listing?.entries ?? []).map(entry => h('button', {
-                    key: entry.path,
-                    type: 'button',
-                    style: rowStyle,
-                    title: entry.path,
-                    onClick: () => void browse(nodeId, entry.path),
-                  }, h('span', { 'aria-hidden': true, style: { opacity: 0.6 } }, '📁'), entry.name))),
+            h('div', { style: styles.listFrame },
+              loading
+                ? h('div', { style: styles.empty }, T.loading)
+                : (listing?.entries ?? []).length === 0
+                  ? h('div', { style: styles.empty }, T.noFolders)
+                  : (listing?.entries ?? []).map(entry => h('button', {
+                      key: entry.path,
+                      type: 'button',
+                      style: rowStyle,
+                      title: entry.path,
+                      onClick: () => void browse(deviceId, entry.path),
+                    },
+                    h('span', { style: styles.deviceIcon, 'aria-hidden': true }, h(IconFolderCloseRegular, { size: 16 })),
+                    entry.name))),
 
-            listing?.truncated === true ? h('p', { style: styles.groupHint }, T.truncated) : null,
+            listing?.truncated === true ? h('p', { style: styles.hint }, T.truncated) : null,
 
             error !== undefined ? h('div', { style: { ...styles.errorBar, margin: 0 } }, error) : null,
 
             h('div', { style: { ...styles.actions, marginTop: 'auto' } },
-              h('button', { type: 'button', style: styles.button, onClick: () => setPage('form') }, T.cancel),
+              h('button', { type: 'button', style: styles.button, onClick: () => props.onCancel?.() }, T.cancel),
               h('button', {
                 type: 'button',
                 style: { ...styles.buttonPrimary, ...(current.length === 0 ? styles.buttonDisabled : {}) },
@@ -769,7 +1078,7 @@ window.__ModuleLoader__.load({
       // ---- the form itself: name → device → source folder -----------------------
       return h('div', { style: overlay, role: 'dialog', 'aria-label': title2 },
         h('div', { style: dialog },
-          header(title2, false),
+          header(title2),
 
           h('label', { style: styles.field },
             h('span', { style: styles.label }, asProject ? T.projectName : T.workspaceName),
@@ -780,40 +1089,32 @@ window.__ModuleLoader__.load({
               onChange: event => setTitle(event.target.value),
             })),
 
-          // Machine next, folder last: that is the one extra decision a remote workspace
-          // needs, and it is why the local picker could not do this job.
-          h('label', { style: styles.field },
+          // Device next, folder last: that is the one extra decision a remote workspace
+          // needs, and it is why the local picker could not do this job. The control is a
+          // button, not a `<select>`: the device chooser is a page with a device list, and
+          // a select cannot hold "add a device" as an option honestly.
+          h('div', { style: styles.field },
             h('span', { style: styles.label }, asProject ? T.device : T.machine),
-            h('span', { style: selectWrap },
-              h('select', {
-                style: selectStyle,
-                value: nodeId,
-                disabled: saving,
-                onChange: event => {
-                  if (event.target.value === '__add') setPage('device')
-                  else setNodeId(event.target.value)
-                },
-              },
-              nodeOptions.map(option => h('option', { key: option.id, value: option.id }, option.label)),
-              h('option', { value: '__add' }, T.addRemoteDevice)),
-              h('span', {
-                'aria-hidden': true,
-                style: {
-                  position: 'absolute', right: 11, pointerEvents: 'none',
-                  color: 'var(--dsw-alias-label-secondary)', fontSize: 10, lineHeight: 1,
-                },
-              }, '▼'))),
+            h('button', {
+              type: 'button',
+              style: styles.deviceButton,
+              disabled: saving,
+              onClick: () => setPage('device'),
+            },
+            h('span', { style: styles.deviceIcon, 'aria-hidden': true }, h(IconFolderCloseRegular, { size: 16 })),
+            h('span', { style: { flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, deviceLabel),
+            h(IconChevronsUpDownOutlineRegular, { size: 14, style: { flex: 'none', color: 'var(--dsw-alias-label-tertiary)' } }))),
 
           // The shipped form offers this right under the device, only for a remote one: a
           // folder that already exists there should not have to be found again by hand.
-          nodeId !== ''
-            ? h('p', { style: { ...styles.groupHint, margin: 0 } },
+          deviceId !== ''
+            ? h('p', { style: styles.hint },
                 T.existingOnDeviceHint, ' ',
                 h('button', {
                   type: 'button',
-                  style: { ...styles.link, color: 'var(--dsw-alias-brand-primary)' },
+                  style: styles.link,
                   onClick: () => { void openExisting() },
-                }, `${T.existingOnDeviceAction} ›`))
+                }, T.existingOnDeviceAction))
             : null,
 
           h('div', { style: styles.field },
@@ -822,26 +1123,21 @@ window.__ModuleLoader__.load({
               ? h('button', {
                   type: 'button',
                   style: folderSlot,
-                  onClick: () => setPage('browse'),
+                  onClick: () => setPage('device'),
                 },
-                h('span', { 'aria-hidden': true, style: { fontSize: 16, opacity: 0.7 } }, '📁'),
+                h('span', { style: styles.deviceIcon, 'aria-hidden': true }, h(IconFolderCloseRegular, { size: 18 })),
                 h('span', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
                   h('span', { style: { fontWeight: 500 } }, T.chooseFolder),
                   h('span', { style: { fontSize: 12, color: 'var(--dsw-alias-label-secondary)' } }, T.chooseFolderHint)))
-              : h('div', {
-                  style: {
-                    display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px',
-                    border: '1px solid var(--dsw-alias-border-l1)', borderRadius: 10,
-                  },
-                },
-                h('span', { 'aria-hidden': true, style: { fontSize: 16, opacity: 0.7 } }, '📁'),
+              : h('div', { style: styles.folderChoice },
+                h('span', { style: styles.deviceIcon, 'aria-hidden': true }, h(IconFolderCloseRegular, { size: 18 })),
                 h('span', { style: { flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 } },
                   h('span', { style: { fontSize: 13 } }, chosen.name),
                   h('span', { style: { ...styles.mono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, chosen.path)),
                 h('button', {
                   type: 'button',
                   style: styles.button,
-                  onClick: () => setPage('browse'),
+                  onClick: () => setPage('roots'),
                 }, T.changeFolder))),
 
           error !== undefined ? h('div', { style: { ...styles.errorBar, margin: 0 } }, error) : null,
@@ -896,10 +1192,10 @@ window.__ModuleLoader__.load({
     function NodeWorkspaces({ nodeId, workspaces, onAdded }) {
       return h('div', null,
         workspaces.length === 0
-          ? h('div', { style: styles.workspaceRow }, h('span', { style: styles.meta }, T.noWorkspaces))
-          : workspaces.map((workspace, index) => h('div', {
+          ? h('div', { style: styles.empty }, T.noWorkspaces)
+          : workspaces.map(workspace => h('div', {
               key: workspace.workspaceId,
-              style: { ...styles.workspaceRow, ...(index === 0 ? { borderTop: 'none' } : {}) },
+              style: styles.workspaceRow,
             },
             h('span', { style: { ...styles.dot(6), background: 'var(--dsw-alias-brand-primary)' }, 'aria-hidden': true }),
             h('div', { style: styles.grow },
@@ -908,8 +1204,25 @@ window.__ModuleLoader__.load({
         h(AddWorkspace, { nodeId, onAdded }))
     }
 
-    /** One remote node row. */
-    function NodeRow({ node, first, workspaces, onAction, onEdit, onRefresh }) {
+    /**
+     * An interactive card: the official `.cardLink` hover fill, done with state because an
+     * inline style cannot express `:hover`.
+     *
+     * Only rows that hold their own controls are wrapped — a card that offers a decision
+     * responds to the pointer, while a purely informational card (this machine) stays flat,
+     * which is the same split the shipped page makes between `.card` and `.cardLink`.
+     */
+    function HoverCard({ children }) {
+      const [hover, setHover] = useState(false)
+      return h('li', {
+        style: { ...styles.card, ...(hover ? styles.cardHover : {}) },
+        onMouseEnter: () => setHover(true),
+        onMouseLeave: () => setHover(false),
+      }, children)
+    }
+
+    /** One remote node row, as an official card: tile, title, one detail line, end actions. */
+    function NodeRow({ node, workspaces, onAction, onEdit, onRefresh }) {
       const [busy, setBusy] = useState(false)
       const [confirming, setConfirming] = useState(false)
       const [expanded, setExpanded] = useState(false)
@@ -923,53 +1236,74 @@ window.__ModuleLoader__.load({
           setBusy(false)
         }
       }
-      return h('div', { style: first ? styles.rowFirst : undefined },
-        h('div', { style: { ...styles.list, width: '100%', border: 'none', borderRadius: 0 } },
-          h('div', { style: { ...styles.row, ...(first ? styles.rowFirst : {}) } },
+      // The row is a card, not a hairline list item: the same 48 px tile / 14-20 title /
+      // one-line tertiary detail / end-slot shape the shipped plugin cards use.
+      return h(HoverCard, null,
+        h('div', { style: styles.cardHead },
+          h('span', { style: styles.cardIcon, 'aria-hidden': true }, h(PanelIcon, { size: 22 })),
+          h('div', { style: styles.cardMain },
+            h('div', { style: styles.cardTitle }, node.name),
+            h('div', { style: styles.cardDesc },
+              `${node.username}@${node.host}:${String(node.port)} · ${stateLabel(node)}`)),
+          h('div', { style: styles.cardEnd },
+            // The colour dot is the one piece kept from the old row: state is real
+            // information, and the official `.statusWithDot` pairs a dot with its label
+            // using the same `inline-flex` + 8 px gap shape, so it heads the end slot.
             h('span', {
-              style: { ...styles.dot(9), background: STATE_COLOR[node.state] ?? STATE_COLOR.idle },
+              style: { ...styles.dot(8), background: STATE_COLOR[node.state] ?? STATE_COLOR.idle },
               'aria-hidden': true,
             }),
-            h('div', { style: styles.grow },
-              h('div', { style: styles.name }, node.name),
-              h('div', { style: styles.meta },
-                `${node.username}@${node.host}:${String(node.port)} · ${stateLabel(node)}`)),
             connecting
               ? h('span', { style: styles.meta }, T.connecting)
               : connected
                 ? h('button', {
+                    type: 'button',
                     style: styles.button,
                     onClick: () => setExpanded(current => !current),
                   }, `${T.workspaces} (${String(workspaces.length)})`)
                 : h('button', {
+                    type: 'button',
                     style: { ...styles.button, ...(busy ? styles.buttonDisabled : {}) },
                     disabled: busy,
                     onClick: () => { run('connect').catch(() => undefined) },
                   }, node.state === 'failed' ? T.retry : T.connect),
             connected
               ? h('button', {
+                  type: 'button',
                   style: { ...styles.button, ...(busy ? styles.buttonDisabled : {}) },
                   disabled: busy,
                   onClick: () => { run('disconnect').catch(() => undefined) },
                 }, T.disconnect)
               : null,
-            h('button', { style: styles.link, onClick: () => onEdit(node) }, T.edit),
+            h('button', { type: 'button', style: styles.link, onClick: () => onEdit(node) }, T.edit),
             confirming
-              ? h(React.Fragment, null,
-                  h('span', { style: styles.meta }, T.removeConfirm),
-                  h('button', { style: styles.buttonDanger, onClick: () => { onAction(node.id, 'remove').catch(() => undefined) } }, T.remove),
-                  h('button', { style: styles.link, onClick: () => setConfirming(false) }, T.cancel))
-              : h('button', { style: styles.link, onClick: () => setConfirming(true) }, T.remove),
-          ),
-          connecting && node.phase !== undefined ? h(PhaseList, { phase: node.phase }) : null,
-          expanded && connected
-            ? h(NodeWorkspaces, { nodeId: node.id, workspaces, onAdded: onAction === undefined ? undefined : onRefresh })
-            : null,
-          node.error !== undefined
-            ? h('div', { style: styles.errorBar },
-                h('div', null, h('strong', null, `${T.errorTitle}: `), node.error))
-            : null,
-        ))
+              ? null
+              : h('button', { type: 'button', style: styles.link, onClick: () => setConfirming(true) }, T.remove))),
+        // Everything that hangs below the head lines up with the text column, the way the
+        // official `.card > .reason` indents past the icon instead of running full width.
+        confirming
+          ? h('div', { style: { ...styles.cardReason, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+              h('span', { style: styles.meta }, T.removeConfirm),
+              h('button', {
+                type: 'button',
+                style: styles.buttonDanger,
+                onClick: () => { onAction(node.id, 'remove').catch(() => undefined) },
+              }, T.remove),
+              h('button', { type: 'button', style: styles.link, onClick: () => setConfirming(false) }, T.cancel))
+          : null,
+        connecting && node.phase !== undefined
+          ? h('div', { style: styles.cardReason }, h(PhaseList, { phase: node.phase }))
+          : null,
+        expanded && connected
+          ? h('div', { style: styles.cardReason },
+              h(NodeWorkspaces, { nodeId: node.id, workspaces, onAdded: onAction === undefined ? undefined : onRefresh }))
+          : null,
+        node.error !== undefined
+          ? h('div', { style: styles.cardReason },
+              h('div', { style: styles.errorBar },
+                h('div', null, h('strong', null, `${T.errorTitle}: `), node.error)))
+          : null,
+      )
     }
 
     /** The add/edit form for one node. */
@@ -1235,20 +1569,24 @@ window.__ModuleLoader__.load({
       /**
        * One switch, drawn like the shipped toggle.
        *
-       * This plugin cannot import another plugin's control, so the switch is local. It
-       * keeps the same shape and the same `role="switch"` semantics so both pages read
-       * as one product.
+       * This plugin cannot import another plugin's control, so the switch is local. The
+       * values are copied from the shipped `._switch_` rule in the shell's stylesheet
+       * (`index-CSAdOBx6.css`): 36×20 with 2 px padding, the thumb is `border-l3` when
+       * off and the label-foreground colour when on, and the state is carried by
+       * `aria-checked` the way that rule reads it.
        */
-      const switchStyle = on => ({
-        position: 'relative', flex: '0 0 auto', width: 36, height: 20, padding: 0,
-        appearance: 'none', border: 'none', borderRadius: 999, cursor: 'pointer',
-        background: on ? 'var(--dsw-alias-brand-primary)' : 'var(--dsw-alias-border-l2)',
-        transition: 'background 120ms ease',
-      })
+      const switchStyle = {
+        boxSizing: 'border-box', position: 'relative', flex: '0 0 auto',
+        width: 36, height: 20, padding: 2, border: 0, borderRadius: 999,
+        appearance: 'none', cursor: 'pointer',
+        background: 'var(--dsw-alias-border-l3)',
+      }
+      const switchOnStyle = { background: 'var(--dsw-alias-brand-primary)' }
       const thumbStyle = on => ({
-        position: 'absolute', top: 2, left: on ? 18 : 2, width: 16, height: 16,
-        borderRadius: '50%', background: '#fff', transition: 'left 120ms ease',
-        boxShadow: '0 1px 2px rgba(0,0,0,0.25)',
+        display: 'block', width: 16, height: 16, borderRadius: '50%',
+        background: on ? 'var(--dsw-alias-label-primary-foreground)' : 'var(--dsw-alias-switch-thumb)',
+        transition: 'transform .12s ease',
+        transform: on ? 'translate(16px)' : 'none',
       })
 
       const detail = row => {
@@ -1273,103 +1611,102 @@ window.__ModuleLoader__.load({
         return { title: title ?? row.bundle, description }
       }
 
-      const rowNode = row => h('div', {
-        key: row.bundle,
-        style: { ...styles.workspaceRow, padding: '12px 14px', alignItems: 'flex-start', gap: 12 },
-      },
-      // The icon is the bundle's own, resolved the way DSH resolves it for its plugin
-      // page; without one the row shows a neutral tile rather than a broken image.
-      row.meta?.icon === undefined
-        ? h('span', {
-            style: {
-              flex: '0 0 auto', width: 36, height: 36, borderRadius: 9,
-              background: 'var(--dsw-alias-bg-layer-2, var(--dsw-alias-border-l1))',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: 'var(--dsw-alias-label-secondary)',
-            },
-            'aria-hidden': true,
-          }, h(PluginGlyph, { size: 18 }))
-        : h('img', {
-            src: row.meta.icon,
-            alt: '',
-            style: { flex: '0 0 auto', width: 36, height: 36, borderRadius: 9, objectFit: 'cover' },
-          }),
-      h('div', { style: { ...styles.grow, display: 'flex', flexDirection: 'column', gap: 3 } },
-        h('div', { style: { ...styles.name, fontWeight: 500 } }, metaText(row).title),
-        metaText(row).description === undefined
-          ? null
-          : h('div', {
+      const rowNode = row => h(HoverCard, { key: row.bundle },
+        h('div', { style: styles.cardHead },
+          // The icon is the bundle's own, resolved the way DSH resolves it for its plugin
+          // page; without one the row shows the neutral tile rather than a broken image.
+          // Both live inside the 48 px tile so the row's height and rhythm are identical
+          // whether or not the bundle ships artwork.
+          row.meta?.icon === undefined
+            ? h('span', { style: styles.cardIcon, 'aria-hidden': true }, h(PluginGlyph, { size: 22 }))
+            : h('span', { style: styles.cardIcon },
+                h('img', {
+                  src: row.meta.icon,
+                  alt: '',
+                  style: { width: 32, height: 32, objectFit: 'contain', display: 'block' },
+                })),
+          h('div', { style: styles.cardMain },
+            h('div', { style: styles.cardTitle }, metaText(row).title),
+            // One description line is all the official card shows; the identity and the
+            // local state go into the title attribute rather than a third line, so a long
+            // description is clamped exactly like the shipped one instead of pushing the
+            // switch out of the row's rhythm.
+            h('div', {
+              style: styles.cardDesc,
+              title: metaText(row).description === undefined ? detail(row) : `${metaText(row).description} · ${detail(row)}`,
+            }, metaText(row).description ?? `${row.bundle} · ${detail(row)}`)),
+          h('div', { style: styles.cardEnd },
+            h('button', {
+              type: 'button',
+              role: 'switch',
+              'aria-checked': row.sync === true,
+              'aria-label': metaText(row).title,
+              title: row.sync === true ? T.pluginOnHint : T.pluginOffHint,
+              disabled: busy === row.bundle,
               style: {
-                fontSize: 12, lineHeight: 1.45, color: 'var(--dsw-alias-label-secondary)',
-                display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+                ...switchStyle,
+                ...(row.sync === true ? switchOnStyle : {}),
+                ...(busy === row.bundle ? { opacity: 0.5, cursor: 'default' } : {}),
               },
-            }, metaText(row).description),
-        // The identity and the local state stay readable, but they are the second line:
-        // the title above is what a person recognizes.
-        h('div', { style: styles.mono, title: detail(row) }, `${row.bundle} · ${detail(row)}`)),
-      h('button', {
-        type: 'button',
-        role: 'switch',
-        'aria-checked': row.sync === true,
-        'aria-label': metaText(row).title,
-        title: row.sync === true ? T.pluginOnHint : T.pluginOffHint,
-        disabled: busy === row.bundle,
-        style: {
-          ...switchStyle(row.sync === true),
-          ...(busy === row.bundle ? { opacity: 0.5, cursor: 'default' } : {}),
-          marginTop: 2,
-        },
-        onClick: () => { void toggle(row) },
-      }, h('span', { style: thumbStyle(row.sync === true), 'aria-hidden': true })))
+              onClick: () => { void toggle(row) },
+            }, h('span', { style: thumbStyle(row.sync === true), 'aria-hidden': true })))))
 
-      return h('section', null,
-        h('div', { style: styles.groupHeader },
-          h('h2', { style: styles.groupTitle }, T.plugins),
-          h('p', { style: styles.groupHint }, T.pluginsHint)),
+      return h('section', { style: styles.group },
+        h(GroupHead, { title: T.plugins, hint: T.pluginsHint }),
         error !== undefined
-          ? h('div', { style: { ...styles.errorBar, margin: '0 0 10px' } }, error)
+          ? h('div', { style: styles.errorBar }, error)
           : null,
         note !== undefined
-          ? h('p', { style: { ...styles.groupHint, margin: '0 0 10px' } }, note)
+          ? h('p', { style: styles.hint }, note)
           : null,
         rows === undefined
-          ? h('div', { style: { ...styles.list, ...styles.empty } }, T.pluginFailed)
+          ? h('div', { style: styles.empty }, T.pluginFailed)
           : rows.length === 0
-            ? h('div', { style: { ...styles.list, ...styles.empty } }, T.pluginsNone)
-            : h('div', { style: styles.list },
-                rows.map((row, index) => h('div', {
-                  key: row.bundle,
-                  style: { ...styles.row, ...(index === 0 ? styles.rowFirst : {}) },
-                }, rowNode(row)))),
+            ? h('div', { style: styles.empty }, T.pluginsNone)
+            : h('ul', { style: styles.cards }, rows.map(rowNode)),
       )
     }
 
-    /** The full node list with its add/edit form. */
-    function FleetBody({ compact }) {
+    /**
+     * The fleet groups, in the official skeleton: each is a `group` whose head carries a
+     * title, a one-line hint and (for the remote group) the primary add button, followed by
+     * `cards` — one `card` per machine or plugin.
+     */
+    function FleetBody() {
       const fleet = useFleet()
       const [editing, setEditing] = useState(undefined)
       const remote = useMemo(() => fleet.nodes.filter(node => node.id !== undefined), [fleet.nodes])
-      return h('div', { style: compact ? { padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 18 } : { display: 'contents' } },
-        h('section', null,
-          h('div', { style: styles.groupHeader },
-            h('h2', { style: styles.groupTitle }, T.local),
-            h('p', { style: styles.groupHint }, T.localHint)),
-          h('div', { style: styles.list },
-            h('div', { style: { ...styles.row, ...styles.rowFirst } },
-              h('span', { style: { ...styles.dot(9), background: 'var(--dsw-alias-state-success-primary)' }, 'aria-hidden': true }),
-              h('div', { style: styles.grow },
-                h('div', { style: styles.name }, zh ? '本机 Harness' : 'This Harness'),
-                h('div', { style: styles.meta }, fleet.version === '' ? '' : `DSH ${fleet.version}`)),
-            )),
-        ),
-        h('section', null,
-          h('div', { style: styles.groupHeader },
-            h('h2', { style: styles.groupTitle }, T.remote),
-            h('p', { style: styles.groupHint }, T.remoteHint),
-            h('button', {
-              style: { ...styles.buttonPrimary, marginLeft: 'auto' },
+      // A fragment, not a wrapper: `pageBody` applies its `gap:32` to its children, so the
+      // three groups have to be its direct children for the official rhythm to hold.
+      return h(React.Fragment, null,
+        h('section', { style: styles.group },
+          h(GroupHead, { title: T.local, hint: T.localHint }),
+          h('ul', { style: styles.cards },
+            h('li', { style: styles.card },
+              h('div', { style: styles.cardHead },
+                h('span', { style: styles.cardIcon, 'aria-hidden': true }, h(PluginGlyph, { size: 22 })),
+                h('div', { style: styles.cardMain },
+                  h('div', { style: styles.cardTitle }, zh ? '本机 Harness' : 'This Harness'),
+                  fleet.version === ''
+                    ? null
+                    : h('div', { style: styles.cardDesc }, `DSH ${fleet.version}`)),
+                h('div', { style: styles.cardEnd },
+                  // This machine is always running the Harness you are looking at, so the
+                  // dot is the one status the page can state without asking the Host.
+                  h('span', {
+                    style: { ...styles.dot(8), background: 'var(--dsw-alias-state-success-primary)' },
+                    'aria-hidden': true,
+                  })))))),
+        h('section', { style: styles.group },
+          h(GroupHead, {
+            title: T.remote,
+            hint: T.remoteHint,
+            action: h('button', {
+              type: 'button',
+              style: styles.buttonPrimary,
               onClick: () => setEditing({ next: true }),
-            }, T.add)),
+            }, T.add),
+          }),
           editing !== undefined && editing.next === true
             ? h(NodeForm, {
                 onSubmit: async draft => {
@@ -1390,49 +1727,70 @@ window.__ModuleLoader__.load({
               })
             : null,
           remote.length === 0
-            ? h('div', { style: { ...styles.list, ...styles.empty } }, T.empty)
-            : h('div', { style: styles.list },
-                remote.map((node, index) => h(NodeRow, {
+            ? h('div', { style: styles.empty }, T.empty)
+            : h('ul', { style: styles.cards },
+                remote.map(node => h(NodeRow, {
                   key: node.id,
                   node,
-                  first: index === 0,
                   workspaces: workspacesOf(fleet.workspaces, node.id),
                   onAction: fleet.action,
                   onEdit: setEditing,
                   onRefresh: fleet.reload,
                 }))),
           fleet.error !== undefined
-            ? h('div', { style: { ...styles.errorBar, margin: 0, marginTop: 10 } }, fleet.error)
-            : null,
-        ),
+            ? h('div', { style: styles.errorBar }, fleet.error)
+            : null),
         remote.length > 0
-          ? h('section', null,
-              h('div', { style: styles.groupHeader },
-                h('h2', { style: styles.groupTitle }, T.workspaces),
-                h('p', { style: styles.groupHint }, T.workspacesHint)))
+          ? h('section', { style: styles.group },
+              h(GroupHead, { title: T.workspaces, hint: T.workspacesHint }))
           : null,
         h(PluginSyncSection),
       )
     }
 
-    /** Settings section page. */
-    function SettingsSection() {
-      return h('div', { style: styles.page },
-        h('header', null,
-          h('h1', { style: styles.h1 }, T.sectionTitle),
-          h('p', { style: styles.subtitle }, T.subtitle)),
-        h(FleetBody, { compact: false }),
-      )
+    /**
+     * One group head: a title that never shrinks, a hint that yields, and an optional
+     * right-hand action.
+     *
+     * The hint is single-line and ellipsised — that is what the official group head is, and
+     * a wrapping hint is what used to squeeze the title into a 23 px vertical strip. The
+     * full sentence stays reachable through `title`, so nothing is actually lost.
+     */
+    function GroupHead({ title, hint, action }) {
+      return h('div', { style: styles.groupHead },
+        h('h2', { style: styles.groupTitle }, title),
+        h('p', { style: styles.groupHint, title: hint }, hint),
+        action === undefined ? null : action)
     }
 
-    /** Main-column panel page. */
-    function PanelPage() {
+    /**
+     * The official page skeleton, shared by the settings section and the panel page.
+     *
+     * `page` is the fixed frame, `pageHead` the title block that never scrolls, and
+     * `pageBody` the single scrolling column — which is what makes these pages read like
+     * the shipped plugin page rather than like a panel with its own padding. `toolbar` is
+     * the optional right-hand slot the official head reserves for page-level actions.
+     */
+    function PageFrame({ title, intro, toolbar, children }) {
       return h('div', { style: styles.page },
-        h('header', null,
-          h('h1', { style: styles.h1 }, T.title),
-          h('p', { style: styles.subtitle }, T.subtitle)),
-        h(FleetBody, { compact: false }),
-      )
+        h('header', { style: styles.pageHead },
+          h('div', { style: styles.pageHeading },
+            h('h1', { style: styles.pageTitle }, title),
+            h('p', { style: styles.pageIntro }, intro)),
+          toolbar === undefined ? null : h('div', { style: styles.toolbar }, toolbar)),
+        h('div', { style: styles.pageBody }, children))
+    }
+
+    /** Settings section page. */
+    function SettingsSection() {
+      return h(PageFrame, { title: T.sectionTitle, intro: T.subtitle },
+        h(FleetBody))
+    }
+
+    /** Main-column panel page: the same skeleton, with this surface's own title. */
+    function PanelPage() {
+      return h(PageFrame, { title: T.title, intro: T.subtitle },
+        h(FleetBody))
     }
 
     /** Sidebar panel icon: a console joined to a server. */
