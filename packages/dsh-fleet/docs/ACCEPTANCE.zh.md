@@ -567,7 +567,8 @@ fleet 随即报节点掉线，于是 `plugin-switch` / `tool-parity` / `tool-git
 | 纯逻辑 + 组合 | `run-all.mjs --layer offline` | **14 passed, 0 failed, 0 skipped in 2.3s** |
 | 契约缝隙 | `run-all.mjs --layer contract` | **3 passed, 0 failed, 0 skipped in 709ms** |
 | 端到端（18 套件，`fleettest` + 真节点 `probe-93`） | `run-all.mjs --layer e2e` | **17 passed, 0 failed, 1 skipped in 270.0s** |
-| 节点侧损坏计数（跑 e2e 前 → 后） | `grep -c 'Connection corrupted' /var/log/auth.log` | **2024 → 2024（+0）** |
+| 全量冷启动（35 套件，三层） | `run-all.mjs` | **34 passed, 0 failed, 1 skipped in 289.8s** |
+| 节点侧损坏计数（全量跑前 → 后） | `grep -c 'Connection corrupted' /var/log/auth.log` | **2024 → 2024（+0）** |
 
 唯一 SKIP 是 `e2e/browser`（未设 `DSH_BROWSER_DEBUG_PORT`），不是通过。
 
