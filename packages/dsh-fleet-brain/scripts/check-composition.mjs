@@ -29,7 +29,18 @@ const check = (ok, label, detail) => {
   if (!ok) failures.push(label)
 }
 
-const text = readFileSync(PATCH, 'utf8')
+/**
+ * The patch text, with line endings normalised to `\n`.
+ *
+ * Several checks below match a **row shape** across lines
+ * (`^- id: tool-bash\n  disabled: true$`). This repository sets `core.autocrlf=true`
+ * for Windows contributors, so a fresh clone checks the file out with CRLF and every
+ * one of those patterns stops matching — the check then reports six agent-plane rows
+ * as missing on a composition that is perfectly correct. Measured: `check-composition`
+ * failed on a clean `git worktree` of an unchanged commit and passed in the working
+ * tree, which is the signature of a line-ending artefact rather than a real drift.
+ */
+const text = readFileSync(PATCH, 'utf8').replace(/\r\n/gu, '\n')
 
 /** Every row id the patch names, whether inserted or targeted. */
 function rowIds(source) {
