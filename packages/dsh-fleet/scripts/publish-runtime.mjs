@@ -57,7 +57,8 @@ const value = (name, fallback) => {
 const platform = value('platform', 'linux-x64')
 const outDir = resolve(pluginRoot, value('out', '../../dist'))
 const shouldPublish = flag('publish')
-const shouldPublishCnb = flag('cnb')
+const shouldPublishCnb = flag('cnb') || flag('cnb-only')
+const cnbOnly = flag('cnb-only')
 const tag = value('tag', undefined)
 const registry = value('registry', 'https://registry.npmmirror.com')
 const cnbRepository = value('cnb-repo', 'serendipity-archive/dsh-fleet')
@@ -165,102 +166,128 @@ function strip(dir, base = dir) {
 
 const version = installedVersion()
 const name = `dsh-${version}-${platform}.tar.gz`
+const archive = join(outDir, name)
 const staging = join(outDir, `.staging-${version}-${platform}`)
 const runtime = join(staging, 'node_modules')
 
-mkdirSync(outDir, { recursive: true })
-rmSync(staging, { recursive: true, force: true })
-mkdirSync(runtime, { recursive: true })
+/** Pack a fresh tree, or reuse one a CI runner already built. */
+function pack() {
+  mkdirSync(outDir, { recursive: true })
+  rmSync(staging, { recursive: true, force: true })
+  mkdirSync(runtime, { recursive: true })
 
-// A minimal manifest so npm installs a *tree* rather than resolving a project.
-writeFileSync(join(staging, 'package.json'), `${JSON.stringify({
-  name: 'dsh-fleet-runtime',
-  private: true,
-  dependencies: { '@deepseek-ai/dsh': version },
-}, undefined, 2)}\n`, 'utf8')
+  // A minimal manifest so npm installs a *tree* rather than resolving a project.
+  writeFileSync(join(staging, 'package.json'), `${JSON.stringify({
+    name: 'dsh-fleet-runtime',
+    private: true,
+    dependencies: { '@deepseek-ai/dsh': version },
+  }, undefined, 2)}\n`, 'utf8')
 
-process.stdout.write(`resolving @deepseek-ai/dsh ${version} for ${platform}\n`)
-// `--ignore-scripts` is load-bearing, not a speed-up. A package's `install` script runs with
-// **this** machine's `process.platform`, so koffi's `cnoke` compiles for Windows even when
-// npm was asked to resolve `--os=linux --cpu=x64`. Measured on the rc.5 archive built the old
-// way: 48 `.exe`/`.cmd`/`.dll`/`.lib` files and 147 `koffi/build/win32_x64/**` entries inside
-// a `linux-x64` artefact, and the packer's own `koffi/build` shadowed the resolved
-// `@koromix/koffi-linux-x64` (which `koffi`'s loader checks *first*, so it kept working —
-// on a tree that was 0.9 MB larger and wrong).
-//
-// Nothing is lost by skipping them: every native dependency in this tree ships a prebuilt
-// platform package (`@koromix/koffi-linux-x64`, `@img/sharp-linux-x64`,
-// `sherpa-onnx-linux-x64`, `node-pty/prebuilds/linux-x64/pty.node`). Measured both ways:
-// with scripts 968.2 MiB / 94106 files, without 957.3 MiB and all four native modules
-// present. The one script that does real work is `dsh-subprocess-local`'s, which restores
-// `+x` on a helper — and the node fixes modes itself when it unpacks (see `installScript`).
-const install = spawnSync('npm', [
-  'install',
-  '--prefix', staging,
-  '--no-audit', '--no-fund', '--loglevel=error',
-  '--ignore-scripts',
-  '--registry', registry,
-  ...npmPlatform(platform),
-], { stdio: 'inherit', shell: process.platform === 'win32' })
-if (install.status !== 0) throw new Error(`npm install failed with status ${String(install.status)}`)
+  process.stdout.write(`resolving @deepseek-ai/dsh ${version} for ${platform}\n`)
+  // `--ignore-scripts` is load-bearing, not a speed-up. A package's `install` script runs with
+  // **this** machine's `process.platform`, so koffi's `cnoke` compiles for Windows even when
+  // npm was asked to resolve `--os=linux --cpu=x64`. Measured on the rc.5 archive built the old
+  // way: 48 `.exe`/`.cmd`/`.dll`/`.lib` files and 147 `koffi/build/win32_x64/**` entries inside
+  // a `linux-x64` artefact, and the packer's own `koffi/build` shadowed the resolved
+  // `@koromix/koffi-linux-x64` (which `koffi`'s loader checks *first*, so it kept working —
+  // on a tree that was 0.9 MB larger and wrong).
+  //
+  // Nothing is lost by skipping them: every native dependency in this tree ships a prebuilt
+  // platform package (`@koromix/koffi-linux-x64`, `@img/sharp-linux-x64`,
+  // `sherpa-onnx-linux-x64`, `node-pty/prebuilds/linux-x64/pty.node`). Measured both ways:
+  // with scripts 968.2 MiB / 94106 files, without 957.3 MiB and all four native modules
+  // present. The one script that does real work is `dsh-subprocess-local`'s, which restores
+  // `+x` on a helper — and the node fixes modes itself when it unpacks (see `installScript`).
+  const install = spawnSync('npm', [
+    'install',
+    '--prefix', staging,
+    '--no-audit', '--no-fund', '--loglevel=error',
+    '--ignore-scripts',
+    '--registry', registry,
+    ...npmPlatform(platform),
+  ], { stdio: 'inherit', shell: process.platform === 'win32' })
+  if (install.status !== 0) throw new Error(`npm install failed with status ${String(install.status)}`)
 
-const cli = join(runtime, '@deepseek-ai', 'dsh', 'lib', 'bin.js')
-if (!existsSync(cli)) throw new Error(`the resolved tree has no ${cli}; refusing to publish it`)
+  const cli = join(runtime, '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  if (!existsSync(cli)) throw new Error(`the resolved tree has no ${cli}; refusing to publish it`)
 
-// The lock file and npm's own metadata describe a *project*, not the runtime a node
-// starts. Keeping them would let a later `npm install` on the node rewrite the tree.
-for (const scratch of ['package.json', 'package-lock.json', 'node_modules/.package-lock.json']) {
-  rmSync(join(staging, scratch), { force: true })
-}
-
-const before = measure(staging)
-const stripped = strip(staging)
-const after = measure(staging)
-
-// Restore the executable bit — but only where the packer has POSIX modes to restore.
-//
-// Measured, and worse than expected: bsdtar on Windows writes `-rw-rw-rw-` for **every**
-// entry, `chmodSync` is a no-op there (Windows has no exec bit), and no `tar` flag changes
-// it — `--owner=0 --group=0` is accepted and changes nothing. So on a Windows packer the
-// archive *cannot* carry modes at all, which is why the load-bearing fix is the `chmod` in
-// `installScript` on the node (it also repairs archives already published). This step still
-// matters for the CI matrix, where the same script runs on ubuntu and macos runners and the
-// modes it sets are the modes that ship.
-let chmodded = 0
-const restore = dir => {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name)
-    if (entry.isDirectory()) { restore(full); continue }
-    if (entry.name !== 'spawn-helper' && !entry.name.endsWith('.node')) continue
-    try {
-      chmodSync(full, 0o755)
-      chmodded += 1
-    } catch { /* the node fixes it on unpack */ }
+  // The lock file and npm's own metadata describe a *project*, not the runtime a node
+  // starts. Keeping them would let a later `npm install` on the node rewrite the tree.
+  for (const scratch of ['package.json', 'package-lock.json', 'node_modules/.package-lock.json']) {
+    rmSync(join(staging, scratch), { force: true })
   }
+
+  const before = measure(staging)
+  const stripped = strip(staging)
+  const after = measure(staging)
+
+  // Restore the executable bit — but only where the packer has POSIX modes to restore.
+  //
+  // Measured, and worse than expected: bsdtar on Windows writes `-rw-rw-rw-` for **every**
+  // entry, `chmodSync` is a no-op there (Windows has no exec bit), and no `tar` flag changes
+  // it — `--owner=0 --group=0` is accepted and changes nothing. So on a Windows packer the
+  // archive *cannot* carry modes at all, which is why the load-bearing fix is the `chmod` in
+  // `installScript` on the node (it also repairs archives already published). This step still
+  // matters for the CI matrix, where the same script runs on ubuntu and macos runners and the
+  // modes it sets are the modes that ship.
+  let chmodded = 0
+  const restore = dir => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) { restore(full); continue }
+      if (entry.name !== 'spawn-helper' && !entry.name.endsWith('.node')) continue
+      try {
+        chmodSync(full, 0o755)
+        chmodded += 1
+      } catch { /* the node fixes it on unpack */ }
+    }
+  }
+  restore(staging)
+
+  rmSync(archive, { force: true })
+  // A subprocess rather than a library: `tar` is on every platform this ships to, and
+  // this script must not add a dependency to the plugin.
+  const tarred = spawnSync('tar', ['-czf', archive, '-C', staging, '.'], { stdio: 'inherit' })
+  if (tarred.status !== 0) throw new Error(`tar failed with status ${String(tarred.status)}`)
+  rmSync(staging, { recursive: true, force: true })
+
+  const bytes = readFileSync(archive)
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  writeFileSync(`${archive}.sha256`, `${sha256}  ${name}\n`, 'utf8')
+
+  const mib = value => (value / 1024 / 1024).toFixed(1)
+  process.stdout.write(
+    `wrote ${name}\n`
+    + `  archive  ${mib(bytes.length)} MiB\n`
+    + `  unpacked ${after.files} files, ${mib(after.bytes)} MiB`
+    + ` (${mib(stripped)} MiB stripped from ${before.files})\n`
+    + `  modes    ${String(chmodded)} files marked 0755\n`
+    + `  sha256   ${sha256}\n`,
+  )
+  return sha256
 }
-restore(staging)
 
-const archive = join(outDir, name)
-rmSync(archive, { force: true })
-// A subprocess rather than a library: `tar` is on every platform this ships to, and
-// this script must not add a dependency to the plugin.
-const tarred = spawnSync('tar', ['-czf', archive, '-C', staging, '.'], { stdio: 'inherit' })
-if (tarred.status !== 0) throw new Error(`tar failed with status ${String(tarred.status)}`)
-rmSync(staging, { recursive: true, force: true })
+/**
+ * Read back the hash of an archive somebody else built.
+ *
+ * `--cnb-only` is the CI path: the matrix legs pack on the matching runner (where `tar` can
+ * record the executable bit) and this job only uploads. Re-resolving there would need a
+ * registry and several minutes per platform for bytes that already exist.
+ */
+function adoptExisting() {
+  if (!existsSync(archive)) {
+    throw new Error(`--cnb-only expects ${archive}; CI downloads the artifacts into --out first`)
+  }
+  const bytes = readFileSync(archive)
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const sidecar = `${archive}.sha256`
+  if (!existsSync(sidecar)) writeFileSync(sidecar, `${sha256}  ${name}\n`, 'utf8')
+  process.stdout.write(`uploading the existing ${name} (${(bytes.length / 1024 / 1024).toFixed(1)} MiB)\n`)
+  return sha256
+}
 
-const bytes = readFileSync(archive)
-const sha256 = createHash('sha256').update(bytes).digest('hex')
-writeFileSync(`${archive}.sha256`, `${sha256}  ${name}\n`, 'utf8')
+const sha256 = cnbOnly ? adoptExisting() : pack()
 
-const mib = value => (value / 1024 / 1024).toFixed(1)
-process.stdout.write(
-  `wrote ${name}\n`
-  + `  archive  ${mib(bytes.length)} MiB\n`
-  + `  unpacked ${after.files} files, ${mib(after.bytes)} MiB`
-  + ` (${mib(stripped)} MiB stripped from ${before.files})\n`
-  + `  modes    ${String(chmodded)} files marked 0755\n`
-  + `  sha256   ${sha256}\n`,
-)
 
 if (!shouldPublish && !shouldPublishCnb) {
   process.stdout.write(

@@ -145,6 +145,65 @@ jobs:
             || echo "release ${tag} already exists; uploading into it"
           gh release upload "$tag" dist/dsh-*.tar.gz dist/dsh-*.tar.gz.sha256 --clobber
 
+  # The primary source, and the reason it is a separate job: the matrix legs produce
+  # archives, and only a successful pack of one platform should be published to CNB. CNB
+  # serves the archive straight (measured 4.3 MB/s on the reference node, spread under 1%)
+  # where an accelerator varies by a factor of 40 between runs.
+  #
+  # `CNB_TOKEN` is a repository secret and never appears in a log. Without it this job is
+  # skipped, and GitHub remains the only destination — which is exactly the pre-CNB state,
+  # so a fork that has no token still publishes.
+  cnb:
+    name: Publish to CNB
+    needs: pack
+    if: ${{ needs.pack.result != 'failure' && (github.event_name == 'repository_dispatch' || inputs.publish) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Resolve the version
+        id: wanted
+        shell: bash
+        run: |
+          set -eu
+          version="${{ github.event.inputs.version || github.event.client_payload.version }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Collect every platform's archive
+        uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload each archive
+        shell: bash
+        env:
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        # `publish-runtime.mjs --cnb` repacks before uploading, which would need a registry
+        # and several minutes per platform. `--cnb-only` takes the archives that were already
+        # built on the matching runners and only does the upload half.
+        run: |
+          set -eu
+          if [ -z "${CNB_TOKEN}" ]; then
+            echo "::notice::CNB_TOKEN is not configured; CNB is skipped and GitHub is the only destination"
+            exit 0
+          fi
+          version="${{ steps.wanted.outputs.version }}"
+          for archive in dist/dsh-*.tar.gz; do
+            platform="$(basename "$archive" .tar.gz)"
+            platform="${platform#dsh-${version}-}"
+            node packages/dsh-fleet/scripts/publish-runtime.mjs \
+              --version "$version" \
+              --platform "$platform" \
+              --out dist \
+              --cnb-only
+          done
+
   # One summary job, so a person reading the run knows whether nodes can take the fast path
   # for this release without opening four logs.
   summary:
