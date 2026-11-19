@@ -166,6 +166,18 @@ check(!('syncBlock' in plan), 'the overlay takes no per-plugin block')
 check(!/disabled:/u.test(renderBrainPatch({ ...plan, syncBlock: '- id: bash' })),
   'and a leftover per-plugin block is not written into the node patch')
 
+// An empty roster must still be a YAML **array**. A header-only file parses to `null`, and the
+// resident host refuses to boot with "must be a top-level YAML array of loader patch entries" —
+// measured on the real node: one sync with no copyable rows left exactly such a file, and every
+// later start failed, including the `ensureServing` that same sync went on to report as fine.
+const emptyOverlay = renderBrainPatch({ rows: [], version: '0.2.2-rc.3' })
+check(emptyOverlay.trimEnd().endsWith('[]'),
+  'an overlay with no rows still writes a top-level array', JSON.stringify(emptyOverlay.slice(-40)))
+if (YAML !== undefined) {
+  check(Array.isArray(YAML.load(emptyOverlay)),
+    'and it parses to an array, not null', JSON.stringify(YAML.load(emptyOverlay)))
+}
+
 if (YAML === undefined) {
   log('note: no YAML parser available; skipping the round-trip checks')
 } else {

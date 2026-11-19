@@ -364,6 +364,7 @@ export class SshConnection {
     const client = this.#client
     this.#client = undefined
     if (client !== undefined) {
+      this.target.log?.('ssh: dispose() ends the connection')
       this.#ending.add(client)
       try { client.end() } catch { /* already gone */ }
     }
@@ -375,6 +376,10 @@ export class SshConnection {
     this.#client = undefined
     this.#sftp = undefined
     if (client !== undefined) {
+      // Whoever calls this kills every channel on the connection, including a `exec` another
+      // step is waiting on. That is intentional for `disconnect()` and for a credential
+      // change, but it is invisible in a log, so it is named here.
+      this.target.log?.(`ssh: invalidate() drops the connection (${new Error('caller').stack?.split('\n')[2]?.trim() ?? ''})`)
       this.#ending.add(client)
       try { client.end() } catch { /* already gone */ }
     }
@@ -450,9 +455,30 @@ export class SshConnection {
       client.on('error', error => {
         // Before `ready` there is no live connection to report: this is a handshake failure,
         // and rejecting the pending `client()` promise is the whole response.
-        try { client.end() } catch { /* already gone */ }
-        settle(() => reject(toSshError(error)))
+        //
+        // **`settled` matters.** A live client emits `error` too (a channel write can fail),
+        // and once `ready` has run this handler is a no-op for the promise — but the `end()`
+        // below used to run anyway. That made the open socket go away without being marked as
+        // deliberately ended, so the `close` handler reported a **drop** for a connection this
+        // process had just killed, and the node went `idle` for no reason while a config sync
+        // was in flight. Measured: `plugin-switch` failed on its second POST every time, with
+        // the report listing zero nodes. A live client's error is handled by the `error`
+        // listener installed inside the `ready` branch.
+        if (!settled) {
+          try { client.end() } catch { /* already gone */ }
+          settle(() => reject(toSshError(error)))
+        }
       })
+      // Temporary: name the caller whenever this process hangs up. The node's own `auth.log`
+      // records `Received disconnect ... :11:` (BY_APPLICATION) for every drop, so the hang-up
+      // is local; this says where it came from. Enabled with `DSH_FLEET_TRACE_SSH=1`.
+      if (process.env.DSH_FLEET_TRACE_SSH === '1') {
+        const realEnd = client.end.bind(client)
+        client.end = (...args) => {
+          this.target.log?.(`ssh: end() from\n${new Error('trace').stack?.split('\n').slice(2, 8).join('\n') ?? ''}`)
+          return realEnd(...args)
+        }
+      }
       client.connect(this.#connectConfig())
     })
   }

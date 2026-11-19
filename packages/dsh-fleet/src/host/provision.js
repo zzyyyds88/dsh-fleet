@@ -151,6 +151,12 @@ export function renderBrainPatch({ rows, version }) {
     '# this file carries the model roster and permission preset copied from the Host,',
     '# so a prompt works with no setup on the node.',
   ]
+  // **An empty list is still a list.** A file of comments and nothing else parses to `null`,
+  // and the resident host refuses to boot with "must be a top-level YAML array of loader patch
+  // entries". Measured: one sync with no copyable rows left a header-only patch on the node and
+  // every later start failed — including the `ensureServing` that the same sync was about to
+  // report as successful. `[]` is what the node's own `cordis.yml` writes for the same reason.
+  if (rows.length === 0) return `${[...lines, '', '[]'].join('\n')}\n`
   for (const row of rows) {
     lines.push('', `- id: ${row.id}`)
     lines.push('  config:')

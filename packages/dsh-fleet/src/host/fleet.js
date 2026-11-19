@@ -114,6 +114,10 @@ export class NodeRuntime {
       username: record.username,
       auth: { kind: record.auth.kind },
       label: record.name,
+      // The SSH layer's own diagnostics (why a handshake was refused, why a socket closed).
+      // Without this sink every `target.log?.()` inside `SshConnection` was a no-op, so the one
+      // place that knows why a connection ended wrote nowhere.
+      log: message => this.log(message),
       // The recorded host key, when this machine has been seen before. `undefined` is
       // first use: the key is recorded then, and every later handshake is compared against
       // it. Without this the verifier had nothing to compare with and the whole chain was

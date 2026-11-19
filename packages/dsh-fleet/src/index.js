@@ -245,6 +245,19 @@ export function apply(ctx, config = {}) {
       if (head === 'nodes' && id !== undefined) {
         const runtime = fleet.get(id)
         if (runtime === undefined) throw apiError('node-not-found', `no node ${id}`, 404)
+        // `log` is the one action that is a **read**: the card polls it while a node is
+        // failing, and a GET is what `fetch` sends when no `init` is passed. Gating it behind
+        // POST made the button answer 405 every time — measured against a running Host:
+        // `GET /fleet/api/nodes/<id>/log` → `{"code":"method-not-allowed","error":"node actions
+        // use POST"}`. Everything that changes a node stays POST-only.
+        if (action === 'log') {
+          // The node's own recent lines, redacted on write (see host/node-log.js).
+          if (req.method !== 'GET' && req.method !== 'POST') {
+            throw apiError('method-not-allowed', 'read the node log with GET', 405)
+          }
+          sendJson(res, 200, { ok: true, id, lines: runtime.logs.lines(), text: runtime.logs.text() })
+          return
+        }
         if (req.method !== 'POST') throw apiError('method-not-allowed', 'node actions use POST', 405)
         if (action === 'connect') {
           // Answer at once; the settings surface polls while the node comes up.
@@ -254,12 +267,6 @@ export function apply(ctx, config = {}) {
         }
         if (action === 'disconnect') {
           sendJson(res, 200, { ok: true, node: await fleet.disconnect(runtime) })
-          return
-        }
-        if (action === 'log') {
-          // The node's own recent lines, redacted on write (see host/node-log.js). Read-only
-          // and cheap, so the card can poll it while a node is failing.
-          sendJson(res, 200, { ok: true, id, lines: runtime.logs.lines(), text: runtime.logs.text() })
           return
         }
         if (action === 'probe') {
