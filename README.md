@@ -227,18 +227,23 @@ web-runtime     : 0
 |---|---|---|---|
 | `offline` | 11 | `routing`、`routing-extra`、`multipart`、`provision`、`waterfall`、`version`、`picker-paths`、`install`、`autoconnect`、`fleet-control`、`composition` | 其中 9 个只要 Node 22；`provision` 与 `composition` 要装好的 DSH（读 `app.asar`） |
 | `contract` | 3 | `descriptor`、`dispatch`、`upstream` | 装好的 DSH，必须用它的 Electron Node 跑 |
-| `e2e` | 17 | `gateway`、`host-routing`、`workspace-flow`、`workspace-browse`、`picker-flow`、`plugin-switch`、`tool-parity`、`tool-git-image`、`client-bundle`、`event-relay`、`session`、`terminal`、`multi-node`、`artefact`、`approval`、`node-control`、`browser` | 运行中的 Host + SSH 可达的节点 |
+| `e2e` | 18 | `gateway`、`host-routing`、`workspace-flow`、`workspace-browse`、`picker-flow`、`plugin-switch`、`tool-parity`、`tool-git-image`、`client-bundle`、`event-relay`、`session`、`terminal`、`multi-node`、`artefact`、`npm-install`、`approval`、`node-control`、`browser` | 运行中的 Host + SSH 可达的节点 |
 
 ```bash
 node packages/dsh-fleet/test/run-all.mjs                     # 全部
 node packages/dsh-fleet/test/run-all.mjs --layer offline,contract   # 不需要节点的那两层
 ```
 
-端到端层里 `artefact` 需要从加速站下载一份 165 MiB 的节点运行时（候选只有
-`DEFAULT_MIRRORS` 里的加速站，**不回退直连 GitHub，也不回退 npm**）；加速站全挂时它以
-`ARTEFACT_UNAVAILABLE` 退出并被记成 SKIP，不算通过。换加速站改
-`packages/dsh-fleet/src/remote/artefact.js` 的 `DEFAULT_MIRRORS`。`browser` 套件需要一个带
-`--remote-debugging-port` 的 Chrome，默认不跑。
+端到端层里有两个套件真的在节点上装东西：
+
+- `artefact` 从加速站下载一份 165 MiB 的运行时（候选只有 `DEFAULT_MIRRORS` 里的加速站，
+  **不回退直连 GitHub**）；加速站全挂时它以 `ARTEFACT_UNAVAILABLE` 退出并被记成 SKIP。
+- `npm-install` 让节点自己 `npm install` 同一版本，证明兜底路线留下的树带着构建戳、解析到了
+  节点自己的原生包、且 `node-pty` 的 `spawn-helper` 可执行。节点连不上 registry 时退出码 3，
+  同样记成 SKIP。实测参考节点 26–33 s。
+
+换加速站改 `packages/dsh-fleet/src/remote/artefact.js` 的 `DEFAULT_MIRRORS`。`browser` 套件需要
+一个带 `--remote-debugging-port` 的 Chrome，默认不跑。
 
 ---
 
@@ -273,7 +278,13 @@ dsh plugin --profile desktop add -w <本仓库的绝对路径>/packages/dsh-flee
 装大脑组合、下发模型与密钥、启动，然后验证 `session/list` 真的能答 ——
 只有它成功才报 connected。
 
-节点要求：Node ≥ 22、有 npm、能 SSH 登录。别的都由插件准备。
+节点要求：Node ≥ 22，以及 `curl`（或 `wget`）与 `npm` **至少有一个**。别的都由插件准备。
+
+节点上的 DSH 有两条来路，按顺序试：先下 Release 制品（一次 165 MiB 下载，可离线复用），
+拿不到就让节点自己 `npm install` 同版本（实测 26–33 s / 673 包）。所以上游发新版、制品还没打
+时不会卡住，最坏是一次慢一点的连接。两条路都会把版本戳写进树里，下次连接认得出来；
+**制品字节坏了**（校验和不符、归档里没有 CLI）仍然报错并回滚，不会从 registry 再下一次。
+配置 `runtime: 'artefact'` 或 `'npm'` 可强制单条路线，排查时用。
 
 ### 在手机上用
 
@@ -321,10 +332,12 @@ node packages/dsh-fleet/test/run-all.mjs --layer e2e
 | [`docs/adr-0003-phone-control.zh.md`](docs/adr-0003-phone-control.zh.md) | 手机 → 中转 → 桌面 → 节点这条链路的调研与硬边界 |
 | [`docs/adr-0004-node-control-and-picker.zh.md`](docs/adr-0004-node-control-and-picker.zh.md) | `/@fleet` 命名空间、选择器接管、节点控制、安装形态 |
 | [`docs/adr-0005-release-and-maintenance.zh.md`](docs/adr-0005-release-and-maintenance.zh.md) | 包名依据、发布形态、三条升级链 |
+| [`docs/adr-0006-node-runtime-supply.zh.md`](docs/adr-0006-node-runtime-supply.zh.md) | 节点运行时从哪来：制品优先、节点自建兜底，以及为什么拿不到不等于拿到了坏的 |
 | [`packages/dsh-fleet/README.md`](packages/dsh-fleet/README.md) | 插件安装、接线、测试矩阵、已知限制 |
 | [`packages/dsh-fleet-brain/README.md`](packages/dsh-fleet-brain/README.md) | 节点组合：怎么从官方 web-app 减出"只当大脑"的一层 |
 | [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md) | DSH / 中转 / DSH Go 三条升级链各自要重跑什么 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么、谁受影响 |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 怎么跑测试、怎么自己构建节点运行时、改代码时的硬约束 |
 | [`AGENTS.md`](AGENTS.md) | 本仓库的协作规则与硬约束 |
 
 ## 七、许可

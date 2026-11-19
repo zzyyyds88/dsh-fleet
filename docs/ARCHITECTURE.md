@@ -553,23 +553,76 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 修它。
 
 所以安装时在树里写 `.fleet-artefact.json`（`RUNTIME_BUILD` 常量），连接时连同版本一起读；
-stamp 不符或缺席就**重装**。改 `STRIPPED` 或改归档布局必须同时 bump `RUNTIME_BUILD`。
+stamp 不符或缺席就**重装**。改 `STRIPPED`、改归档布局、或改由谁来解析（见下节），都必须同时
+bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在下节展开。
 
-### 制品从哪来：Release + 加速
+### 运行时从哪来：两条路，制品优先
 
-节点不再 `npm install`：桌面用 `scripts/publish-runtime.mjs` 把自己跑的版本打出来发到 GitHub
-Release，节点下载 `dsh-<version>-<platform>.tar.gz` + `.sha256`。
+节点拿到运行时只有两种方式，`RUNTIME_ROUTES` 决定顺序，默认 `['artefact', 'npm']`：
 
-**制品必须按平台分**。DSH 不是纯 JS：`node-pty`、`sharp`、`sherpa-onnx` 带原生二进制，安装树
-里就写着平台（`sherpa-onnx-win-x64`、`@img/sharp-linux-x64`）。把 Windows 的树解到 Linux 节点
-上，节点能起来，但终端和图片工具会在第一次使用时炸 —— 比它替代的慢安装更糟，因为失败得更晚、
-离原因更远。所以脚本用 npm 的 `--os/--cpu/--libc` **为目标平台解析**，插件按**节点的** `uname`
-取，取不到（一个打不出平台的 `uname`）才回退 npm，因为 npm 会自己正确解析原生包 —— 这是「这一版根本没为这类机器发布制品」，不是「下载失败」；下载失败一律报错，不回退。
+1. **制品**：桌面（或 CI）用 `scripts/publish-runtime.mjs` 把某个版本按平台打成
+   `dsh-<version>-<platform>.tar.gz` + `.sha256` 发到 GitHub Release，节点下载它。
+2. **节点自建**：制品拿不到时，节点上跑
+   `npm install --os/--cpu/--libc "@deepseek-ai/dsh@<精确版本>"`，自己解析出同一版。
 
-安装脚本的几个硬约束（`src/remote/artefact.js`）：`set -eu`；`~/…` 要换成 `$HOME` 才能带引号
+**为什么必须有第二条。** 上游 DSH 一旦发新版，只有「维护者先构建并上传 165 MiB」这一条路时，
+所有人都卡在制品的发布者手上 —— 一份本可以在节点上完成的工作变成了别人的等待。上游的每一个
+发行版本来就在 npm 上（`@deepseek-ai/dsh` 已发 46 个版本，`0.2.2-rc.5` 在 `next` 标签上，
+91 个依赖里 83 个是精确锁定），所以「节点自己解析」不是新能力，是把已有的能力接上。
+
+**判据只有一条：拿不到 ≠ 拿到的是坏的。**
+
+| 情形 | 现在 | 为什么 |
+|---|---|---|
+| 加速站全挂 / 没有 `curl`、`wget` / `mirrors: []` / 平台打不出标签 | 落 npm | 这是「上游刚发版、制品还没打」的常态，不该是死路 |
+| 校验和不符、解包失败、归档里没有 `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 4/5） | 回滚 + **抛错** | 字节到了但是错的。从 registry 再解析同一份坏版本只会更慢、下载更多，还把「哪一个源坏了」彻底掩盖 |
+
+节点头上有两条路线也可以单独强制（`runtime: auto|artefact|npm`）：排查时能让失败可归因，
+而不是在一句复合错误里猜是哪条路出的问题。两条都不通时才报错，且**同时点名两条**缺什么
+（"neither curl nor wget" + "no npm on PATH"）—— "装 curl" 和 "装 npm" 是两个不同的动作。
+
+实测代价对比（参考节点 192.168.3.93，glibc 2.35，Node v22.20.0，registry 指向 `npmmirror`）：
+
+| 路线 | 耗时 | 额外依赖 |
+|---|---|---|
+| 制品 | 一次 165 MiB 下载，加速站 4.97 MiB/s 约 34 s | 加速站可达 |
+| 节点自建 | `npm install` 26–33 s / 673 包；第二次同版本 1 s | registry 可达；首次 275.7 MiB npm 缓存 |
+
+**制品必须按平台分。** DSH 不是纯 JS：`node-pty`、`sharp`、`sherpa-onnx`、`koffi` 带原生二进制，
+安装树里就写着平台（`sherpa-onnx-win-x64`、`@img/sharp-linux-x64`、`@koromix/koffi-linux-x64`）。
+把 Windows 的树解到 Linux 节点上，节点能起来，但终端和图片工具会在第一次使用时炸 ——
+比它替代的慢安装更糟，因为失败得更晚、离原因更远。所以两条路都用 npm 的
+`--os/--cpu/--libc` **为目标平台解析**：打包脚本按 `--platform` 的目标值给，节点侧按自己的
+`uname` + libc 探测（`ldd --version` 与 `/lib/ld-musl-*` 两条路，任一命中即 musl）给。
+
+**装完要留痕，否则每次连接都重装。** 两条路都写 `BUILD_STAMP`
+（`.fleet-artefact.json`），内容是 `stampJson()` 的 `{"build":N,"via":"artefact"|"npm"}`。
+`via` 只上报、不参与判定（自己构建的树和下载的树一样能用），`build` 参与判定：
+`inspectRuntime` 要求它等于 `RUNTIME_BUILD`。没有这一枚戳，`inspectRuntime` 会把树读成
+「早于构建戳」→ `decideGate` 返回 `node-runtime-repack` → **每次连接重装一次**：
+一分钟的安装变成一分钟的连接。实测过这条链（`daemon.js` 的 npm 分支当时不写戳）。
+`parseStamp` 仍认旧格式的裸整数（现场节点的 `2`），格式升级不能把在用节点判成不可用。
+
+`RUNTIME_BUILD` 是 3：打包改用 `--ignore-scripts`。install 脚本按**打包机**的
+`process.platform` 跑，于是 koffi 的 `cnoke` 在 Windows 上编出 `koffi/build/win32_x64`，
+被打进一个 `linux-x64` 制品 —— 实测那份 rc.5 归档里有 48 个 `.exe`/`.cmd`/`.dll`/`.lib`
+和 147 条 `koffi/build` 条目。跳过脚本不丢东西：树里每个原生依赖都自带预编译平台包
+（实测带脚本 968.2 MiB / 94106 文件，不带 957.3 MiB，四个原生模块都在）。
+
+**可执行位是 `tar` 传不了的那一件事。** 实测 bsdtar 在 Windows 上给每个条目写
+`-rw-rw-rw-`（51500 个文件全是，仅 20 个带 `+x` 且全是 `.exe`/`.cmd`），`chmodSync` 在
+Windows 是空操作，`--owner/--group` 改了也没用。所以 `installScript` 解包后自己补
+`chmod 0755 node-pty/prebuilds/*/spawn-helper` —— 少了这一步，Darwin 节点的终端在第一次
+打开时才失败，而错误信息一个字都不会提到这个文件。
+
+**节点侧不硬拦 `engines`。** 上游 `0.2.2` 的四个 rc 全部声明 `engines.node: ">=24.9.0"`，
+而现场节点是 Node v22.20.0、一直在跑 rc.3。制品路线从不读这个字段，所以这条闸门不能因为
+安装方式换成 npm 就突然变成硬停：`npmInstallScript` 用 `--engine-strict=false`，装完比对一次，
+不符就回 `engineWarning` 让界面如实显示。抱怨 · 可运行 · 不静默，是这里的三条。
+
+安装脚本的其余硬约束（`src/remote/artefact.js`）：`set -eu`；`~/…` 要换成 `$HOME` 才能带引号
 （否则会真的建一个叫 `~` 的目录）；下载器 `curl`/`wget` 二选一；校验和在下载时失败而不是首次
-使用时失败；解压到 `runtime.incoming` 后整体 rename，失败回滚到 `runtime.previous`；退出码
-3 是"所有加速站都拿不到"，那是**报错**，不是回退 npm 的理由（见下）。
+使用时失败；解压到 `runtime.incoming` 后整体 rename，失败回滚到 `runtime.previous`。
 
 **加速站必须是列表，不能是一个；而且不许回退直连。** 候选 URL 只有一条路：`DEFAULT_MIRRORS`
 里的加速站依次试。原来只有一个默认加速站 `git.yylx.win`，它一旦挂掉（实测：节点上 443 端口直接
@@ -578,9 +631,9 @@ connection refused），每次安装都静默落到直连 —— 直连实测 ~2
 
 **所以「直连 GitHub」从候选里删掉了，不是压到最后。** 这条是用户明确要求、也有实测支撑的取舍：
 能在加速站层面失败的机器，恰恰也是直连又慢又被挡的机器，直连是**唯一必然更糟**的兜底 —— 它把
-「加速站挂了」这个可判断的故障，变成 1.8 小时的静默等待。现在全部加速站失败时 `RemoteHost.install`
-直接抛错，逐条列出试过的 URL + 节点原文，由人换一个可用加速站；同理，平台能打标却没有
-`curl`/`wget` 也直接报错，不滑向 npm。
+「加速站挂了」这个可判断的故障，变成 1.8 小时的静默等待。现在全部加速站失败时**由 npm 路线接手**
+（见上表），而不是直连，也不是报死。`artefact: only` 时才抛错，逐条列出试过的 URL + 节点原文，
+由人换一个可用加速站。
 
 顺序只在「所有站都活着」时有意义：连不上的站一次 connection refused 是毫秒级代价，所以项目
 既定的首选加速站 `git.yylx.win`（AGENTS.md §13）仍然排第一 —— 它今天在测试节点上 443 拒绝连接，
@@ -596,14 +649,20 @@ connection refused），每次安装都静默落到直连 —— 直连实测 ~2
 
 `github.akams.cn` 是这些替代站的**汇总目录，不是代理**：`https://github.akams.cn/https://github.com/…`
 回 404，可用的是它目录里的那些域名（换站去那里找）。
-`artefactUrls()` 因此接受 `mirrors: string[]`，空列表直接抛 `no accelerator configured`；
+`artefactUrls()` 因此接受 `mirrors: string[]`，空列表抛 `no accelerator configured` ——
+`install()` 捕获它并当成「制品路线关掉了」落到 npm。
 `version-unit` 断言了「每个加速站各一条」「顺序不变」「**没有任何一条以 `https://github.com/` 开头**」
 「空项不算候选」「重复项去重」「空列表报命名错误」，并用桩连接跑 `RemoteHost.install` 证明
-下载失败时既不跑 npm、也不构造直连 URL。
+下载失败会落到 npm、而坏制品不会。
+
+**制品的构建搬到了 CI**（`.github/workflows/release-runtime.yml`）：四平台各自在本平台 runner 上
+打包（`--platform` 认 libc 后缀，`linux-x64-musl`），打包与上传分成两个作业 —— 四条腿同时
+`gh release create` 会互抢，且抢输看起来像打包 bug。上游发版后点一次或让 webhook 触发
+`repository_dispatch`，维护者的机器不再在关键路径上。真要没跑，节点自己解析也能升。
 
 **下载要有下限，也要有上限。** 旧脚本对 curl 只有 `--connect-timeout 15 --retry 2` —— 那只管
 **建连**，不管**传输**。现在的判据是 `--speed-limit 4096 --speed-time 60`（低于 4 KB/s 持续 60 秒
-就放弃这一路，换下一个候选；全挂就按 `ARTEFACT_UNAVAILABLE` 命名失败返回，由人换源）
+就放弃这一路，换下一个候选；全挂就按 `ARTEFACT_UNAVAILABLE` 返回，由 npm 路线接手）
 加 `--max-time 1800`（慢但能用的线路仍有 ~100 KB/s 的完整预算）。两个数都是常量
 （`FETCH_FLOOR_BYTES` / `FETCH_FLOOR_SECONDS` / `FETCH_CEILING_SECONDS`），`version-unit` 有断言守着。
 

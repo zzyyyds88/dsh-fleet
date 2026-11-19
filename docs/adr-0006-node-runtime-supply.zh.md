@@ -1,0 +1,137 @@
+# ADR-0006 节点运行时供给：制品优先，节点自建兜底
+
+> 状态：已定（2026-11-19）。用户已确认「制品路线保留，别人想自己构建就自己构建」。
+> 上承 [ADR-0005](adr-0005-release-and-maintenance.zh.md)。
+> 本文只决定「节点的运行时从哪来」，不改路由、组合、会话语义。
+> 现在怎么用：安装与升级步骤见根 [README.md](../README.md) 与
+> [`packages/dsh-fleet/docs/UPGRADE.zh.md`](../packages/dsh-fleet/docs/UPGRADE.zh.md)；
+> 设计与实测数据见 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) 六之四。
+
+## 一、问题：一个本可以在节点上完成的工作，变成了所有人的等待
+
+节点上的 DSH 是一份**独立安装**，版本必须与桌面**完全相等**（见 ADR-0002 与六之四）。它原来
+只有一条来路：维护者在本机跑 `scripts/publish-runtime.mjs`，按平台打出
+`dsh-<version>-<platform>.tar.gz`，传到 GitHub Release，节点再从加速站下载。
+
+于是上游每发一个 DSH 版本，所有节点都卡在「制品还没打」上。而那份制品的内容，实测就是
+
+```
+npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/dsh@<版本>'
+```
+
+在维护者机器上跑 76 s 的结果 —— 也就是说，这件事本来**节点自己就能做**。
+
+上游的每个发行版也都在 npm 上（`@deepseek-ai/dsh` 已发 46 个版本，`next` 标签是
+`0.2.2-rc.5`，91 个依赖里 83 个是精确锁定），所以「节点自己解析」不是新能力，是把已有的
+能力接上。
+
+## 二、决定：两条有序路线，制品优先
+
+`RUNTIME_ROUTES = ['artefact', 'npm']`，由 `RemoteHost.install` 依次尝试。
+
+| 顺序 | 路线 | 何时用 |
+|---|---|---|
+| 1 | **制品** | 默认首选。一次下载、无 registry 依赖、字节确定 |
+| 2 | **节点自建** | 制品拿不到时：加速站全挂、没有 `curl`/`wget`、`mirrors: []`、平台打不出标签 |
+
+配置新增 `runtime: auto | artefact | npm`（默认 `auto`）与 `registry`。能强制单条路线，是为了
+让失败可归因 —— 排查时不至于在一句复合错误里猜是哪条路出的问题。
+
+## 三、判据：拿不到 ≠ 拿到的是坏的
+
+这是本次唯一的行为翻转，也是全部风险的集中点。
+
+| 情形 | 处理 |
+|---|---|
+| 加速站全挂（退出码 3，`ARTEFACT_UNAVAILABLE`） | 落 npm |
+| 没有 `curl` 也没有 `wget` | 落 npm（原来直接报错） |
+| `mirrors: []`（原来是配置错误） | 落 npm，等于「制品路线关掉了」 |
+| 平台打不出标签 | 落 npm（原来也是这样） |
+| 校验和不符（退出码 4） | 回滚 + **抛错**，不落 npm |
+| 解包失败 / 归档里没有 `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 5） | 回滚 + **抛错**，不落 npm |
+| 两条路都不通 | 报错，且**同时点名**两条各缺什么 |
+
+理由：**拿不到**是「上游刚发版、制品还没打」的常态，不该是死路；**拿到了但坏了**是从 registry
+再解析同一份坏版本也不会变好的事，只会更慢、下载更多，并把「哪一个源坏了」掩盖掉。
+
+## 四、两件必须一起做的事
+
+### 1. 两条路写同一枚构建戳
+
+`BUILD_STAMP`（`.fleet-artefact.json`）的内容改为 `stampJson()` 的
+`{"build":N,"via":"artefact"|"npm"}`：
+
+- `build` 参与判定，必须等于 `RUNTIME_BUILD`；
+- `via` 只上报，不参与判定 —— 自己构建的树和下载的树一样能用。
+
+没有这枚戳，`inspectRuntime` 会把树读成「早于构建戳」→ `decideGate` 返回
+`node-runtime-repack` → **每次连接重装一次**。实测过这条链：`daemon.js` 的 npm 分支当时不写戳，
+把它接成兜底后，一分钟的安装会变成一分钟的连接。
+
+`parseStamp` 仍认旧格式的裸整数（现场节点的 `2`）。格式升级不能把在用节点判成不可用 ——
+那会让所有人为了一个格式改动各自重装一次。
+
+### 2. `engines` 报而不拦
+
+上游 `0.2.2` 的四个 rc（rc.1/rc.3/rc.4/rc.5）全部声明 `engines.node: ">=24.9.0"`，而参考节点
+是 **Node v22.20.0**，它一直在跑 rc.3。制品路线从不读这个字段，所以这条闸门不能因为安装方式
+换成 npm 就突然变成硬停。
+
+做法：`npmInstallScript` 用 `--engine-strict=false` 装，装完比对一次，不符就回 `engineWarning`，
+界面如实显示。**抱怨、可运行、不静默**是这三条。
+
+> 待决：节点是否统一升到 Node 24。这会改变 `MINIMUM_NODE_MAJOR`（现值 22），并让一部分
+> 现场机器连不上，属于用户级取舍，本 ADR 不擅自决定。
+
+## 五、代价（实测）
+
+参考节点 `192.168.3.93`：Linux x86_64 / glibc 2.35 / Node v22.20.0 / npm 10.9.3 /
+registry 指向 `npmmirror`（metadata 0.148 s）。
+
+| 路线 | 耗时 | 额外依赖 | 备注 |
+|---|---|---|---|
+| 制品 | 一次 165 MiB 下载，加速站 4.97 MiB/s 约 34 s | 加速站可达 | 可离线 |
+| 节点自建 | `npm install` 26–33 s / 673 包 | registry 可达 | 首次 275.7 MiB npm 缓存；同版本第二次 1 s |
+
+本机（Windows，跨平台解析 `--os=linux --cpu=x64 --libc=glibc`）实测 83.2 s / 968.2 MiB /
+94106 文件；`npm ci` 加平台标志 53.4 s，正确跳过 win32 的包。
+
+结论：**路线顺序不该反过来**。npm 慢一点、多一个依赖，但它换来的是「不等任何人」。
+
+## 六、顺手修掉的两个制品缺陷
+
+这两条不是本次的目标，但都在同一条路径上，且都会在别的节点上以更难查的形式出现：
+
+1. **制品里有打包机的原生产物。** install 脚本按**打包机**的 `process.platform` 跑，koffi 的
+   `cnoke` 在 Windows 上编出 `koffi/build/win32_x64`。实测那份 rc.5 归档里有 48 个
+   `.exe`/`.cmd`/`.dll`/`.lib` 和 147 条 `koffi/build` 条目，全在一个 `linux-x64` 制品里。
+   改法：解析加 `--ignore-scripts`（树里每个原生依赖都自带预编译平台包；实测带脚本
+   968.2 MiB / 94106 文件，不带 957.3 MiB，四个原生模块都在）。
+2. **可执行位传不了。** 实测 bsdtar 在 Windows 上给每个条目写 `-rw-rw-rw-`，51500 个文件全是，
+   仅 20 个带 `+x` 且全是 `.exe`/`.cmd`；`chmodSync` 在 Windows 是空操作，`--owner/--group`
+   改了也没用。改法：`installScript` 在节点解包后自己 `chmod 0755` 那两个
+   `node-pty/prebuilds/*/spawn-helper` —— 少了这一步，Darwin 节点的终端在第一次打开时才失败，
+   而错误信息一个字都不会提到这个文件。这一条同时修好已经发出去的归档。
+
+`RUNTIME_BUILD` 因此从 2 升到 3。
+
+## 七、制品构建搬到 CI
+
+`.github/workflows/release-runtime.yml`：四平台（linux-x64 / linux-arm64 / darwin-arm64 /
+win32-x64）各自在**本平台** runner 上打包，`workflow_dispatch` 给入参版本，
+`repository_dispatch` 接 webhook。
+
+打包与上传分成两个作业：四条腿同时 `gh release create` 会互抢，而抢输看起来像打包 bug。
+pack 不 `fail-fast`：某个平台没成，其余平台的节点照样能走快路径。
+
+在本平台 runner 上打包**不是**为了让原生包正确（`--os/--cpu/--libc` 已经保证了），而是为了
+让 `tar` 能记下可执行位 —— Windows 记不了（见上）。
+
+## 八、非目标
+
+- **不 fork 官方 DSH 包。** 节点自建的是**上游发布版本身**，不是本项目的分叉。所有定制仍然只走
+  `@local/dsh-fleet-brain` 与 profile patch（AGENTS.md §4）。
+- **不出锁文件。** 一份 `package-lock.json` 的 `resolved` 写死 registry 域名；实测 npm 11 的
+  `replace-registry-host` 默认只对 `registry.npmjs.org` 开头的 URL 生效，把锁绑到 npmmirror 就
+  在别的节点上失效。保持每次在线解析，代价可接受。
+- **不把 npm 设成默认。** 制品快、可离线、字节确定；npm 是兜底，不是替代。

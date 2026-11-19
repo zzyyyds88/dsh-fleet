@@ -11,8 +11,43 @@
 
 ## [未发布]
 
+### 新增
+
+- **制品拿不到时，节点自己构建运行时。** 上游 DSH 每发一版，所有节点原来都卡在「维护者还没
+  构建并上传 165 MiB 制品」上 —— 而那件制品的内容本来就是在节点上跑一次
+  `npm install --os/--cpu/--libc '@deepseek-ai/dsh@<版本>'` 能得到的东西。现在
+  `RemoteHost.install` 有两条有序路线（`RUNTIME_ROUTES = ['artefact', 'npm']`）：先试制品，
+  制品**拿不到**（加速站全挂、没有 `curl`/`wget`、`mirrors: []`、平台打不出标签）就让节点
+  自己解析同一版本。实测参考节点：制品是 165 MiB 下载，自建是 26–33 s / 673 包。
+  **受影响**：所有人。上游升级不再需要等任何人；最坏情况是一次慢一点的连接。
+- **配置新增 `runtime: auto | artefact | npm`（默认 `auto`）与 `registry`。** 强制单条路线
+  是为了让失败可归因，排查「节点自己的 registry 通不通」时直接 `runtime: 'npm'`。
+  节点卡片会显示这一棵树是下载的还是自建的。
+
 ### 修复
 
+- **制品字节坏了仍然报错，不会从 registry 再下一次。** 校验和不符、解包失败、归档里没有
+  `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 4/5）一律回滚到 `runtime.previous` 后抛错：
+  同一份坏版本从 registry 再解析只会更慢、下载更多，还会把「哪个源坏了」掩盖掉。
+  这次翻转只改「拿不到」，不改「拿到了是坏的」。
+- **npm 路线原来不写构建戳，接成兜底后会变成每次连接重装。** `inspectRuntime` 会把无戳的树
+  读成「早于构建戳」→ `decideGate` 返回 `node-runtime-repack` → 重装，一分钟的安装变成一分钟
+  的连接。两条路现在写同一枚戳（`{"build":3,"via":"artefact"|"npm"}`）；`parseStamp` 仍认旧格式
+  的裸整数，现场节点的 `2` 不会因为换格式被判不可用。
+- **归档里不再混进打包机的原生产物。** 包的 `install` 脚本按**打包机**的 `process.platform`
+  跑，koffi 的 `cnoke` 于是在 Windows 上编出 `koffi/build/win32_x64`。实测那份 rc.5 归档里有
+  48 个 `.exe`/`.cmd`/`.dll`/`.lib` 和 147 条 `koffi/build` 条目，全在一个 `linux-x64` 制品里。
+  打包改为 `--ignore-scripts`（树里每个原生依赖都自带预编译平台包；实测 968.2 → 957.3 MiB，
+  四个原生模块都在）。
+- **节点解包时补回 `spawn-helper` 的可执行位。** 实测 bsdtar 在 Windows 上给每个条目写
+  `-rw-rw-rw-`，`chmodSync` 是空操作，`--owner/--group` 也改不了。Darwin 节点上
+  `node-pty/prebuilds/*/spawn-helper` 因此不可执行，终端在**第一次打开时**才失败，错误信息
+  一个字都不会提到这个文件。现在 `installScript` 解包后自己 `chmod 0755`。这一条同时修好
+  已经发出去的归档。
+
+### 说明
+
+- `RUNTIME_BUILD` 从 2 升到 3（打包规则与戳格式都变了），节点会在下一次连接时重装一次。
 - **节点上装插件时，npm 不再顺手把 DSH 自己拉下来。** 第三方 bundle 的
   `peerDependencies` 写的是 `@deepseek-ai/dsh-*` 的区间（`^0.2.0-rc.1` 之类），
   npm 满足 peer 的办法是把那个包**装进节点的 profile**，而 profile 的

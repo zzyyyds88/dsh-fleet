@@ -141,7 +141,9 @@ verification: "`node packages/dsh-fleet/test/routing-unit.mjs && node packages/d
 - **Cordis 的 `inject` 必须声明插件读取的每一个服务**。漏了会在插件体里抛 `cannot get property "X" without inject`，若抛出点在 promise 链里则没有任何可见症状 —— 宿主启动、端口在听、一行不打印。
 - 节点组合（`dsh-fleet-brain`）必须从**已安装的那个 release** 派生，不能从 master 派生。master 领先于发布版，会让节点组合出该版本不存在的行（实测踩过：`authentication-token` 行在 `0.2.2-rc.3` 里不存在，节点报 "1 entry did not activate"）。
 - 生成物链：`sync-from-upstream.mjs` → `cordis.patch.yml` + `presets/` → `embed-into-fleet.mjs` → `dsh-fleet/src/host/brain-bundle.generated.js`。改组合只能改脚本或 `src/runtime.js`。
-- 节点上的 DSH 是**独立安装**（`npm i @deepseek-ai/dsh@<同版本>`），有自己的 `~/.dsh`。它没有 provider、没有 API key，所以 provisioning 是连接流程的一部分，不是可选优化。
+- 节点上的 DSH 是**独立安装**（版本与桌面完全相等），有自己的 `~/.dsh`。它没有 provider、没有 API key，所以 provisioning 是连接流程的一部分，不是可选优化。
+- 节点运行时有**两条有序路线**（`RUNTIME_ROUTES = ['artefact', 'npm']`）：先下 Release 制品，制品**拿不到**才让节点自己 `npm install`。判据是「拿不到 ≠ 拿到了是坏的」：校验和/解包失败仍要回滚后抛错，不许从 registry 再下一次。两条路必须写同一枚构建戳（`stampJson`），否则 `inspectRuntime` 判无戳 → 每次连接重装。见 `docs/adr-0006-node-runtime-supply.zh.md`。
+- 上游 `@deepseek-ai/dsh` 声明 `engines.node: ">=24.9.0"`，本项目 `MINIMUM_NODE_MAJOR = 22`。**这条闸门报而不拦**（`--engine-strict=false` + `engineWarning`）：制品路线从来没读过这个字段，不能因为换成 npm 就变成硬停。要改 `MINIMUM_NODE_MAJOR` 先确认现场机器的 Node 版本。
 
 ### toolchain/node-esm
 

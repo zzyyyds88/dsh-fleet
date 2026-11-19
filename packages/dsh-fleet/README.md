@@ -119,8 +119,13 @@ every event the client renders.
 
 - DSH 0.2.2-rc.3 (the node is installed at exactly the version this profile runs, so
   the Session format cannot skew).
-- SSH access to each node, with Node 22 or newer and `npm` (used once, to install
-  the resident host under `~/.dsh-fleet/runtime`).
+- SSH access to each node, with Node 22 or newer. `curl` (or `wget`) *or* `npm` — the
+  runtime arrives one of two ways: a published artefact is downloaded if an accelerator
+  can serve it, and otherwise the node resolves the exact same release itself with
+  `npm install`. Only a machine with neither a downloader nor `npm` cannot be set up.
+- `@deepseek-ai/dsh` declares `engines.node: ">=24.9.0"` for every 0.2.2 release, while
+  this plugin's floor is Node 22. A node below the declared engines still installs and
+  runs (the artefact route never read that field either) — the settings page just says so.
 - The node needs no open port: everything rides SSH `direct-tcpip` channels, and the
   resident host listens on the node's loopback only.
 
@@ -139,6 +144,27 @@ every event the client renders.
 
 That is the same gesture for a remote folder as for a local one; the only extra
 decision is which machine the folder is on.
+
+### How the node's DSH gets there
+
+Two routes, tried in order (`runtime` in the config: `auto` / `artefact` / `npm`):
+
+1. **A published artefact** — `dsh-<version>-<platform>.tar.gz` from a Release,
+   downloaded through the accelerator list. One file, no registry, works offline once
+   cached.
+2. **The node resolves it itself** — `npm install --os/--cpu/--libc
+   "@deepseek-ai/dsh@<exact version>"` on the node. Slower (a full resolve, measured
+   26–33 s for 673 packages), but it needs no artefact at all: that is what makes an
+   upstream DSH release followable without anyone pre-building a tree.
+
+Which one to skip is decided by *why* the first failed. A tree that could not be
+**had** — every accelerator down, no `curl`/`wget`, `mirrors: []` — falls through to
+`npm`. A tree that arrived and was **wrong** (bad checksum, bad archive, no CLI inside)
+rolls back and reports: re-resolving the same broken release would download more and
+hide which source was at fault.
+
+Both routes stamp the tree with the same build id, so the next connect recognises it
+either way. The node card shows which route it used.
 
 ### Which plugins run on a node
 

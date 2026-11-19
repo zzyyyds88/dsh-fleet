@@ -189,10 +189,25 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 `$DSH_INSTALL_DIR/package.json` 读）。理由：Session 日志格式、事件类型、投影结构都随版本走，
 两边版本不一致会以"能连上但会话显示错乱"这种最难查的方式失败。
 
-版本不符时 `connect` 会自动下载对应的 Release 制品替换节点 `runtime/`（不走 npm，见
-`docs/ARCHITECTURE.md` §六之四），所以**升级桌面端后第一次连节点会慢**（要拉 165 MiB 左右），
-之后复用。制品没发布或所有加速站都挂时，`connect` 会带 `ARTEFACT_UNAVAILABLE` 报错并列出
-试过的 URL —— 那时要么发一版制品，要么换加速站。
+版本不符时 `connect` 会换掉节点 `runtime/`，两条路线按顺序试（见
+`docs/ARCHITECTURE.md` §六之四与 `docs/adr-0006-node-runtime-supply.zh.md`）：
+
+1. **制品**：下载对应的 Release 归档。**升级桌面端后第一次连节点会慢**（165 MiB 左右，
+   加速站实测 4.97 MiB/s 约 34 s），之后复用。
+2. **节点自建**：制品拿不到（加速站全挂 / 没 `curl`、`wget` / `mirrors: []` / 平台打不出标签）
+   时，节点自己 `npm install @deepseek-ai/dsh@<同版本>`。实测 26–33 s / 673 包，首次留
+   275.7 MiB 的 npm 缓存。
+
+所以**上游发新版但还没打制品时不会再卡住**：最坏情况是一次慢一点的连接。反过来，如果字节
+到了但坏了（校验和不符、归档里没有 CLI），那仍然报错并回滚 —— 从 registry 再解析同一份坏
+版本只会更慢、还把「哪个源坏了」掩盖掉。
+
+不想让它自建就设 `runtime: 'artefact'`：那时下载失败会直接抛错，逐条列出试过的 URL，
+由人换加速站。反过来排查「节点自己的 registry 通不通」可以设 `runtime: 'npm'`。
+节点卡片上会写清楚这一棵树是下载的还是自建的。
+
+上游 `@deepseek-ai/dsh` 的每个 0.2.2 版本都声明 `engines.node: ">=24.9.0"`，而本插件的最低要求是
+Node 22：低于它仍然装得上、跑得起来（制品路线从来没读过这个字段），设置页会如实说明。
 
 ---
 
