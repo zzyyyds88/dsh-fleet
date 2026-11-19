@@ -58,7 +58,9 @@
                               ▼
 ┌──────────────────── 远端 Linux · 常驻大脑 ─────────────────────────────┐
 │  ~/.dsh-fleet/runtime/node_modules/@deepseek-ai/dsh                    │
-│    └─ dsh --profile web --host 127.0.0.1 --port 0 --no-open            │
+│    └─ dsh --profile fleet --host 127.0.0.1 --port 0 --no-open          │
+│         （profile 名按 remoteRoot 派生：~/.dsh-fleet → fleet，          │
+│           ~/.dsh-fleet-b → fleet-b；见 §六之四「每节点一份路径」）        │
 │         ├─ 完整 DSH Host：rg / git / read_image / bash / PTY 原生执行   │
 │         └─ 会话、工作区、审批、终端全部在远端，本地不复制                │
 │  ~/.dsh-fleet/run/{status.json, pid, host.log}                         │
@@ -69,9 +71,11 @@
 
 ---
 
-## 三、三条接入缝隙（各有测试）
+## 三、五条接入缝隙（各有测试）
 
-插件**不替换任何上游 Loader 行**，也**不从 `app.asar` 里 import 任何东西**。全部接入点都在运行时：
+插件**不替换任何上游 Loader 行**，也**不从 `app.asar` 里 import 任何东西**。全部接入点都在运行时。
+前三条是路由的基础，后两条是「上游在方法体之前就把身份解掉了」时唯一的入口 —— 它们的存在理由
+比前三条更窄，但**必须单独列出来**：任何一条被上游改掉，那一整类端点会静默失效，而不是报错。
 
 ### 缝隙一：实例上的 own property
 
@@ -93,6 +97,30 @@
 
 - Gateway 每 2 秒 ping 一次（`websocketHeartbeatIntervalMs` 默认 2000），**不应答就断**；
 - 带字节的结果**不是 JSON**：Gateway 把每个 `Uint8Array` 换成 `null`、记下它的 JSON 路径，字节另走 `multipart/form-data` 分片。`workspaceFiles/readBytes` 就是这条路 —— 只会 `JSON.parse` 的客户端会拿到一个 `HTTP 200` 但解不开的响应体，很容易误判成"节点坏了"。`src/host/multipart.js` 专门负责还原它在正确的路径上（有 `test/multipart-unit.mjs` 守着）。
+
+### 缝隙四：`typert.lookupStore.resolvers` 里的 `agent` 项
+
+`agent: Agent` 形参在**方法体之前**就被 Gateway 解析掉，所以装饰器看到的已经是占位对象 —— 想换掉解析结果，只能换 resolver 本身。而公开的 `typert.lookups.configure('agent', …)` 已被 `@deepseek-ai/dsh-api-session-controller` 占用（`configure` 对同一 key 第二次调用直接抛错）。
+
+所以 `host/lookups.js` 直接替换 `typert.lookupStore.resolvers` 这个 `Map` 里的 `'agent'` 项：`fleet_` 前缀合成占位 Agent（`{ id, ctx }`，`ctx` 用插件自己的长命 Context），其余 id 原样委派给被替换掉的那个 resolver；`dispose` 时只在自己仍是当前项的情况下还原（否则会把别人的覆盖删掉）。
+
+为什么必须走到这一层：`terminal/*` 九个端点里六个吃 `Agent`，`goals/*`、`userQuestions/*`、`subagents/*` 同样。占位对象不是注册过的 Agent，`ctx.agents.get(id)` 拿不到它 —— 所以装饰器不能指望它，只能拿它的 `id` 去解节点，再用**节点自己的**形参转发（见 §五「形参里是 `Agent` 的两个例外」）。
+
+`test/routing-extra-unit.mjs` 用 `{ id, ctx: {}, session: undefined }` 这个与 `lookups.js` 完全同形的占位对象驱动每个 `agentEndpoint`。
+
+### 缝隙五：Gateway 的待处理事件表（waterfall 中继）
+
+上游唯一的「发起一次本地 waterfall」入口是 `api-remotes` 的监听器，它要求 `this` 是 `scopeTarget(agent, agent)` 造出的 carrier —— 模块私有 WeakMap，只有 `@deepseek-ai/dsh-scope` 能注册，而本插件不 import 上游。
+
+但**监听器之后**全是实例上的普通状态：Gateway 把待处理的转发事件存在 `pendingRemoteEvents`，用 `deliverRemoteEvent` 投递，浏览器答复经 `receiveRemoteEventResult` 回到同一张表。所以 `host/remote-waterfall.js` 自己造一条与 `startRemoteEvent` 同形的 pending 记进那张表，把投递、去重、结算交给上游。
+
+三条硬约束：
+
+1. `agentId` 必须 `Router.toLocal` 包成 `fleet_…`，否则浏览器合成的 scope 用裸 id，卡片进不了那张会话；
+2. `frame.request` 里不能有 `agent` / `signal` / 显式 `undefined` —— 浏览器自己补前两个；
+3. 没有活的 owner 客户端（`gateway.hasLiveClient()` 为假）时立刻答 `next`，否则 pending 永挂、把远程回合吊死。超过 10 分钟没人答同样答 `next`（上游 approval 的默认值本来就是 `'unavailable'`，所以这是**降级回原状**，不是新增失败模式）。
+
+`test/waterfall-unit.mjs` 逐条钉住这三种结局，`test/approval-acceptance.mjs` 在真节点上走完整圈。
 
 ---
 
@@ -304,6 +332,12 @@ packages/dsh-fleet-brain/
 
 provision 阶段内部顺序也是语义的：**组合先于启动**（profile 必须已经指向 brain bundle）、**配置先于启动**（模型行必须已在盘上）、**凭据晚于启动**（只能通过节点自己的 Remote API 推，需要它已经在应答）。
 
+### 开机自动连接：先取凭据，再判断
+
+`autoConnect` 曾经是这个形状：遍历记录 → `if (!runtime.credentialsReady()) continue` → `connect()`。看起来是"没有凭据就别白连一次"，实际上**每次开机都一个都连不上**：`runtime.secret` 只由 `put()` 和 `connect()` 填充，刚构造出来的 runtime 一律是"没有凭据"，于是这个 `continue` 把每个节点都跳过了。实测症状：重启后设置页全显示「未连接」、侧栏里一个远程工作区都没有 —— 和「插件坏了」完全无法区分；而手动点「连接」就能连上，那正是 autoConnect 要省掉的动作。
+
+所以顺序必须是**先 `#adoptSecret()`，再判断**：凭据是开机时的状态，不是连接时才知道的东西。读凭据失败只记一行日志并跳过该节点（`connect()` 自己还会再取一次并抛出命名错误），一个坏掉的凭据库不该把整个循环带走。`test/autoconnect-unit.mjs` 用内存注册表 + 内存凭据库守住这四条：有凭据就连、没凭据不连、禁用的不连、凭据库抛错不外泄。
+
 ---
 
 ## 六之二、节点侧：源码级定制节点组合
@@ -344,10 +378,10 @@ provision 阶段内部顺序也是语义的：**组合先于启动**（profile �
 
 ### 怎么减：从**已安装的 release** 派生，不是从 master
 
-98 行的 upstream patch 手抄会腐。所以 `packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs` 做这个减法并生成 patch：
+`web-app` 的 patch 是 **621 行 / 123 行 insert**（实测 `0.2.2-rc.3` 的 `cordis.patch.yml`），手抄会腐。所以 `packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs` 做这个减法并生成 patch：
 
 - **keep**：全部 host-plane 行 —— Remote 控制器（session/workspace/workspaceFiles/job/terminal/settings）、传输层（webserver、`/api`、launch token）、服务（workspace、schedule、mcp-manager、agent-preset-registry）、`web-startup`。
-- **drop**：全部 `@deepseek-ai/dsh-client-ui-*` 包的行（节点没有窗口；按**包名**判断，共 56 行 —— 其中 `entry-customization` 的 id 不以 `ui-` 开头，只按 id 前缀过滤会漏掉它），加 9 个浏览器专属行，每个在脚本里写明理由：
+- **drop**：全部 `@deepseek-ai/dsh-client-ui-*` 包的行（节点没有窗口；按**包名**判断，实测 56 行 —— 其中 `entry-customization` 的 id 不以 `ui-` 开头，只按 id 前缀过滤会漏掉它），加 9 个浏览器专属行，每个在脚本里写明理由：
 
   | 行 | 为什么大脑不要 |
   |---|---|
@@ -416,9 +450,9 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 | 关注点 | 唯一拥有者 | 载体 |
 |---|---|---|
 | 节点跑哪些插件 | `packages/dsh-fleet-brain` | profile 的 `dsh.profile.bundles` |
-| 节点的模型名册与权限预设 | `host/provision.js` | `~/.dsh/profiles/fleet/cordis.patch.yml` |
+| 节点的模型名册与权限预设 | `host/provision.js` | `~/.dsh/profiles/<profile>/cordis.patch.yml` |
 | 节点的 API key | `host/provision.js` | 节点凭据库（经节点 `credentials/set`） |
-| 节点上的 DSH 版本 | `remote/daemon.js` | `npm i @deepseek-ai/dsh@<本机版本>` |
+| 节点上的 DSH 版本 | `remote/daemon.js` | 下载 Release 制品（`dsh-<ver>-<platform>.tar.gz`）替换 `runtime/`，见 §六之四 |
 
 **overlay 里不再出现 `disabled: true`。** 它曾经写过 56 条禁用浏览器行的 patch，但组合层已经把那些行全部去掉了 —— 于是这 56 条指向不存在 id 的 patch 是纯空转。更糟的是它掩盖信号：如果哪天某个 UI 行真的出现在节点组合里，正确反应是"组合错了"，而不是"悄悄把它关掉"。实测确认 `applyPatches` 对不存在的 id 只发一条 `ctx.logger.warn("patch: entry %C not found")` 然后跳过 —— 也就是说这类空转 patch **在正常输出里根本看不见**，是纯粹的静默噪音。
 
@@ -452,7 +486,7 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 ### 验证
 
-- `scripts/check-composition.mjs`：断言 7 个 Remote 控制器行在、4 个传输行在（`webserver` / `connection` / `api-remotes` / `web-startup`）、`brain-runtime` 在、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、4 个 preset 文件都存在且被声明、整份 YAML 能解析。
+- `scripts/check-composition.mjs`：断言 7 个 Remote 控制器行在、4 个传输行在（`webserver` / `connection` / `api-remotes` / `web-startup`）、`brain-runtime` 在、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、agent-plane 的 6 条关键 disable 在（组合层里一共 22 条，这里只钉「少了就一定挂」的那 6 条）、4 个 preset 文件都存在且被声明、整份 YAML 能解析。
 - 实测（192.168.x.x，DSH 0.2.2-rc.3）：`base + brain` 组合启动成功并打印 `dsh web: http://127.0.0.1:…?token=…`，五个端到端测试全绿。
 
 `check-composition` 里的传输行**故意只列 4 条而不是 5 条**：早期版本断言过 `authentication-token`，而 `0.2.2-rc.3` 没有发布那个包 —— 一个契约测试必须测**这个 release 的契约**，不能测记忆里的契约。launch token 由 `connection.authenticatedUrl()` 提供，所以 `connection` 那条才是必须的。
@@ -530,21 +564,48 @@ Release，节点下载 `dsh-<version>-<platform>.tar.gz` + `.sha256`。
 里就写着平台（`sherpa-onnx-win-x64`、`@img/sharp-linux-x64`）。把 Windows 的树解到 Linux 节点
 上，节点能起来，但终端和图片工具会在第一次使用时炸 —— 比它替代的慢安装更糟，因为失败得更晚、
 离原因更远。所以脚本用 npm 的 `--os/--cpu/--libc` **为目标平台解析**，插件按**节点的** `uname`
-取，取不到就回退 npm（npm 自己会正确解析原生包）。
+取，取不到（一个打不出平台的 `uname`）才回退 npm，因为 npm 会自己正确解析原生包 —— 这是「这一版根本没为这类机器发布制品」，不是「下载失败」；下载失败一律报错，不回退。
 
 安装脚本的几个硬约束（`src/remote/artefact.js`）：`set -eu`；`~/…` 要换成 `$HOME` 才能带引号
 （否则会真的建一个叫 `~` 的目录）；下载器 `curl`/`wget` 二选一；校验和在下载时失败而不是首次
 使用时失败；解压到 `runtime.incoming` 后整体 rename，失败回滚到 `runtime.previous`；退出码
-3 表示"这个平台没有制品"，只有它才回退 npm。
+3 是"所有加速站都拿不到"，那是**报错**，不是回退 npm 的理由（见下）。
 
-**下载要有下限，也要有上限。** 候选 URL 是"加速地址 + 直连 GitHub"，两者速度差两个数量级：
-实测同一台节点上加速地址 4 秒拉完 172 683 323 字节，直连 30 秒只拿到 925 295 字节。旧脚本对
-curl 只有 `--connect-timeout 15 --retry 2` —— 那只管**建连**，不管**传输**。于是加速地址关掉
-或超时之后，直连那一路会以 ~30 KB/s 爬 170 MiB，一个多小时毫无输出，对用户就是"连节点卡住"。
-现在的判据是 `--speed-limit 4096 --speed-time 60`（低于 4 KB/s 持续 60 秒就放弃这一路，按已有的
-`ARTEFACT_UNAVAILABLE` 命名失败返回）加 `--max-time 1800`（慢但能用的线路仍有 ~100 KB/s 的
-完整预算）。两个数都是常量（`FETCH_FLOOR_BYTES` / `FETCH_FLOOR_SECONDS` /
-`FETCH_CEILING_SECONDS`），`version-unit` 有断言守着。
+**加速站必须是列表，不能是一个；而且不许回退直连。** 候选 URL 只有一条路：`DEFAULT_MIRRORS`
+里的加速站依次试。原来只有一个默认加速站 `git.yylx.win`，它一旦挂掉（实测：节点上 443 端口直接
+connection refused），每次安装都静默落到直连 —— 直连实测 ~27 KB/s，172 683 323 字节要 **1.8 小时**，
+对用户就是「连节点卡住了」。
+
+**所以「直连 GitHub」从候选里删掉了，不是压到最后。** 这条是用户明确要求、也有实测支撑的取舍：
+能在加速站层面失败的机器，恰恰也是直连又慢又被挡的机器，直连是**唯一必然更糟**的兜底 —— 它把
+「加速站挂了」这个可判断的故障，变成 1.8 小时的静默等待。现在全部加速站失败时 `RemoteHost.install`
+直接抛错，逐条列出试过的 URL + 节点原文，由人换一个可用加速站；同理，平台能打标却没有
+`curl`/`wget` 也直接报错，不滑向 npm。
+
+顺序只在「所有站都活着」时有意义：连不上的站一次 connection refused 是毫秒级代价，所以项目
+既定的首选加速站 `git.yylx.win`（AGENTS.md §13）仍然排第一 —— 它今天在测试节点上 443 拒绝连接，
+但恢复后就是最快的那条路。以下是这张**实测过的**列表（从测试节点拉完整归档，不是 HEAD）：
+
+| 加速站 | 完整 172 683 323 字节耗时 | 吞吐 |
+|---|---|---|
+| `git.yylx.win`（首选） | 今天 connection refused | — |
+| `gh.inkchills.cn` | 70.8 s | ~2.4 MB/s |
+| `tvv.tw` | — | ~2.3 MB/s |
+| `ghfast.top` | — | ~0.7 MB/s |
+| 直连 GitHub（**已不是候选**） | 1.8 小时 | ~27 KB/s |
+
+`github.akams.cn` 是这些替代站的**汇总目录，不是代理**：`https://github.akams.cn/https://github.com/…`
+回 404，可用的是它目录里的那些域名（换站去那里找）。
+`artefactUrls()` 因此接受 `mirrors: string[]`，空列表直接抛 `no accelerator configured`；
+`version-unit` 断言了「每个加速站各一条」「顺序不变」「**没有任何一条以 `https://github.com/` 开头**」
+「空项不算候选」「重复项去重」「空列表报命名错误」，并用桩连接跑 `RemoteHost.install` 证明
+下载失败时既不跑 npm、也不构造直连 URL。
+
+**下载要有下限，也要有上限。** 旧脚本对 curl 只有 `--connect-timeout 15 --retry 2` —— 那只管
+**建连**，不管**传输**。现在的判据是 `--speed-limit 4096 --speed-time 60`（低于 4 KB/s 持续 60 秒
+就放弃这一路，换下一个候选；全挂就按 `ARTEFACT_UNAVAILABLE` 命名失败返回，由人换源）
+加 `--max-time 1800`（慢但能用的线路仍有 ~100 KB/s 的完整预算）。两个数都是常量
+（`FETCH_FLOOR_BYTES` / `FETCH_FLOOR_SECONDS` / `FETCH_CEILING_SECONDS`），`version-unit` 有断言守着。
 
 ### 每节点一份路径
 
@@ -636,20 +697,74 @@ DSH 一起带来。这条不是可选的兼容开关 —— 去掉它，任何�
 才是「和本地一样」的具体含义。不经过节点的 Harness，因为浏览目录是文件系统问题，而且那样会要求
 节点先起来才能选它自己的目录。
 
-### 一个对话框，两页，第三种叫法
+### 一个对话框，四页，第三种叫法
 
-第一屏是**表单**：项目名称 → 设备 → 源文件夹。浏览目录是它按需打开的第二页，设备下拉最后一项
-「添加远程设备…」进第三页（新增节点表单，与设置页共用同一个 `NodeForm`）。把文件浏览器当第一屏
-读起来是「操作一个目录对话框」，先问名字才读成「创建一个项目」—— 这正是人来这里要做的事。
+第一屏是**表单**：项目名称 → 设备 → 源文件夹。设备不再是一个下拉：它是一个**字段样的按钮**，点开
+「选择设备」页 —— 下拉装不下「添加远程设备…」这种动作，也装不下每台机器一行说明。
+
+**设备页**（`page: 'device'`）一行一台机器：`此设备`，加每个已连接节点（名字 + `host · 节点根目录`），
+末尾「添加远程设备…」进新增节点表单页（与设置页共用 `NodeForm`）。
+
+**入口页**（`page: 'roots'`）回答「那台机器上从哪开始」，而且两侧的答案**故意不同**：选本机列出
+`localRoots()` 探到的**盘符**（`C:\`、`D:\`…），选节点列出**那台机器的根**（`/`，由 `/browse?node=` 的
+`roots` 返回）。把盘符列表给节点、或把 POSIX 根给 Windows，正是设备这一步存在的意义所在 —— 共用一份
+列表就等于又把两侧混成一个。页脚保留「浏览全部目录」：直接进浏览页，落在那台机器的 home。
+
+**浏览页**（`page: 'browse'`）不再有机器选择器（它在入口页），面包屑返回键回到入口页，标题是
+`<设备> · 选择文件夹`，所以「我现在到底在看哪台机器」在每一页都写着。
+
+把文件浏览器当第一屏读起来是「操作一个目录对话框」，先问名字才读成「创建一个项目」—— 这正是人来这里
+要做的事。
 
 **同一份表单在两处入口说两套词**，靠插槽名自己判断，不猜上下文：「新建会话」的两个入口
 （`conversation.hero.workspace`、`workspace.picker`）说「创建项目 / 项目名称 / 创建」；侧栏加号
 （`sidebar.workspaces`）说「选择工作区文件夹 / 工作区名称 / 加入工作区」。判断依据是注册时把插槽名
 塞进 props（`origin`），因为组件本身拿不到自己被哪个洞注册。
 
-设备下拉里，选了节点就多出一行「这台设备上已有项目？添加到侧栏 ›」，点开列出**那台机器上已有的
+设备页里，选了节点就多出一行「这台设备上已有项目？添加到侧栏 ›」，点开列出**那台机器上已有的
 工作区**（按 `fleet_<nodeId>_` 前缀筛合并后的 baseline），点一条直接交接路径 —— 已存在的目录不必
 再浏览一遍去找。这是 zcode 表单里那一行的等价物。
+
+### 视觉口径：用壳的 token，不自己造型
+
+对话框与设置页的颜色、圆角、阴影、字号全部取自前端 bundle 里真实存在的 `--dsw-*` 变量（
+`--dsw-alias-bg-layer-*`、`--dsw-alias-border-l1..l4`、`--dsw-radius-*`、`--dsw-elevation-*`、
+`--dsw-alias-bg-mask-1` + `--dsw-mask-blur`、`--dsw-alias-switch-thumb`…）。**不变量 = 不渲染**，
+所以每个写进代码的变量都先在 `index-*.css` 里确认过；`--dsw-shadow-lg`、`--dsw-alias-font-code` 这类
+想当然的名字曾经静默回退成别的字体/没有阴影，已从代码里删干净。
+
+图标与状态点用壳的 `@deepseek-ai/dsh-client-ui-primitives`（`IconFolderCloseRegular`、
+`IconChevronLeftOutlineRegular`、`IconChevronRightOutlineRegular`、`IconChevronsUpDownOutlineRegular`、
+`IconPlusOutlineRegular`、`StateDot`、`Button`），不再用 `📁 ▼ ‹ ＋` 这类字形：字形在别人的字体栈里长什么样不受控。该模块因此写进
+`dsh.client.inject`（插件读取的每个服务都要声明，漏了就是 `cannot get property "X" without inject`），
+而 `test/install-unit.mjs` 会核对客户端半边**只** `require` 声明过的产品模块名。
+
+#### 页面骨架是量出来的，不是照抄样式表的
+
+设置页的骨架照官方「插件」页做，但**依据是运行中的 DOM，不是别人 lib 里的 CSS 字符串**。
+两页放在同一个 1400×1000 的视口里各量一遍，逐项对齐：
+
+| 项 | 官方「插件」页 | 本插件「远程节点」页 |
+|---|---|---|
+| 页面根 | `padding: 0 48px`；`flex column; align-items: center` | 同 |
+| 滚动列 | `width: calc(100% + 96px); margin-inline: -48px`；`padding: 0 48px 48px`；`gap: 32px` | 同（顶部 `padding-top` 由页头承担） |
+| 页头 | 标题 `20px/28px 500`，说明 `13px/20px` secondary，`padding-top: 28px` | 同 |
+| 内容列 | 子块 `max-width: 960px` | 同 |
+| 卡片 | `card-head` gap 14 / padding 8；图标 48×48、`.5px` 边框、`radius-lg`；标题 `14px/20px 500` 单行省略；说明 `13px/18px` tertiary | 同 |
+| 按钮 | 高 32、`radius-md`、`13px/20px` | 同 |
+| 开关 | 36×20、`padding: 2`、`radius: 999px`、thumb 16、选中 `translate(16px)`、`transform .12s ease` | 同 |
+
+三处曾真实踩到的坑：
+
+1. **组标题被挤成竖排**。`groupHead` 是 `display:flex`，标题没写 `flex`/`white-space`，旁边一个
+   会长的提示把它压到 23 px 宽，四个字竖着堆成 68 px 高。修法是标题 `flex: 0 0 auto; white-space:
+   nowrap`、提示 `flex: 1 1 auto; min-width: 0` —— 官方样式表里没写这两行，因为它的标题在
+   `groupHead` 里是唯一子元素；照抄别人的属性不等于照抄别人的结果。
+2. **页面没有滚动条**。壳的 `centerCol` 是 `overflow: hidden`，页面比框架高就被**直接裁掉**，
+   而祖先都不滚。所以页面必须自己 `height: 100%` 并把唯一可滚的孩子交给 `pageBody`
+   （`overflow: hidden auto`），这是本插件唯一能决定这件事的地方。
+3. **`max-width: 960` 不能加在页面根上**。官方把它加在**内容子块**上，页面根是满宽；加错一层
+   会让滚动条跑到文字列里面。
 
 节点上新建的目录、填的名称、选定的文件夹在交接前都还只是本页状态：**名称非空时先 `POST
 /fleet/api/workspaces` 再交接路径**，因为目录选择洞只回传 `path`，标题没有别的地方可放；`create`
@@ -675,6 +790,17 @@ preset 的 `config.plugins`**。本预设只列一个工具，这个会话就没
 
 preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么引导用户去对的地方），不负责实现它。
 
+### 预设必须有 `name` 和 `description`
+
+`config.id` 只决定身份，**不决定它长什么样**。`@deepseek-ai/dsh-agent-preset` 的 schema 里
+`name` / `description` / `order` 都是可选的，所以少写两个字段不会报错 —— 会话输入框的模式选择器
+里就直接显示 `node-control` 这个裸 id，夹在「犀牛模式」（有名称有说明）和几个内置模式之间，
+看起来像插件没装完的残留，而不是一个有人特意装的模式。实测对照：`rhino-mode` 写了
+`name: 犀牛模式` + 一句 `description`，`agentPresets/list` 就把它带出来。
+
+所以本预设补上 `name: 节点管理` 与一句说明；`description` 里同时写清**没有什么**（没有文件、
+终端、搜索、联网工具），因为「点进去发现什么都不能干」是这类受限模式最容易被误判的地方。
+
 ### 密钥不能作为工具参数
 
 会话日志会原样记录工具参数。在聊天里贴密码等于把它写进历史文件，所以 `add` 只收两种**引用**：
@@ -695,9 +821,14 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
 
 ## 七、测试
 
+共 31 个套件（`run-all.mjs --list` 是唯一权威清单），分三层：**offline** 11 个（纯逻辑 + 组合
+检查）、**contract** 3 个（读 `app.asar` 里的上游包）、**e2e** 17 个（运行中的 Host + 连上的节点）。
+下表按「守哪条设计」分组，同一层内的顺序不代表执行顺序。
+
 | 脚本 | 验证什么 | 依赖 |
 |---|---|---|
 | `routing-unit.mjs` | 身份往返、流扇出、工作区合并、本地调用直达上游、job 三个端点、control 只发一帧 baseline | 无（假 fleet） |
+| `routing-extra-unit.mjs` | 其余带身份的命名空间按各自形状路由：goals/userQuestions 按 `Agent`、feedback 按 request 字段、subagents 按裸 uuid、schedule 合并 + 逐条路由 | 无（假 fleet） |
 | `gateway-smoke.mjs` | SSH 上的 cookie、unary RPC、流载体 upgrade | 真实节点 |
 | `descriptor-smoke.mjs` | 上游包的 descriptor 与 `static inject` 可从 `app.asar` 读到 | Electron Node |
 | `dispatch-seam.mjs` | Gateway 的 view 会读取实例 own property；声明端点集不变 | Electron Node |
@@ -708,7 +839,7 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
 | `tool-git-image.mjs` | `git` 打真仓库、`read_image` 开真 PNG、`grep` 搜真文件 —— 三个在"工具在本地跑、只是对着镜像"时必然坏掉的工具 | 同上 |
 | `multipart-unit.mjs` | Gateway 的 `multipart/form-data` 应答能解：字节附件在正确的 JSON 路径上还原成 `Uint8Array`，畸形分片被拒绝而不是静默读成 `null` | 无 |
 | `provision-unit.mjs` | 下发给节点的东西是对的：provider 行复制而账号行不复制、行里没写 `apiKeyEnv` 时也能推断出 key ref、配置能过真 YAML 解析器 | Electron Node（解析器在 `app.asar` 里） |
-| `dsh-fleet-brain/scripts/check-composition.mjs` | 节点组合仍然是个**大脑**：7 个 Remote 控制器行在、5 个传输行在、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、preset 文件齐全且已声明、YAML 可解析 | Electron Node（借用安装里的 YAML 解析器） |
+| `dsh-fleet-brain/scripts/check-composition.mjs` | 节点组合仍然是个**大脑**：7 个 Remote 控制器行在、4 个传输行在（`webserver` / `connection` / `api-remotes` / `web-startup`）、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、preset 文件齐全且已声明、YAML 可解析 | Electron Node（借用安装里的 YAML 解析器） |
 | `dsh-fleet-brain/scripts/sync-from-upstream.mjs` | 组合可重新生成（幂等；生成后与已提交版本一致即说明没有手改生成物） | 已安装的 DSH release |
 | `client-bundle.mjs` | 桌面端真的 serve 了这份客户端代码；三个槽位注册且能渲染 | 运行中的 Host |
 | `event-relay.mjs` | 在**节点上直接建**的 Session 能到达浏览器：`api-session/*` 列表事件与 `session/control` 投影帧都带着包裹后的身份到达；baseline 里有远程投影块；没有任何裸的节点 Session id 泄漏 | 运行中的 Host + 已连接节点 |
@@ -724,6 +855,9 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
 | `picker-flow.mjs` | **手机**看节点这条路由：`/@fleet` 列出节点、`/@fleet/<id>/` 列出那台机器真实的根、每个 entry 都拼回命名空间、面包屑不越界、没记过的 id 报 `fleet/node-unknown`；`workspace/create` 用这种路径把工区建在节点上，而中转 dispatch 前建在桌面盘上的那个目录被清掉，且同目录下别人放的文件不动 | 同上 |
 | `picker-paths-unit.mjs` | `/@fleet` 命名空间的编解码（两种路径规范化器都能过、大小写、盘符、重复分隔符、完整 segment 才匹配）；影子目录清理**删不掉**任何有内容的目录，也拒绝命名空间之外的路径 | 无 |
 | `install-unit.mjs` | 安装清单自洽：`dsh.bundle.patch` 每个文件都存在且已声明、`engines.dsh` 是合法范围、`files` 覆盖所有运行物、`meta.detail` 指向真实文件、打包文件里没有内网地址与私钥 | 无 |
+| `autoconnect-unit.mjs` | 重启后不点「连接」也能连上：`autoConnect` 先取凭据再判断，有凭据就连、没凭据/被禁用的不连、凭据库抛错只记日志不外泄 | 无（内存注册表 + 内存凭据库） |
+| `fleet-control-unit.mjs` | 节点控制面：贴进对话的密钥被拒绝、引用在本机读取、任何返回值都不带认证材料 | 无（假 fleet） |
+| `node-control.mjs` | 「节点管理模式」是个**组合**而不是一句提示：预设注册且只声明两行、会话能建、真跑一轮只调 `fleet_nodes` 一个工具、答案是真实节点名册 | 运行中的 Host + 已连接节点 |
 | `plugin-switch.mjs` | 单个插件的开关真的落到节点：包被安装或复制上去、节点自己的 bundle 列表里排在脑 bundle **之前**、常驻 host 重启后仍答得出、远程工区数量不变；关回去同样干净，异常退出也恢复开关 | 同上 |
 | 手工 §2b / §7c | 脚本走协议、用户走界面，两者都要过：真实 Chrome 里新建远程会话、敲字、发送、看到「已完成」；再看智能体协作开关、子代理历史、产物卡片的原生打开 | 运行中的 Host + 真实 Chrome |
 

@@ -169,14 +169,17 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 
 ## 三、如果主路线真的断了（`dispatch-seam` 失败）
 
-先确认是不是这三条缝隙之一变了，**不要**马上想到 fork：
+先确认是不是这五条缝隙之一变了，**不要**马上想到 fork：
 
 1. 实例 own property 还能不能覆盖 dispatch？读 `dsh-api-gateway/lib/index.js` 里
    `invokePrepared` / `prepareInvocation`，看它取方法用的是 `Reflect.get(view, name)` 还是
    读原型上的描述符。如果改成读原型，覆写就失效了 —— 这时才有必要考虑换方案
    （例如注册一个自己的 provider，或者 fork，但 fork 的维护成本要高得多）。
-2. lookup 还能不能 override？读 `dsh-typert-registry` 的 `lookups.configure`。
-3. SSH 上的 HTTP/WS 还通不通？这跟 DSH 版本无关，基本不会坏。
+2. lookup 还能不能 override？读 `dsh-typert-registry` 的 `lookups.configure`，以及
+   `lookupStore.resolvers` 是不是仍然是个 `Map`（`agent` 那一项走的是后者）。
+3. Gateway 的 `pendingRemoteEvents` / `deliverRemoteEvent` / `cancelRemoteEvent` 还是不是实例上的
+   普通状态？改成私有字段或加上 `startRemoteEvent` 的完整校验，审批卡就发不出去。
+4. SSH 上的 HTTP/WS 还通不通？这跟 DSH 版本无关，基本不会坏。
 
 ---
 
@@ -186,8 +189,10 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 `$DSH_INSTALL_DIR/package.json` 读）。理由：Session 日志格式、事件类型、投影结构都随版本走，
 两边版本不一致会以"能连上但会话显示错乱"这种最难查的方式失败。
 
-版本不符时 `connect` 会自动 `npm install` 到节点，所以**升级桌面端后第一次连节点会慢**
-（几分钟），之后复用。
+版本不符时 `connect` 会自动下载对应的 Release 制品替换节点 `runtime/`（不走 npm，见
+`docs/ARCHITECTURE.md` §六之四），所以**升级桌面端后第一次连节点会慢**（要拉 165 MiB 左右），
+之后复用。制品没发布或所有加速站都挂时，`connect` 会带 `ARTEFACT_UNAVAILABLE` 报错并列出
+试过的 URL —— 那时要么发一版制品，要么换加速站。
 
 ---
 
@@ -300,6 +305,11 @@ fleet 有三处行为是**围着中转写的**，升级后逐一确认：
 **判断依据不是「版本号变了」，而是这三处行为还在不在。** 中转没有声明 `engines.dsh`，
 只声明了一批 `@deepseek-ai/dsh-*` 的 peer range，所以 DSH 升级时它自己不会拒装 ——
 这也是为什么 `dispatch-seam` 那两条缝隙测试必须在**装了中转的同一个 profile** 里跑。
+
+**还有一条不是行为、是部署**：中转服务端目前跑的是镜像 tag `latest`（容器内 `@dsh-remote/server`
+0.5.21，构建于 2026-11-15）。`latest` 会在上游发版时静默变化，而 DSH Go 是安装版、不可能跟着升。
+钉版本的做法：`docker inspect` 确认 tag 不再是 `latest`，升级前先看上游 `docs/compatibility.zh.md`
+的 peer range；重启后 DSH Go 仍能连上才算通过。
 
 ## 八、DSH Go（安卓客户端）升级后要看什么
 

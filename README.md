@@ -104,18 +104,20 @@ DSH 的桌面端很好用，但它的**工具全部跑在本机**。当你需要
 `session/control`（每会话的 `title`、`modelSelection`、待处理审批标记）。
 两路都是 Host 级、每连接一条，所以是**并流**而不是转发 —— 浏览器侧同样一行没改。
 
-### 3.2 三处运行时缝隙（而不是改上游代码）
+### 3.2 五处运行时缝隙（而不是改上游代码）
 
 插件**不 import 任何 `@deepseek-ai/*`**，唯一运行时依赖是 `ssh2`。
-它站在三处 DSH 自己的实现细节上，每一处都有测试守着：
+它站在五处 DSH 自己的实现细节上，每一处都有测试守着：
 
 | 缝隙 | 是什么 |
 |---|---|
 | 实例上的 own property | Gateway 从**类原型**读 `@Remote` 描述符，但 dispatch 用 `Reflect.get(view, name)` —— 实例属性优先。所以在实例上覆写方法，端点表不变、实现换掉。 |
 | `typert.lookups.configure('workspaceFileScope', …)` | `fleet_…` 不是本地 Session，Host 自己的 lookup 会先返回 not-found。覆写后本地 id 原样委派上游，包装 id 合成 scope。 |
+| `typert.lookupStore.resolvers` 的 `agent` 项 | `agent: Agent` 形参在方法体之前就被解析掉，而公开的 `configure` 已被上游占用（同一 key 第二次调用直接抛错）。所以直接换 resolver 表里那一项。 |
+| Gateway 的待处理事件表 | 上游唯一的「本地发起 waterfall」入口要求一个只有 `@deepseek-ai/dsh-scope` 能造的 carrier。改为自己造一条同形 pending 塞进 `pendingRemoteEvents`，投递与结算交给上游。 |
 | `webServer.register('/fleet/api')` | 本地的目录选择器浏览的是**本机**，永远选不到节点的 `/root/project`。所以插件占用壳的 `*.directoryFlow` 插槽，换成一个"先选机器、再选目录"的对话框。 |
 
-这三条是**实现细节，不是公开契约**。所以有 `test/dispatch-seam.mjs`：
+这五条是**实现细节，不是公开契约**。所以有 `test/dispatch-seam.mjs`：
 DSH 升级后它先炸，而不是等你某天发现所有远端会话都点不开。
 
 ### 3.2b 手机入口：节点路径挤进同一套语法
@@ -219,21 +221,23 @@ dsh-client-ui-* : 0
 web-runtime     : 0
 ```
 
-**测试矩阵**：30 个套件，分三层，由 `test/run-all.mjs` 一次调度。
+**测试矩阵**：31 个套件，分三层，由 `test/run-all.mjs` 一次调度（`--list` 打印完整清单）。
 
-| 层 | 套件 | 需要什么 |
-|---|---|---|
-| 纯逻辑（9） | `routing`、`routing-extra`、`multipart`、`provision`、`waterfall`、`version`、`picker-paths`、`install`、`fleet-control` | 只要 Node 22 |
-| 组合与契约（5） | `composition`、`descriptor`、`dispatch`、`upstream` | 装好的 DSH（读 `app.asar`），必须用它的 Electron Node 跑 |
-| 端到端（16） | `gateway`、`host-routing`、`workspace-flow`、`workspace-browse`、`picker-flow`、`plugin-switch`、`tool-parity`、`tool-git-image`、`client-bundle`、`event-relay`、`session`、`terminal`、`multi-node`、`artefact`、`approval`、`node-control` | 运行中的 Host + SSH 可达的节点 |
+| 层 | 数量 | 套件 | 需要什么 |
+|---|---|---|---|
+| `offline` | 11 | `routing`、`routing-extra`、`multipart`、`provision`、`waterfall`、`version`、`picker-paths`、`install`、`autoconnect`、`fleet-control`、`composition` | 其中 9 个只要 Node 22；`provision` 与 `composition` 要装好的 DSH（读 `app.asar`） |
+| `contract` | 3 | `descriptor`、`dispatch`、`upstream` | 装好的 DSH，必须用它的 Electron Node 跑 |
+| `e2e` | 17 | `gateway`、`host-routing`、`workspace-flow`、`workspace-browse`、`picker-flow`、`plugin-switch`、`tool-parity`、`tool-git-image`、`client-bundle`、`event-relay`、`session`、`terminal`、`multi-node`、`artefact`、`approval`、`node-control`、`browser` | 运行中的 Host + SSH 可达的节点 |
 
 ```bash
 node packages/dsh-fleet/test/run-all.mjs                     # 全部
 node packages/dsh-fleet/test/run-all.mjs --layer offline,contract   # 不需要节点的那两层
 ```
 
-端到端层里 `artefact` 需要从公网下载一份 165 MiB 的节点运行时；网络受限时它以
-`ARTEFACT_UNAVAILABLE` 退出并被记成 SKIP，不算通过。`browser` 套件需要一个带
+端到端层里 `artefact` 需要从加速站下载一份 165 MiB 的节点运行时（候选只有
+`DEFAULT_MIRRORS` 里的加速站，**不回退直连 GitHub，也不回退 npm**）；加速站全挂时它以
+`ARTEFACT_UNAVAILABLE` 退出并被记成 SKIP，不算通过。换加速站改
+`packages/dsh-fleet/src/remote/artefact.js` 的 `DEFAULT_MIRRORS`。`browser` 套件需要一个带
 `--remote-debugging-port` 的 Chrome，默认不跑。
 
 ---
@@ -313,7 +317,7 @@ node packages/dsh-fleet/test/run-all.mjs --layer e2e
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 路线取舍、三处缝隙、身份编码、为什么"不做镜像"是功能 |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 路线取舍、五处缝隙、身份编码、为什么"不做镜像"是功能 |
 | [`docs/adr-0003-phone-control.zh.md`](docs/adr-0003-phone-control.zh.md) | 手机 → 中转 → 桌面 → 节点这条链路的调研与硬边界 |
 | [`docs/adr-0004-node-control-and-picker.zh.md`](docs/adr-0004-node-control-and-picker.zh.md) | `/@fleet` 命名空间、选择器接管、节点控制、安装形态 |
 | [`docs/adr-0005-release-and-maintenance.zh.md`](docs/adr-0005-release-and-maintenance.zh.md) | 包名依据、发布形态、三条升级链 |
