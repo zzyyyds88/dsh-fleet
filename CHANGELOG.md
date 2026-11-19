@@ -17,12 +17,43 @@
   构建并上传 165 MiB 制品」上 —— 而那件制品的内容本来就是在节点上跑一次
   `npm install --os/--cpu/--libc '@deepseek-ai/dsh@<版本>'` 能得到的东西。现在
   `RemoteHost.install` 有两条有序路线（`RUNTIME_ROUTES = ['artefact', 'npm']`）：先试制品，
-  制品**拿不到**（加速站全挂、没有 `curl`/`wget`、`mirrors: []`、平台打不出标签）就让节点
-  自己解析同一版本。实测参考节点：制品是 165 MiB 下载，自建是 26–33 s / 673 包。
+  制品**拿不到**（所有源全挂、没有 `curl`/`wget`、`mirrors: []`、平台打不出标签）就让节点
+  自己解析同一版本。实测参考节点：制品是 162 MiB 下载，自建是 26–33 s / 673 包。
   **受影响**：所有人。上游升级不再需要等任何人；最坏情况是一次慢一点的连接。
 - **配置新增 `runtime: auto | artefact | npm`（默认 `auto`）与 `registry`。** 强制单条路线
   是为了让失败可归因，排查「节点自己的 registry 通不通」时直接 `runtime: 'npm'`。
   节点卡片会显示这一棵树是下载的还是自建的。
+- **制品改从 CNB 主源下载，GitHub 加速站降为灾备。** `artefactUrls()` 原来只会给 GitHub 官方
+  URL 加前缀，表达不了 CNB 的 `-/releases/download/<tag>/<file>` 形状；现在源是对象数组
+  （`{kind:'template', template}` / `{kind:'prefix', prefix}`），`DEFAULT_SOURCES` 里 CNB 排第一。
+  实测参考节点拉 170 092 405 字节整档：CNB **4 311 729 B/s、重复测量抖动 <1%**，同一时段
+  `gh.inkchills.cn` 178 047 B/s，四个加速站历史区间 0.2–9.6 MB/s（**抖动 40 倍**）。抖动才是
+  问题：同样的节点同样的归档，有时 34 s 有时一小时，读起来就是「连接卡住了」。
+  **受影响**：所有人。`mirrors: string[]` 继续可用，`mirrors: []` 仍是「关掉制品路线」的写法。
+- **插件本体改由 CNB Release 的 tarball 分发。** `dsh plugin add -w https://…/*.tgz` 是 DSH
+  安装器的原生形态（`install-spec.js` 对 http(s) tarball 有明确分支），所以不再依赖 npm 上还
+  留着哪个版本。桌面端会话里的 `plugin_manager(action='install_bundle', target=<该 URL>)`
+  走同一个安装器，所以「让 agent 装」不需要敲命令。**受影响**：新安装的人。
+- **断线现在看得见，并且会自动重连。** SSH socket 掉了之后 `state` 原来一直是 `connected`：
+  卡片是绿的、侧栏还列着那台机器的工作区，而任何调用都回 `fleet/node-offline` —— 一个界面上
+  从未出现过的状态。现在 `close` 事件（排除 `invalidate`/`dispose` 这两条主动路径）上报给
+  `Fleet`，状态落 `idle` 并记 `droppedAt`；重连是 2s/4s/8s 三档，之后每 2 分钟，直到成功或
+  用户点断开。**受影响**：所有节点。
+- **失败可归因：稳定错误码 + 一个动作 + 是否可重试。** `core/errors.js` 把每次失败分类成
+  `{code, message, action, retryable, detail}`，判定顺序是「显式 code > SSH category > phase
+  推断 > unknown」。密码错**不配重试按钮** —— 按了只会得到同一次失败。失败的 phase 也不再被
+  清空，所以阶段列表停在出错的那一格。
+- **每个节点自带最近 100 行连接日志**，写入即脱敏（`password=` / `token:` /
+  `Authorization: Bearer` / 私钥块 / `ssh://user:pass@host`），路由
+  `/fleet/api/nodes/<id>/log`，卡片上可展开、可复制。
+- **主机密钥首次记录、之后每次都验。** `hostVerifier` 从写下的第一天起就在读
+  `target.hostFingerprint`，但全仓库没有一处给它赋过值 —— 于是每次都走「首次」分支并
+  `verify(true)`。这条链是死代码，中间人可以无条件接管连接。现在首次握手写进
+  `NodeRecord.hostKey`，之后不符就拒绝并把两侧指纹写进日志。
+- **手机端选择器首屏是设备层。** 手机调用 `directoryPicker/list` 不带 path，原来返回的是
+  **桌面机自己的 home**，手机永远出不去本机；`/@fleet` 只有主动拼路径才到得了，而手机界面上
+  没有入口。现在首屏是「此设备 + 各已连接节点」。
+- **每台设备记住上次用的目录**，设备列表按最近连接排序，超过两台才给搜索框。
 
 ### 修复
 
@@ -44,10 +75,18 @@
   `node-pty/prebuilds/*/spawn-helper` 因此不可执行，终端在**第一次打开时**才失败，错误信息
   一个字都不会提到这个文件。现在 `installScript` 解包后自己 `chmod 0755`。这一条同时修好
   已经发出去的归档。
+- **节点掉线时工作区行不再消失。** `RemoteWorkspaces.sync()` 原来只要节点不在 `routable()`
+  里就把整份 baseline 丢掉 —— 断线那一刻侧栏里整台机器的工作区消失，一分钟重连成功后又回来。
+  现在只有**记录被删**才丢行，只是连不上时行留着并标 `offline`。
 
 ### 说明
 
 - `RUNTIME_BUILD` 从 2 升到 3（打包规则与戳格式都变了），节点会在下一次连接时重装一次。
+- **节点不升 Node 24，`MINIMUM_NODE_MAJOR` 保持 22。** 上游 `engines.node` 写的是
+  `>=24.9.0`，但 305 个依赖包里真正的 Node 24 API（`Promise.try` / `RegExp.escape` /
+  `Float16Array` / `node:sqlite`）是 **0 处**，唯一的 `await using` 命中是 acorn 解析器里的
+  字符串字面量；`workflow-ptc` 在节点组合里是 `disabled: true`，加载不到。抬高门槛的唯一
+  后果是一部分现场机器连不上。依据见 `docs/adr-0006-node-runtime-supply.zh.md` §四-2。
 - **节点上装插件时，npm 不再顺手把 DSH 自己拉下来。** 第三方 bundle 的
   `peerDependencies` 写的是 `@deepseek-ai/dsh-*` 的区间（`^0.2.0-rc.1` 之类），
   npm 满足 peer 的办法是把那个包**装进节点的 profile**，而 profile 的
@@ -58,6 +97,10 @@
   `--legacy-peer-deps`：运行时树是这些包的唯一来源，插件不许把 DSH 一起带来。
   **受影响**：所有在节点上打开过插件的安装。已坏掉的节点重连一次即可自愈
   （下一次 `npm install` 会把多出来的 `@deepseek-ai/*` 剪掉）。
+- **一个新 profile 必须先由 DSH 自己创建。** DSH 创建 profile 时会写全
+  `package.json` + `cordis.patch.yml` + `pnpm-workspace.yaml` 三件套；手搓一个只有
+  `package.json` 的目录会得到一个看起来像 profile 的空壳，`pnpm add -w` 报
+  `--workspace-root may only be used inside a workspace`，DSH 把它当成安装失败。实测撞过。
 
 ## [0.5.1] — 2026-11-18
 
