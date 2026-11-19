@@ -263,9 +263,22 @@ Nothing on a node needs to change: the node side is the embedded
   config:
     enabled: true
     autoConnect: true
+    # How a node gets its DSH: auto (default, artefact then npm),
+    # artefact (published tree only), or npm (let the node resolve it).
+    runtime: auto
+    # Accelerators tried in order when downloading an artefact.
+    mirrors: [https://git.yylx.win/, https://gh.inkchills.cn/]
+    # Registry the *node* uses when it resolves the release itself.
+    # Omit to use the node's own `npm config get registry`.
+    registry: https://registry.npmmirror.com
 ```
 
 `autoConnect: false` keeps every node idle until you press *Connect*.
+
+`runtime` exists so a failure can be attributed: `artefact` turns a download problem into a
+named error instead of a slower connect, and `npm` is how you check whether the node's own
+registry works at all. `registry` is passed through to the node's `npm install --registry`;
+leaving it out is usually right, because the node knows its own network.
 
 ## Endpoints that stay local, on purpose
 
