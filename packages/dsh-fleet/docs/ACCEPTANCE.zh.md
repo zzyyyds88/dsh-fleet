@@ -518,7 +518,7 @@ $ hostname                                            →  Develop
 
 ```
 Bad packet length 88734736.
-ssh_dispatch_run_fatal: Connection from user root 192.168.3.24 port 62259: Connection corrupted
+ssh_dispatch_run_fatal: Connection from user root <本机地址> port 62259: Connection corrupted
 ```
 
 fleet 随即报节点掉线，于是 `plugin-switch` / `tool-parity` / `tool-git-image` / `event-relay`

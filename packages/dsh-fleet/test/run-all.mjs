@@ -227,13 +227,20 @@ const SUITES = [
   },
 
   // ---- end to end: a real Host, a real node -------------------------------
+  // `needs: 'host'`, not `'node'`: this suite reads the node's `status.json` and insists the
+  // pid in it is alive, and that file only names a live process when **this Host** has
+  // connected the node (`ensureServing` starts it). Declared `'node'` it ran first on a cold
+  // start, before any host-backed suite, and read a status file left behind by an earlier run
+  // whose process was gone — a red "the resident host is not running" that says nothing about
+  // the code. Measured: on a cold `run-all.mjs` it failed for exactly that reason, and passed
+  // in 878 ms as soon as a Host had connected the node.
   {
     name: 'gateway',
     layer: 'e2e',
     file: ['packages', 'dsh-fleet', 'test', 'gateway-smoke.mjs'],
     runtime: 'node',
     timeoutMs: 300_000,
-    needs: 'node',
+    needs: 'host',
     proves: 'cookie, unary RPC and the stream carrier work over SSH against a resident node',
   },
   {
