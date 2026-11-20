@@ -21,14 +21,16 @@
  *
  * Run: `node test/fork-runtime-unit.mjs`
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   ARTEFACT_RESIDUE,
+  ARTEFACT_RESIDUE_KEEP,
   DROP_RULES,
   RETAINED,
   dropPackages,
+  foreignPlatformResidue,
   stripResidue,
 } from '../scripts/trim-fork-runtime.mjs'
 import { PUBLISHED_PLATFORMS, isPublishedPlatform } from '../src/remote/artefact.js'
@@ -114,17 +116,143 @@ function packageIn(root, name) {
   }
 }
 
+// ---- native payloads of a platform this artefact cannot run on ---------------
+// `node-pty` loads exactly one `prebuilds/<os>-<arch>/` directory — it builds the path by
+// concatenating `process.platform` and `process.arch` (`lib/utils.js`). On the build-4 archive
+// that meant 23.2 MiB of prebuilds shipped for 0.07 MiB of reachable binary, including a
+// Windows ConPTY `.exe`, `.dll` and `.pdb` in a Linux artefact.
+{
+  const linux = foreignPlatformResidue('linux-x64')
+  const hits = path => linux.some(pattern => pattern.test(path))
+  check(hits('node_modules/node-pty/prebuilds/win32-x64/'), 'another OS prebuild is stripped')
+  check(hits('node_modules/node-pty/prebuilds/win32-arm64/conpty.pdb'), 'including its debug symbols')
+  check(hits('node_modules/node-pty/prebuilds/darwin-arm64/'), 'and a same-OS wrong-arch one')
+  check(!hits('node_modules/node-pty/prebuilds/linux-x64/'), 'the one directory that loads survives')
+  check(hits('node_modules/node-pty/third_party/conpty/1.25.260303002/win10-x64/OpenConsole.exe'),
+    'the Windows-only third_party payload is stripped too')
+  // npm writes a `.cmd` and a `.ps1` next to every `.bin/` entry. On Linux `sh` runs the
+  // extensionless one, so the pair is unreachable — 26 files on the real archive.
+  check(hits('node_modules/.bin/dsh.cmd') && hits('node_modules/.bin/dsh.ps1'),
+    'the Windows npm shims are stripped')
+  check(!hits('node_modules/.bin/dsh'), 'the extensionless bin entry survives')
+
+  // The rule is a function of the platform, not a hard-coded "strip win32": a win32 artefact
+  // must keep its own payload and drop the POSIX one.
+  const win = foreignPlatformResidue('win32-x64')
+  const winHits = path => win.some(pattern => pattern.test(path))
+  check(!winHits('node_modules/node-pty/prebuilds/win32-x64/'), 'a win32 artefact keeps win32')
+  check(winHits('node_modules/node-pty/prebuilds/linux-x64/'), 'and drops linux')
+  check(!winHits('node_modules/node-pty/prebuilds/win32-x64/conpty.pdb'),
+    'and keeps its own debug symbols')
+
+  // A darwin artefact is the third case, and the one a hard-coded rule would get wrong.
+  const mac = foreignPlatformResidue('darwin-arm64')
+  check(!mac.some(pattern => pattern.test('node_modules/node-pty/prebuilds/darwin-arm64/')),
+    'a darwin artefact keeps darwin')
+}
+
+// ---- the four rules that used to match nothing ------------------------------
+// Each of these was measured against the published archive: the old list let 139.8 MiB of
+// dead bytes through, and none of it showed up as a failure — it just made every node
+// download a third more than it needs.
+{
+  const root = mkdtempSync(join(tmpdir(), 'fork-residue-'))
+  try {
+    const dir = packageIn(root, '@deepseek-ai/dsh')
+    const write = (path, body) => {
+      const full = join(dir, path)
+      mkdirSync(dirname(full), { recursive: true })
+      writeFileSync(full, body, 'utf8')
+    }
+    write('lib/index.js', 'export {}\n')
+    // Dead: the tree loads lib/*.js, never src/*.ts.
+    write('src/index.ts', 'export type A = 1\n')
+    write('src/client/Panel.tsx', 'export const Panel = () => null\n')
+    // Dead: a declaration in the .cts spelling the old list forgot.
+    write('node_modules/zod/index.d.cts', 'declare const z: 1\n')
+    write('index.d.ts', 'export {}\n')
+    // Dead: a Windows debug symbol inside a Linux artefact.
+    write('prebuilds/win32-x64/conpty.pdb', 'MZ\n')
+    // Alive: an agent loads these by path.
+    write('skills/personalized-pages.md', '# skill\n')
+    write('assets/office/SKILL.md', '# skill\n')
+    write('references/session-tab.md', '# ref\n')
+
+    // Alive, and not because any code reads it: the `dsh-doc` skill ships in the brain
+    // composition and its `locate-docs.md` tells the reader to open
+    // `DSH_INSTALL_DIR/docs/user/index.md` and `docs/upgrade-guide/README.md`. A rule that
+    // only looks for `import`/`readFile` cannot see a path spelled out in prose — the first
+    // version of this list deleted all 481 files and left the skill pointing at nothing.
+    for (const path of ['docs/user/index.md', 'docs/upgrade-guide/README.md', 'docs/architecture.md']) {
+      write(path, '# doc\n')
+    }
+
+    // Dead: documentation of *other* packages, in the spellings the old
+    // `/(^|\/)\.md$/` rule could not match. The dsh package's own `docs/` is exempt (above),
+    // so these live elsewhere — which is also the shape the real tree has: 481 of the 622
+    // markdown files were under `@deepseek-ai/dsh/docs/`, the remaining 141 were not.
+    const other = packageIn(root, '@deepseek-ai/dsh-tool-bash')
+    const writeOther = (path, body) => {
+      const full = join(other, path)
+      mkdirSync(dirname(full), { recursive: true })
+      writeFileSync(full, body, 'utf8')
+    }
+    writeOther('docs/guide.md', '# a\n')
+    writeOther('HISTORY.md', '# h\n')
+
+    const result = stripResidue(root, ARTEFACT_RESIDUE, ARTEFACT_RESIDUE_KEEP)
+    const gone = path => !existsSync(join(dir, path))
+    const there = path => existsSync(join(dir, path))
+    const goneOther = path => !existsSync(join(other, path))
+
+    check(there('lib/index.js'), 'the compiled entry survives')
+    check(gone('src/index.ts'), 'non-declaration .ts sources are stripped')
+    check(gone('src/client/Panel.tsx'), 'and .tsx')
+    check(gone('index.d.ts'), 'declarations are stripped')
+    check(gone('node_modules/zod/index.d.cts'), 'including the .d.cts spelling the old list missed')
+    check(gone('prebuilds/win32-x64/conpty.pdb'), 'debug symbols are stripped')
+    check(goneOther('docs/guide.md') && goneOther('HISTORY.md'),
+      'another package\'s documentation is stripped even when its name is not exactly ".md"')
+    check(there('skills/personalized-pages.md'), 'a skill an agent reads survives')
+    check(there('assets/office/SKILL.md'), 'a packaged SKILL.md survives')
+    check(there('references/session-tab.md'), 'a references/ page survives')
+    check(there('docs/user/index.md') && there('docs/upgrade-guide/README.md')
+      && there('docs/architecture.md'),
+      'the install docs the dsh-doc skill names in prose survive — no code reads them, an agent does')
+    check(result.files === 7, 'the strip reports every file it removed', String(result.files))
+
+    // The rescue must apply to markdown only. It is an exception to one rule, not a blanket
+    // exemption: consulting it for every path let `skills/` rescue
+    // `openai/src/resources/skills/*.ts`, thirteen TypeScript sources that shipped because
+    // their directory happened to be called `skills`.
+    write('skills/nested/deep/extra.md', '# more\n')
+    write('skills/impl/reader.ts', 'export const read = () => 1\n')
+    stripResidue(root, ARTEFACT_RESIDUE, ARTEFACT_RESIDUE_KEEP)
+    check(there('skills/nested/deep/extra.md'),
+      'markdown nested under a rescued directory survives')
+    check(gone('skills/impl/reader.ts'),
+      'but a .ts under a directory called skills/ is still stripped — the rescue is about markdown')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
 // ---- the archive contract ---------------------------------------------------
 {
   // The residue list has one home. Two copies would drift into two artefact
-  // contents at one version, which is what `RUNTIME_BUILD` exists to catch.
+  // contents at one version, which is what `RUNTIME_BUILD` exists to catch — and it already
+  // happened once: `publish-runtime` had its own `strip()` walker, so a rule added to the
+  // shared list would have applied to the fork build only.
   const publish = readFileSync(new URL('../scripts/publish-runtime.mjs', import.meta.url), 'utf8')
-  check(/import \{ ARTEFACT_RESIDUE \}/u.test(publish),
-    'publish-runtime strips with the shared residue list')
+  check(/import \{[^}]*ARTEFACT_RESIDUE[^}]*\} from '\.\/trim-fork-runtime\.mjs'/u.test(publish),
+    'publish-runtime imports the shared residue list')
+  check(/stripResidue\(dir, \[\.\.\.STRIPPED, \.\.\.foreignPlatformResidue\(platform\)\], ARTEFACT_RESIDUE_KEEP\)/u.test(publish),
+    'and deletes through the shared walker, so the keep list and the platform rules apply to both routes')
   check(!/const STRIPPED = Object\.freeze/u.test(publish),
     'and keeps no second copy of it')
   const build = readFileSync(new URL('../scripts/build-fork-runtime.mjs', import.meta.url), 'utf8')
-  check(/ARTEFACT_RESIDUE/u.test(build), 'the fork build strips with the same list')
+  check(/stripResidue\(staging, \[\.\.\.ARTEFACT_RESIDUE, \.\.\.foreignPlatformResidue\(platform\)\], ARTEFACT_RESIDUE_KEEP\)/u.test(build),
+    'the fork build strips with the same list, the same keep list, and the same platform rules')
   check(/--ignore-scripts/u.test(build), 'the fork build resolves without running install scripts')
   check(/overrides/u.test(build),
     'the fork build stages by override, so only the imported closure is installed')

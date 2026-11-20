@@ -144,6 +144,14 @@ const SUITES = [
     proves: 'the fork trim rules: what a node keeps, what it drops and why, and that the build and the publisher strip the same residue list',
   },
   {
+    name: 'node-patches',
+    layer: 'offline',
+    file: ['packages', 'dsh-remote-node-harness', 'test', 'node-patches-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 60_000,
+    proves: 'the source-patch chain: every patch follows NNNN-slug.patch, applies through git apply --3way, and has a complete row in the deviation ledger',
+  },
+  {
     name: 'rnh-lifecycle',
     layer: 'offline',
     file: ['packages', 'dsh-remote-node-harness', 'test', 'rnh-lifecycle-unit.mjs'],

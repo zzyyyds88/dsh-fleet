@@ -138,8 +138,14 @@ export const DEFAULT_SOURCES = Object.freeze([
  * the experimental bundles removed — 2014.6 MiB unpacked → 408.6 MiB, measured. A build-3
  * tree is the upstream release, which is a different runtime at the same version, so it is
  * reinstalled rather than kept.
+ *
+ * Build 5 strips what no runtime reads from *inside* the packages build 4 kept: TypeScript
+ * sources (the tree loads `lib/*.js`), `.d.cts` declarations, debug symbols, and documentation
+ * except the files an agent loads by path (`skills/`, `assets/`, `references/`, `templates/`,
+ * `SKILL.md`). Measured on the published build-4 archive: 17 245 files / 139.8 MiB, 408.2 →
+ * 268.4 MiB. Same version, same package set, a third fewer bytes — so it needs its own stamp.
  */
-export const RUNTIME_BUILD = 4
+export const RUNTIME_BUILD = 5
 
 /** The stamp file, relative to the runtime directory. */
 export const BUILD_STAMP = '.rnh-artefact.json'

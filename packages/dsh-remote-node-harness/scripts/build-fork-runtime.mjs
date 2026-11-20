@@ -50,7 +50,8 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ARTEFACT_RESIDUE, dropPackages, stripResidue } from './trim-fork-runtime.mjs'
+import { applyPatches } from './node-patches.mjs'
+import { ARTEFACT_RESIDUE, ARTEFACT_RESIDUE_KEEP, dropPackages, foreignPlatformResidue, stripResidue } from './trim-fork-runtime.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pluginRoot = resolve(here, '..')
@@ -208,6 +209,15 @@ function tarRead(dir, file, member) {
 
 /** Build and pack the fork, unless an earlier run's output is being reused. */
 function prepareFork() {
+  // Applied even when the build output is reused: the patches change the *source*, and a
+  // reused `dist/` was packed from a tree that may predate them. Checking is cheap and a
+  // mismatch here is exactly the drift this mechanism exists to catch.
+  const patches = applyPatches(pluginRoot, fork, { dryRun: reuse })
+  if (patches.length > 0) {
+    const applied = patches.filter(patch => patch.state === 'applied').length
+    const already = patches.filter(patch => patch.state === 'already').length
+    process.stdout.write(`node patches: ${String(patches.length)} (${String(applied)} applied, ${String(already)} already in the tree)\n`)
+  }
   if (reuse) {
     process.stdout.write('reusing the packed fork output already in dist/\n')
     return
@@ -375,7 +385,7 @@ if (!reuse || !existsSync(join(staging, 'node_modules'))) resolveTree(staging)
 
 const before = measure(join(staging, 'node_modules'))
 const dropped = dropPackages(staging)
-const stripped = stripResidue(staging, ARTEFACT_RESIDUE)
+const stripped = stripResidue(staging, [...ARTEFACT_RESIDUE, ...foreignPlatformResidue(platform)], ARTEFACT_RESIDUE_KEEP)
 const after = measure(join(staging, 'node_modules'))
 const mib = value => (value / 1048576).toFixed(1)
 process.stdout.write(

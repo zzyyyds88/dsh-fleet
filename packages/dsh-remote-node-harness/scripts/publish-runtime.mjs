@@ -43,7 +43,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, st
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ARTEFACT_RESIDUE } from './trim-fork-runtime.mjs'
+import { ARTEFACT_RESIDUE, ARTEFACT_RESIDUE_KEEP, foreignPlatformResidue, stripResidue } from './trim-fork-runtime.mjs'
 import { PUBLISHED_PLATFORMS, isPublishedPlatform } from '../src/remote/artefact.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -152,24 +152,19 @@ function measure(dir) {
   return { bytes, files }
 }
 
-/** Delete everything `STRIPPED` matches, depth first. */
-function strip(dir, base = dir) {
-  let removed = 0
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name)
-    const relative = full.slice(base.length).replaceAll('\\', '/')
-    // A directory is matched with a trailing slash so a file-shaped pattern (`.md`)
-    // cannot take a whole tree with it, and a directory-shaped one (`test/`) cannot
-    // match an unrelated file.
-    const subject = entry.isDirectory() ? `${relative}/` : relative
-    if (STRIPPED.some(pattern => pattern.test(subject))) {
-      removed += entry.isDirectory() ? measure(full).bytes : (statSync(full).size ?? 0)
-      rmSync(full, { recursive: true, force: true })
-      continue
-    }
-    if (entry.isDirectory()) removed += strip(full, base)
-  }
-  return removed
+/**
+ * Delete everything `STRIPPED` matches, honouring the keep list and the platform rules.
+ *
+ * This used to be a second implementation of `stripResidue`, and the two drifted the moment
+ * one gained a rule: the fork build would strip `.ts` sources while this one would not, and
+ * the two archives a node can install would differ at the same version. It now calls the
+ * shared walker, so a rule or a rescue added there applies to both routes.
+ *
+ * `platform` is threaded through because "dead bytes" is not a property of the tree alone:
+ * a win32 ConPTY payload is dead in a linux archive and load-bearing in a win32 one.
+ */
+function strip(dir, platform) {
+  return stripResidue(dir, [...STRIPPED, ...foreignPlatformResidue(platform)], ARTEFACT_RESIDUE_KEEP)
 }
 
 const version = installedVersion()
@@ -238,7 +233,7 @@ function pack() {
   }
 
   const before = measure(staging)
-  const stripped = strip(staging)
+  const stripped = strip(staging, platform)
   const after = measure(staging)
 
   // Restore the executable bit — but only where the packer has POSIX modes to restore.
