@@ -101,7 +101,7 @@ const check = (ok, label, detail) => {
     ['Authorization: Bearer abc.def', 'abc.def'],
     ['token=ghp_1234567890', 'ghp_1234567890'],
     ['api-key: sk-live-999', 'sk-live-999'],
-    ['ssh://root:s3cret@192.168.3.93:22', 's3cret'],
+    ['ssh://root:s3cret@10.0.0.1:22', 's3cret'],
   ]
   for (const [line, secret] of cases) {
     const cleaned = redact(line)
@@ -110,7 +110,7 @@ const check = (ok, label, detail) => {
   }
   const key = '-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----'
   check(!redact(`key is ${key}`).includes('AAAA'), 'a private key block is replaced whole')
-  check(redact('connecting to 192.168.3.93') === 'connecting to 192.168.3.93',
+  check(redact('connecting to 10.0.0.1') === 'connecting to 10.0.0.1',
     'an ordinary line is untouched')
 }
 

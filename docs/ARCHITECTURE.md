@@ -625,7 +625,7 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 而不是在一句复合错误里猜是哪条路出的问题。两条都不通时才报错，且**同时点名两条**缺什么
 （"neither curl nor wget" + "no npm on PATH"）—— "装 curl" 和 "装 npm" 是两个不同的动作。
 
-实测代价对比（参考节点 192.168.3.93，glibc 2.35，Node v22.20.0，registry 指向 `npmmirror`）：
+实测代价对比（参考节点，Linux x86_64 / glibc 2.35 / Node v22.20.0，registry 指向 `npmmirror`）：
 
 | 路线 | 耗时 | 树大小 | 额外依赖 |
 |---|---|---|---|

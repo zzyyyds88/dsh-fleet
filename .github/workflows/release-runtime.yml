@@ -8,7 +8,7 @@ name: Release node runtime
 # it buys is the fast path — one download against a mirror instead of a full resolve against
 # a registry — for every node, without the maintainer's machine being on the critical path.
 #
-# Measured on the reference node (192.168.3.93, glibc 2.35, Node v22.20.0): the npm route
+# Measured on the reference node (Linux x86_64, glibc 2.35, Node v22.20.0): the npm route
 # takes 26-33 s for 673 packages and needs a registry; the artefact route is one 165 MiB
 # download a mirror serves at 4.97 MiB/s, so ~34 s, with no registry at all.
 #

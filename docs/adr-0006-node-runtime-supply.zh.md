@@ -98,7 +98,7 @@ npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/
 
 ## 五、代价（实测）
 
-参考节点 `192.168.3.93`：Linux x86_64 / glibc 2.35 / Node v22.20.0 / npm 10.9.3 /
+参考节点（Linux x86_64）：glibc 2.35 / Node v22.20.0 / npm 10.9.3 /
 registry 指向 `npmmirror`（metadata 0.148 s）。
 
 | 路线 | 耗时 | 树大小 | 额外依赖 | 备注 |
