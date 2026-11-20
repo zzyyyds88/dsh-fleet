@@ -247,14 +247,27 @@ const PLATFORM_ALIASES = Object.freeze({
  * are lowercase, and `uname -m` says `x86_64` where `process.arch` says `x64`. Both
  * translations happen here so the rest of the plugin only ever sees one spelling.
  *
- * @param {{ os?: string, arch?: string }} facts - the probe result.
- * @returns {string | undefined} e.g. `linux-x64`, or `undefined` when unrecognisable.
+ * **Linux splits by C library, so the tag does too.** `koffi` and `sharp` publish both a
+ * glibc and a musl build of the same package, and the loader picks by the platform it runs
+ * on: handing an Alpine node the glibc tree installs a library that cannot be loaded, and the
+ * failure lands on the first tool that needs it rather than on the install. The packer already
+ * accepts `linux-x64-musl`, so the tag a musl node asks for is the tag that exists.
+ *
+ * This used to be the npm route's job (`--libc=musl`), which is why it was not here: with a
+ * registry resolve the node got correct natives for free. There is no registry resolve any
+ * more, so the artefact name has to carry it.
+ *
+ * @param {{ os?: string, arch?: string, libc?: string }} facts - the probe result.
+ * @returns {string | undefined} e.g. `linux-x64`, `linux-x64-musl`, or `undefined` when
+ *   unrecognisable.
  */
 export function platformTag(facts) {
   const os = PLATFORM_ALIASES[String(facts?.os ?? '').toLowerCase()]
   const arch = PLATFORM_ALIASES[String(facts?.arch ?? '').toLowerCase()]
   if (os === undefined || arch === undefined) return undefined
-  return `${os}-${arch}`
+  // Only Linux has two C libraries in the ecosystem; `darwin-arm64-musl` would be nonsense.
+  const musl = os === 'linux' && String(facts?.libc ?? '').toLowerCase().includes('musl')
+  return `${os}-${arch}${musl ? '-musl' : ''}`
 }
 
 /**

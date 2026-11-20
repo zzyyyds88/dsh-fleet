@@ -649,6 +649,14 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 `--os/--cpu/--libc` **为目标平台解析**，按 `--platform` 的目标值给（`linux-x64`、
 `win32-x64`、`linux-x64-musl` 等）。
 
+**Linux 还要按 C 库分，而且这件事现在由节点的 `uname` 决定。** `koffi` 与 `sharp` 同一个包名
+下同时发布 glibc 与 musl 两套二进制，加载器按它运行的那个 libc 挑 —— 把 glibc 树给 Alpine 节点，
+失败落在第一个用到它的工具上，而不是安装时。所以 `platformTag()` 对 Linux 的 musl 机器返回
+`linux-x64-musl`（探测两路：`ldd --version` 与 `/lib/ld-musl-*`，任一命中即 musl）。
+这条以前是 npm 路线的 `--libc=musl` 顺手保证的，路线删掉之后必须由制品名承担 ——
+否则 musl 节点会去下一个从没人构建过的 `linux-x64`，装起来「成功」，用起来崩。
+**只发 `linux-x64` 与 `win32-x64` 时，Alpine 节点会明确报「没有这个平台的制品」**，那是正确行为。
+
 **装完要留痕，否则每次连接都重装。** 安装写 `BUILD_STAMP`（`.fleet-artefact.json`），
 内容是 `stampJson()` 的 `{"build":N,"via":"artefact"}`。`via` 只上报、不参与判定，
 `build` 参与判定：`inspectRuntime` 要求它等于 `RUNTIME_BUILD`。没有这一枚戳，`inspectRuntime`

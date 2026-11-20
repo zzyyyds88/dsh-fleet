@@ -119,6 +119,18 @@ const check = (ok, label, detail) => {
   check(platformTag({ os: 'Linux', arch: 'aarch64' }) === 'linux-arm64',
     'aarch64 maps to arm64')
   check(platformTag({ os: 'Darwin', arch: 'arm64' }) === 'darwin-arm64', 'Darwin maps to darwin')
+  // Linux splits its prebuilds by C library, and the artefact name has to carry that split:
+  // `koffi` and `sharp` publish both a glibc and a musl build of the same package, and
+  // handing an Alpine node the glibc tree installs a library that cannot be loaded. The
+  // packer already accepts `linux-x64-musl`; before this, the tag never asked for it.
+  check(platformTag({ os: 'Linux', arch: 'x86_64', libc: 'musl' }) === 'linux-x64-musl',
+    'a musl node asks for the musl archive', platformTag({ os: 'Linux', arch: 'x86_64', libc: 'musl' }))
+  check(platformTag({ os: 'Linux', arch: 'aarch64', libc: 'glibc' }) === 'linux-arm64',
+    'a glibc node asks for the plain tag, which is what the packer defaults to')
+  check(platformTag({ os: 'Linux', arch: 'x86_64' }) === 'linux-x64',
+    'and an unknown libc is treated as glibc, the one the nodes in service run')
+  check(platformTag({ os: 'Darwin', arch: 'arm64', libc: 'musl' }) === 'darwin-arm64',
+    'a Mac is never given a Linux libc suffix')
   check(platformTag({ os: 'Linux', arch: 'mips' }) === undefined,
     'an unknown architecture has no tag rather than a wrong one')
   check(platformTag({}) === undefined, 'a missing probe result has no tag')

@@ -208,11 +208,15 @@ export function parseProbeOutput(stdout) {
 /**
  * Whether this machine's C library is musl.
  *
- * npm's `--libc` is what decides between `@koromix/koffi-linux-x64`'s `linux_x64` and
- * `musl_x64` binaries and between sharp's two builds, and guessing wrong installs a
- * library that cannot be loaded. Two probes because neither alone is reliable: `ldd`
- * prints "musl libc" on Alpine but is absent on some minimal images, while the loader
- * `ls /lib/ld-musl-*` is musl-specific and survives a missing `ldd`.
+ * This decides **which archive the node asks for** (`linux-x64` vs `linux-x64-musl`), and
+ * that is now the only thing it decides: `@koromix/koffi-linux-x64` ships a `linux_x64` and a
+ * `musl_x64` binary, `sharp` ships both builds, and the loader picks by the platform it runs
+ * on — so an Alpine node handed the glibc tree fails on the first tool that needs it, not on
+ * the install. It used to feed npm's `--libc` on the node-side resolve; that route is gone.
+ *
+ * Two probes because neither alone is reliable: `ldd` prints "musl libc" on Alpine but is
+ * absent on some minimal images, while the loader `ls /lib/ld-musl-*` is musl-specific and
+ * survives a missing `ldd`.
  * @param {{ libc?: string, musl?: string }} facts
  * @returns {'musl' | 'glibc' | undefined}
  */
