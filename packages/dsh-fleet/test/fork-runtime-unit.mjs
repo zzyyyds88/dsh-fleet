@@ -31,6 +31,7 @@ import {
   dropPackages,
   stripResidue,
 } from '../scripts/trim-fork-runtime.mjs'
+import { PUBLISHED_PLATFORMS, isPublishedPlatform } from '../src/remote/artefact.js'
 
 const log = message => process.stdout.write(`[fork-runtime-unit] ${message}\n`)
 const failures = []
@@ -145,6 +146,26 @@ function packageIn(root, name) {
     'the release body is built from every archive in --out, not from the one being uploaded')
   check(/release', 'edit'/u.test(publish), 'and a re-publish rewrites an existing release body')
   check(/method: 'PATCH'/u.test(publish), 'on CNB too, which keeps its own copy of the body')
+}
+
+// ---- only platforms a node can actually ask for get published ----------------
+{
+  // `win32-x64` used to be published. It packs and boots, but no node can name it: the probe
+  // reads `uname -s` (Windows answers `MINGW64_NT-…` or nothing), the node side is 21 `sh -c`
+  // calls plus `setsid`, and the only transport is SSH. Publishing it left 85 MiB nothing
+  // fetched and a release-body line implying Windows nodes work.
+  check(PUBLISHED_PLATFORMS.includes('linux-x64'), 'linux-x64 is a published platform')
+  check(!PUBLISHED_PLATFORMS.includes('win32-x64'),
+    'win32-x64 is not published: no probe can name it and the node side is POSIX-only')
+  check(!isPublishedPlatform('linux-arm64') && !isPublishedPlatform('darwin-arm64'),
+    'the other taggable platforms are not published either — they were never built or verified')
+  check(isPublishedPlatform('linux-x64'), 'and the one that is, says so')
+  // The gate has to live in the uploader both entry points share, or CI could still upload it.
+  const publish = readFileSync(new URL('../scripts/publish-runtime.mjs', import.meta.url), 'utf8')
+  check(/isPublishedPlatform\(platform\)/u.test(publish),
+    'publish-runtime refuses a platform outside PUBLISHED_PLATFORMS')
+  check(/PUBLISHED_PLATFORMS/u.test(publish),
+    'and names the allowed set in the refusal, so the reader is not left guessing')
 }
 
 if (failures.length > 0) {

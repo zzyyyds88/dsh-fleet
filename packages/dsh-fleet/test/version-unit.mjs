@@ -134,6 +134,14 @@ const check = (ok, label, detail) => {
   check(platformTag({ os: 'Linux', arch: 'mips' }) === undefined,
     'an unknown architecture has no tag rather than a wrong one')
   check(platformTag({}) === undefined, 'a missing probe result has no tag')
+  // Windows is not a tag, which is why the win32-x64 archive was pulled: the probe reads
+  // `uname -s`, and Windows answers `MINGW64_NT-10.0-19045` (Git Bash) or has no `uname` at
+  // all. Both shapes have to stay untaggable — a tag here would send a Windows machine
+  // looking for a tree the node side (21 `sh -c` calls, `setsid`, SSH only) cannot run.
+  check(platformTag({ os: 'MINGW64_NT-10.0-19045', arch: 'x86_64' }) === undefined,
+    'a Git Bash node has no tag, so no Windows archive is ever requested')
+  check(platformTag({ os: 'Windows_NT', arch: 'AMD64' }) === undefined,
+    'and neither does a bare Windows_NT probe answer')
   check(artefactName('0.2.2', 'linux-x64') === 'dsh-0.2.2-linux-x64.tar.gz',
     'the file name carries version and platform', artefactName('0.2.2', 'linux-x64'))
 

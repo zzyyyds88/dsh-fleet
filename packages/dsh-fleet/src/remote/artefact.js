@@ -280,6 +280,41 @@ export function artefactName(version, platform) {
 }
 
 /**
+ * The platforms an artefact is actually published for.
+ *
+ * Not the same set as `platformTag()` can produce, and the difference is the point: a tag is
+ * "the node can name its platform", a published platform is "there is a byte sequence to
+ * fetch and a machine to have verified it". `linux-arm64` and `darwin-arm64` tag correctly and
+ * have no archive — a node there gets an honest `ARTEFACT_UNAVAILABLE`, which is right.
+ *
+ * **`win32-x64` is deliberately absent, and it is the one that used to be published.** The
+ * archive exists and boots (measured: unpacked, `dsh web: <url>`, cookie, `POST
+ * /api/session/list` 200), but no node can ever ask for it:
+ *
+ * - `platformTag()` has no Windows spelling, because the probe reads `uname -s`, which on
+ *   Windows says `MINGW64_NT-…` or nothing at all;
+ * - the node side is POSIX throughout — 21 `sh -c` invocations (probe, install, start, stop,
+ *   profile writes, status reads), `setsid nohup` to detach the host, `/lib/ld-musl-*` for the
+ *   libc probe;
+ * - the only transport is SSH (`registry.js` types `transport` as `'ssh'`).
+ *
+ * So a Windows tree was 85 MiB of release asset that nothing could fetch, and a release body
+ * line implying Windows nodes work. Building one locally is still allowed — `--platform
+ * win32-x64` without `--publish` — because it is how the tree gets smoke-tested. Publishing it
+ * is refused, here, in the one uploader both entry points share.
+ */
+export const PUBLISHED_PLATFORMS = Object.freeze(['linux-x64'])
+
+/**
+ * Whether an artefact for this platform is published at all.
+ * @param {string} platform - a `platformTag()` result.
+ * @returns {boolean}
+ */
+export function isPublishedPlatform(platform) {
+  return PUBLISHED_PLATFORMS.includes(platform)
+}
+
+/**
  * Absolute URLs of one artefact, best candidate first.
  *
  * A source is one of two things, because a download host is one of two things:

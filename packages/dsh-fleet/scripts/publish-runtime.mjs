@@ -41,6 +41,7 @@ import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ARTEFACT_RESIDUE } from './trim-fork-runtime.mjs'
+import { PUBLISHED_PLATFORMS, isPublishedPlatform } from '../src/remote/artefact.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pluginRoot = resolve(here, '..')
@@ -59,6 +60,20 @@ const cnbOnly = flag('cnb-only')
 const tag = value('tag', undefined)
 const registry = value('registry', 'https://registry.npmmirror.com')
 const cnbRepository = value('cnb-repo', 'serendipity-archive/dsh-fleet')
+
+// Publishing a platform no node can ask for leaves an asset that nothing fetches and a release
+// body line that reads like the platform works. `win32-x64` was exactly that: the tree packs and
+// boots, but the probe reads `uname`, the node side is 21 `sh -c` calls plus `setsid`, and the
+// only transport is SSH — so no Windows node can ever name it. Building it locally (no
+// `--publish`, no `--cnb`) stays allowed: that is how the tree gets smoke-tested.
+// The list lives in `src/remote/artefact.js` beside `platformTag()`, which is where the
+// "can this machine be a node at all" question is already answered.
+if ((shouldPublish || shouldPublishCnb) && !isPublishedPlatform(platform)) {
+  throw new Error(
+    `${platform} is not a published platform (${PUBLISHED_PLATFORMS.join(', ')}). `
+    + 'Refusing to upload an archive no node can ask for; drop --publish/--cnb to build it locally.',
+  )
+}
 
 /**
  * `linux-x64` → npm's `--os linux --cpu x64`, plus libc for the Linux split.
@@ -320,6 +335,11 @@ function releaseNotes() {
     '| platform | archive | sha256 |',
     '|---|---|---|',
     ...rows,
+    '',
+    `Only ${PUBLISHED_PLATFORMS.join(', ')} is published: that is the one platform a node can`,
+    'name from its own probe and this project has run end to end. A node on any other platform',
+    'reports `ARTEFACT_UNAVAILABLE` with the URLs it tried, rather than taking a tree built for',
+    'something else.',
     '',
     'Archives are downloaded from CNB; the GitHub release holds the same bytes as a backup.',
   ].join('\n')
