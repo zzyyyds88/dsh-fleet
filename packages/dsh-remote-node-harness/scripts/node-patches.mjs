@@ -1,0 +1,184 @@
+/**
+ * Apply, verify and inspect this project's node-side source patches.
+ *
+ * A node runs a tree compiled from the upstream source. Trimming that tree by deleting files
+ * is a packaging step (see `trim-fork-runtime.mjs`); changing what the source *does* is a
+ * different act, and it needs a different mechanism, because the next upstream tag will
+ * rewrite every line we touched.
+ *
+ * So every source-level change lives in `patches/node/NNNN-*.patch` as a plain unified diff,
+ * applied to the fork's working tree before it is built:
+ *
+ * ```
+ * git -C <fork> apply --3way patches/node/0001-....patch
+ * ```
+ *
+ * Three properties come out of that, and each one is asserted by `test/node-patches-unit.mjs`:
+ *
+ * 1. **Replay is not silent.** `--3way` either applies or fails; it never half-applies. A
+ *    failed apply stops the build and names the patch, so an upstream refactor cannot quietly
+ *    drop a node optimisation.
+ * 2. **Upstream's own fixes always arrive.** Patches stack on top of whatever tag is checked
+ *    out. A bug upstream fixes is in the tree beneath our diff, without us re-importing it.
+ * 3. **Every change is documented.** `docs/node-patches.zh.md` carries one row per patch: what
+ *    it removes, why a node does not need it, and how it was verified. A patch with no row is
+ *    a change nobody can review or retire.
+ *
+ * @module @greatbaby/dsh-remote-node-harness/scripts/node-patches
+ */
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
+
+/** Where the patches live, relative to the package root. */
+export const PATCH_DIR = 'patches/node'
+
+/** The ledger that documents them. */
+export const LEDGER = 'docs/node-patches.zh.md'
+
+/** A patch file name: a four-digit ordinal, a slug, `.patch`. */
+const PATCH_NAME = /^(\d{4})-([a-z0-9]+(?:-[a-z0-9]+)*)\.patch$/u
+
+/**
+ * Every patch, in application order.
+ * @param {string} packageRoot - the plugin package root.
+ * @returns {ReadonlyArray<{ name: string, ordinal: number, slug: string, path: string }>}
+ */
+export function listPatches(packageRoot) {
+  const dir = join(packageRoot, PATCH_DIR)
+  if (!existsSync(dir)) return []
+  const patches = []
+  for (const name of readdirSync(dir).sort()) {
+    if (!name.endsWith('.patch')) continue
+    const match = PATCH_NAME.exec(name)
+    if (match === null) {
+      throw new Error(`${PATCH_DIR}/${name} is not NNNN-slug.patch; the ordinal is the apply order`)
+    }
+    patches.push({ name, ordinal: Number(match[1]), slug: match[2], path: join(dir, name) })
+  }
+  // Two patches with the same ordinal would apply in filesystem order, which is not an order.
+  const seen = new Set()
+  for (const patch of patches) {
+    if (seen.has(patch.ordinal)) {
+      throw new Error(`two patches share ordinal ${String(patch.ordinal)}; one of them must be renumbered`)
+    }
+    seen.add(patch.ordinal)
+  }
+  return patches
+}
+
+/**
+ * Read the ledger's rows.
+ *
+ * The table is the contract, so it is parsed rather than trusted: one row per patch, six
+ * fields, and a row that is missing a field fails the same way a missing row does.
+ * @param {string} packageRoot - the plugin package root.
+ * @returns {Map<string, Record<string, string>>} patch name → field → value.
+ */
+export function readLedger(packageRoot) {
+  const file = join(packageRoot, LEDGER)
+  if (!existsSync(file)) throw new Error(`${LEDGER} is missing; a patch with no ledger row is unreviewable`)
+  const text = readFileSync(file, 'utf8')
+  const rows = new Map()
+  // Rows look like: | `0001-drop-x.patch` | what | removes | why | verified | if upstream |
+  for (const line of text.split('\n')) {
+    const cells = line.split('|').map(cell => cell.trim())
+    if (cells.length < 8) continue
+    const name = /^`(\d{4}-[a-z0-9-]+\.patch)`$/u.exec(cells[1] ?? '')
+    if (name === null) continue
+    rows.set(name[1], {
+      change: cells[2] ?? '',
+      removes: cells[3] ?? '',
+      why: cells[4] ?? '',
+      verified: cells[5] ?? '',
+      upstream: cells[6] ?? '',
+    })
+  }
+  return rows
+}
+
+/**
+ * Check that the patches on disk and the ledger's rows are the same set, with no empty field.
+ *
+ * This is the rule that keeps the ledger from rotting: it is trivial to add a patch and forget
+ * the row, and impossible to notice six months later.
+ * @param {string} packageRoot - the plugin package root.
+ * @returns {{ patches: number, problems: string[] }}
+ */
+export function checkPatches(packageRoot) {
+  const patches = listPatches(packageRoot)
+  const rows = readLedger(packageRoot)
+  const problems = []
+  for (const patch of patches) {
+    const row = rows.get(patch.name)
+    if (row === undefined) {
+      problems.push(`${patch.name} has no row in ${LEDGER}`)
+      continue
+    }
+    for (const [field, value] of Object.entries(row)) {
+      if (value === '' || value === '-' || value === '—') {
+        problems.push(`${patch.name}: the "${field}" field is empty`)
+      }
+    }
+  }
+  for (const name of rows.keys()) {
+    if (!patches.some(patch => patch.name === name)) {
+      problems.push(`${LEDGER} documents ${name}, which does not exist in ${PATCH_DIR}`)
+    }
+  }
+  return { patches: patches.length, problems }
+}
+
+/**
+ * Apply every patch to a checkout, skipping the ones already applied.
+ *
+ * `--3way` is deliberate: it uses the blob hashes in the diff to relocate a hunk that upstream
+ * moved, and it refuses rather than guessing when the context genuinely changed. `--reject`
+ * is not used anywhere — it would leave `.rej` files in a tree that then gets built and
+ * shipped, which is the exact silent-drift failure this mechanism exists to prevent.
+ *
+ * "Already applied" has to be detected rather than assumed, because the fork is a long-lived
+ * working tree: patch the source, build, iterate on the trim rules, build again. On the second
+ * run the forward apply fails simply because the change is present, and that must not be
+ * reported as drift. The test is a reverse `--check`: if the patch can be *un*-applied cleanly,
+ * it is in.
+ * @param {string} packageRoot - the plugin package root.
+ * @param {string} checkout - the fork's working tree.
+ * @returns {ReadonlyArray<{ name: string, state: 'applied' | 'already' | 'would-apply' }>}
+ */
+export function applyPatches(packageRoot, checkout, options = {}) {
+  const results = []
+  const run = args => spawnSync('git', ['-C', checkout, 'apply', '--3way', ...args], { encoding: 'utf8' })
+  for (const patch of listPatches(packageRoot)) {
+    const check = run(['--check', patch.path])
+    if (check.status === 0) {
+      if (options.dryRun === true) {
+        results.push({ name: patch.name, state: 'would-apply' })
+        continue
+      }
+      const applied = run([patch.path])
+      if (applied.status !== 0) throw driftError(patch, checkout, applied)
+      results.push({ name: patch.name, state: 'applied' })
+      continue
+    }
+    // The forward check failed. Either the change is already in the tree, or upstream moved
+    // the code underneath it — and those two must not be confused.
+    const reverse = run(['--check', '--reverse', patch.path])
+    if (reverse.status === 0) {
+      results.push({ name: patch.name, state: 'already' })
+      continue
+    }
+    throw driftError(patch, checkout, check)
+  }
+  return results
+}
+
+/** The failure both the patch tool and a human need to see verbatim. */
+function driftError(patch, checkout, result) {
+  const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim()
+  return new Error(
+    `patch ${patch.name} did not apply to ${checkout}:\n${output}\n`
+    + 'This is the drift alarm: an upstream change touched the same code. Resolve it by\n'
+    + 'regenerating the patch against the new tag — do not drop it and do not use --reject.',
+  )
+}
