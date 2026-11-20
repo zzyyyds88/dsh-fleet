@@ -271,14 +271,32 @@ function measure(entry) {
  *
  * The archive's layout is the runtime directory itself — `node_modules/…` at the
  * top — because that is what `installScript` on the node unpacks into place.
- * Executable bits are restored before packing: `tar` on Windows writes
- * `-rw-rw-rw-` for every entry, and `installScript` repairs only the two
- * `spawn-helper` files it knows about.
+ *
+ * **The staging manifests do not ship.** `package.json` here is the staging recipe, not the
+ * runtime: it names 384 tarballs by absolute path on the packing machine
+ * (`file:D:/ProjectHub/dsh-fork/…`), and `package-lock.json` pins those same paths. Shipping
+ * them would publish the packer's filesystem layout into a public archive, and would leave a
+ * manifest on the node that a later `npm install` there could act on. `publish-runtime.mjs`
+ * removes the same three files for the same reason.
+ *
+ * Measured: the first build-4 archives did carry them (87.7 / 85.3 MiB, 41 849 / 41 842
+ * files); without them 87.6 / 85.2 MiB and 41 846 / 41 839 files. That is a change to what an
+ * archive contains, which normally means a `RUNTIME_BUILD` bump — it did not get one here
+ * because **no node can have read build 4**: the plugin version carrying `RUNTIME_BUILD = 4`
+ * has never been published, so the only two archives stamped 4 are the ones this repository
+ * built minutes apart, and the second one is the one at the release. If a build-4 tree ever
+ * does reach a node, bump before touching this again.
+ *
+ * Executable bits are restored before packing: `tar` on Windows writes `-rw-rw-rw-` for every
+ * entry, and `installScript` repairs only the two `spawn-helper` files it knows about.
  */
 function archive(staging, version) {
   const name = `dsh-${version}-${platform}.tar.gz`
   const target = join(outDir, name)
   mkdirSync(outDir, { recursive: true })
+  for (const scratch of ['package.json', 'package-lock.json', 'node_modules/.package-lock.json']) {
+    rmSync(join(staging, scratch), { force: true })
+  }
   let modes = 0
   const restore = dir => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {

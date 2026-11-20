@@ -132,6 +132,12 @@ function packageIn(root, name) {
   // `DEFAULT_SOURCES`, or the node would need a second, undocumented route.
   check(!/DEFAULT_SOURCES|cnb\.cool/u.test(build),
     'and does not invent a second download source')
+  // The staging manifests name 384 tarballs by absolute path on the packing machine, so
+  // shipping them would publish the packer's filesystem layout — and leave a manifest on the
+  // node that a later `npm install` there could act on. Measured on the first build-4 archives:
+  // they carried `package.json`, `package-lock.json` and `node_modules/.package-lock.json`.
+  check(/package-lock\.json/u.test(build) && /rmSync\(join\(staging, scratch\)/u.test(build),
+    'the fork build removes its staging manifests before packing')
 }
 
 if (failures.length > 0) {
