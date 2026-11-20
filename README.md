@@ -144,6 +144,8 @@ dsh plugin --profile desktop add -w <仓库绝对路径>/packages/dsh-remote-nod
 
 **没有 npm 这条路。** 包名 `@greatbaby/dsh-remote-node-harness` 只是清单里的标识，registry 上没有它，也不要发上去 —— 安装只有上面两条：CNB 的 tarball，或本地目录。
 
+旧包 `@greatbaby/dsh-fleet`（0.5.0 / 0.5.1）仍然留在 registry 上，但三个版本都已标弃用，`npm install` 会打出弃用提示指向这里。别装它：里面是 build 2/3 的旧代码，还带已经删掉的 npm 兜底路线。
+
 手机端装不了插件：中转插件的 `HARNESS_REMOTE_ALLOWLIST` 里有 `pluginManager/updateBundle`，没有 install。它负责的是装好之后连节点。
 
 装完要重启一次 DSH，新装 bundle 的客户端半边才会被加载。`engines.dsh` 是 `>=0.2.2-rc.3 <0.3.0`，版本不匹配时安装被拒绝，而不是只组合一半。

@@ -349,6 +349,13 @@ node test/routing-unit.mjs && node test/routing-extra-unit.mjs && node test/mult
 兜底），与仓库里的树不是一个东西。同号不能重发，旧名又已经作废，所以 npm 这条路整体放弃，
 安装只有 CNB 的 tarball 与本地目录两条（见根 `README.md` §安装）。
 
+**旧包已经标弃用，但删不掉。** `npm deprecate '@greatbaby/dsh-fleet@*' …` 成功（三个版本都带
+上了指向新仓库的文案，`npm install` 会打出来）；`npm unpublish --force` 被拒：
+`403 Granular access tokens that bypass two-factor authentication may not perform this action`。
+本机那枚 token 是绕过 2FA 的 granular token，npm 已不许它执行删除。要真删只能在 npm 网页上
+用带 2FA 的会话操作。**别为了"删干净"去 `npm adduser` 重新登录** —— 那会换掉现有凭据，
+而删包本身对节点与用户都没有影响。
+
 ```bash
 # 1. 版本与日志：改运行时行为 → minor，只改文档/元数据 → patch
 #    （同时改 package.json 的 version 与 CHANGELOG.md）
