@@ -8,7 +8,9 @@
 
 这是我原本在 ZCode 上的用法，想原样搬到 DSH：手机上通过 `ds-harness-remote` 连到桌面端，桌面端远程连接开发机，人在外面也能写代码。DSH 官方没有这条路，所以有了这个仓库。
 
-<img src="packages/dsh-fleet/docs/preview.svg" alt="侧栏里本地工作区与两台远程节点的工作区并列，右侧是节点设置页与插件开关" width="640">
+![侧栏里本地工作区与远程节点的工作区并列，右边是节点上真实跑出来的会话记录](docs/screenshots/sidebar.jpg)
+
+这台 Windows 上开着 DSH，左边 `Start Menu`、`DSHpl` 是本机工作区，`验收项目`、`fleet-second`、`SCIdream` 这些是节点上的。右边那个会话跑在节点上：`git log`、`read_image`、`grep` 都是节点自己的工具在 `/root/accept-project-1/git-image` 里执行的，路径是 Linux 路径，输出是那台机器的真实输出。
 
 ## 远程的工作区，本地的用法
 
@@ -151,6 +153,8 @@ dsh plugin --profile desktop add -w <仓库绝对路径>/packages/dsh-fleet   # 
 
 **设置 → Remote nodes → 添加**：host、端口、用户、密码或私钥，点连接。首次连接会自动在节点上装同版本 DSH、装大脑组合、下发模型与密钥、启动，然后验证 `session/list` 真的能答。只有它成功才报 connected。
 
+![远程节点设置页：本机是 conductor，下面是已连接的节点与其工作区数量](docs/screenshots/nodes.jpg)
+
 节点要求 Node ≥ 22，以及 `curl`（或 `wget`）与 `npm` 至少有一个，其余都由插件准备。
 
 节点的 DSH 有两条来路，按顺序试：
@@ -173,6 +177,8 @@ SSH 断开之后状态不再是绿色的 `connected`：卡片落 `idle` 并记�
 ## 加工作区：先选机器，再选目录
 
 侧栏工作区旁的加号，或者新建会话时的「添加工作区」。对话框第一页是设备：
+
+![选择设备：此设备、节点，以及就地添加远程设备的入口](docs/screenshots/picker.jpg)
 
 - **此设备** → 下一页是这台电脑的盘符
 - **节点** → 下一页是该节点的根目录 `/`
@@ -198,6 +204,8 @@ SSH 断开之后状态不再是绿色的 `connected`：卡片落 `idle` 并记�
 ## 插件同步
 
 节点是另一台机器，只组合你发给它的东西。**设置 → Remote nodes → 插件同步** 列出你在这个桌面端装的第三方插件，一行一个 bundle，带版本和它贡献了什么。
+
+![插件同步：每个第三方 bundle 一行，默认全部下发，关掉就只在本机运行](docs/screenshots/plugin-sync.jpg)
 
 默认全部下发：装在这里、连了节点，就是同一个工作环境。关掉一个，它只在这台机器上运行。
 
