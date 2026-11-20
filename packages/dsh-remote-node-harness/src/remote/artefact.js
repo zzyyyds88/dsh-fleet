@@ -86,7 +86,7 @@ export const RELEASE_BASE = 'releases/download'
  * Public repository on purpose: the node holds **no CNB credential at all**, and an anonymous
  * `GET` of a public asset answers 302 into `asset.cnb.cool` with Range/206 support.
  */
-export const CNB_REPOSITORY = 'serendipity-archive/dsh-remote-node-harness'
+export const CNB_REPOSITORY = 'serendipity-archive/dsh-fleet'
 
 /** The CNB release URL shape, with the placeholders {@link artefactUrls} fills in. */
 export const CNB_TEMPLATE =

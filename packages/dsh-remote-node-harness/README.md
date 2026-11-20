@@ -320,7 +320,7 @@ Nothing on a node needs to change: the node side is the embedded
     # (supported, but none is configured by default: nodes cannot reach GitHub).
     sources:
       - kind: template
-        template: https://cnb.cool/serendipity-archive/dsh-remote-node-harness/-/releases/download/{tag}/{file}
+        template: https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/{tag}/{file}
 ```
 
 `autoConnect: false` keeps every node idle until you press *Connect*.

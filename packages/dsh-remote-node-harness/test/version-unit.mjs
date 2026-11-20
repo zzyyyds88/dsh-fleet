@@ -157,7 +157,7 @@ const check = (ok, label, detail) => {
   const urls = artefactUrls({ version: '0.2.2-rc.3', platform: 'linux-x64' })
   check(urls.length === DEFAULT_SOURCES.length && urls.length === 1,
     'exactly one candidate, because there is exactly one source', String(urls.length))
-  check(urls[0] === 'https://cnb.cool/serendipity-archive/dsh-remote-node-harness/-/releases/download/v0.2.2-rc.3/dsh-0.2.2-rc.3-linux-x64.tar.gz',
+  check(urls[0] === 'https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v0.2.2-rc.3/dsh-0.2.2-rc.3-linux-x64.tar.gz',
     'CNB, filled into its own URL shape rather than prefixed', urls[0])
   check(!urls.some(url => url.startsWith('https://github.com/')),
     'GitHub direct is never a candidate — a slow fallback reads as a hang', urls.at(-1))

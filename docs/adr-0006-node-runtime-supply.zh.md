@@ -202,7 +202,7 @@ pack 不 `fail-fast`：某个平台没成，其余平台的节点照样能走快
 
 ```js
 DEFAULT_SOURCES = [
-  { kind: 'template', template: 'https://cnb.cool/serendipity-archive/dsh-remote-node-harness/-/releases/download/{tag}/{file}' },
+  { kind: 'template', template: 'https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/{tag}/{file}' },
   { kind: 'prefix', prefix: 'https://git.yylx.win/' },   // 以下四项仍拼接 GitHub 官方 URL
   { kind: 'prefix', prefix: 'https://gh.inkchills.cn/' },
   { kind: 'prefix', prefix: 'https://tvv.tw/' },

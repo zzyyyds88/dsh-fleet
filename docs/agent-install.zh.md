@@ -27,7 +27,7 @@ agent 执行：
 ```
 plugin_manager(
   action = 'install_bundle',
-  target = 'https://cnb.cool/serendipity-archive/dsh-remote-node-harness/-/releases/download/v0.5.1/greatbaby-dsh-remote-node-harness-0.5.1.tgz'
+  target = 'https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v0.5.1/greatbaby-dsh-remote-node-harness-0.5.1.tgz'
 )
 ```
 

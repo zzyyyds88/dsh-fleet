@@ -60,7 +60,7 @@ node test/run-all.mjs --layer offline,contract
 ```powershell
 # 1. 打 tarball 并从它装
 npm pack --pack-destination dist
-& $exe $bin plugin --profile <干净profile> add -w .\dist\local-dsh-remote-node-harness-<version>.tgz
+& $exe $bin plugin --profile <干净profile> add -w .\dist\greatbaby-dsh-remote-node-harness-<version>.tgz
 
 # 2. 从本地目录装（link: 形态，开发时用）
 & $exe $bin plugin --profile <干净profile> add -w D:\ProjectHub\DSHpl\packages\dsh-remote-node-harness
@@ -206,7 +206,7 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 [`docs/adr-0007-fork-node-runtime.zh.md`](../../../docs/adr-0007-fork-node-runtime.zh.md)）。
 
 - 归档 `dsh-<version>-<platform>.tar.gz` 只有 CNB 一个源
-  （`https://cnb.cool/serendipity-archive/dsh-remote-node-harness/-/releases/download/<tag>/<file>`）。
+  （`https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/<tag>/<file>`）。
   节点匿名 GET，不需要任何凭据。**GitHub 不作为下载源**：国内节点连不上。
 - 实测 87.6 MiB / 41 846 文件，CNB 约 18 s（旧的上游制品 165 MiB 约 34 s）。
 - 拿不到制品就是**报错**，逐条列出试过的 URL 与节点原文。不会再退到
@@ -344,20 +344,31 @@ node test/routing-unit.mjs && node test/routing-extra-unit.mjs && node test/mult
 包名是 `@greatbaby/dsh-remote-node-harness`，发布形态与理由见
 [ADR-0005](../../../docs/adr-0005-release-and-maintenance.zh.md)。
 
+**不发 npm。** 这一点与 ADR-0005 当时的结论相反，是本项目自己的决定：registry 上有过
+`@greatbaby/dsh-fleet` 的 0.5.0 / 0.5.1 两个版本，而它装的是**旧代码**（build 2/3、还带 npm
+兜底），与仓库里的树不是一个东西。同号不能重发，旧名又已经作废，所以 npm 这条路整体放弃，
+安装只有 CNB 的 tarball 与本地目录两条（见根 `README.md` §安装）。
+
 ```bash
 # 1. 版本与日志：改运行时行为 → minor，只改文档/元数据 → patch
 #    （同时改 package.json 的 version 与 CHANGELOG.md）
 # 2. 最低限度的验证（不需要节点）
-node test/run-all.mjs --layer offline --skip provision,composition
-# 3. 真装一次，两种形态都试（§1b）
-# 4. 发
+node test/run-all.mjs --layer offline
+# 3. 真装一次（§1b）
+# 4. 打包
 cd packages/dsh-remote-node-harness
-npm publish              # publishConfig.access 已经是 public
-npm pack --pack-destination dist   # 同时留一份 tarball 给无法访问 registry 的人
+npm pack --pack-destination ../../dist/plugin
 # 5. 打 tag 与 Release，附上 tarball
 cd ../..
 git tag v<version> && git push origin main --tags
-gh release create v<version> packages/dsh-remote-node-harness/dist/*.tgz --notes "见 CHANGELOG.md"
+gh release create v<version> dist/plugin/*.tgz --notes "见 CHANGELOG.md"
+```
+
+**CNB 上还要单独传一份**，因为节点与手机都从那里取，GitHub 只是发行渠道：
+
+```bash
+CNB_TOKEN=… node packages/dsh-remote-node-harness/scripts/upload-plugin.mjs \
+  --version <version> --file dist/plugin/greatbaby-dsh-remote-node-harness-<version>.tgz
 ```
 
 **节点运行时制品与插件版本不是一回事。** 节点装的是 DSH 本身

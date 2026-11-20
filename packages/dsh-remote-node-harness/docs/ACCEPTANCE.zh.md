@@ -46,7 +46,7 @@ node packages/dsh-remote-node-harness/test/run-all.mjs --host <base> --token <t>
 | 桌面端 | 用 `--profile rnhtest` 启动的 Host，不是你正在用的那个 profile |
 | 节点 | 一台 Linux 机器，Node ≥ 22，SSH 可达，能匿名下载 CNB 上的归档（源与理由见 [ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六之四） |
 | 凭据 | 只从环境变量读：`RNH_TEST_HOST/USER/PASSWORD/KEY_FILE/PORT` |
-| 加速 | 节点侧确认 `curl -fLsS -o /dev/null -w '%{http_code}' https://cnb.cool/serendipity-archive/dsh-remote-node-harness/-/releases/download/v<版本>/dsh-<版本>-<平台>.tar.gz` 返回 200 或 302；CNB 是唯一的下载源（ADR-0007） |
+| 加速 | 节点侧确认 `curl -fLsS -o /dev/null -w '%{http_code}' https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v<版本>/dsh-<版本>-<平台>.tar.gz` 返回 200 或 302；CNB 是唯一的下载源（ADR-0007） |
 
 启动测试 Host（PowerShell，`DSH_HOME` 是你的真实 home，profile 是隔离的）：
 

@@ -63,7 +63,7 @@ const cnbOnly = flag('cnb-only')
 const allowUpstreamPublish = flag('allow-upstream-publish')
 const tag = value('tag', undefined)
 const registry = value('registry', 'https://registry.npmmirror.com')
-const cnbRepository = value('cnb-repo', 'serendipity-archive/dsh-remote-node-harness')
+const cnbRepository = value('cnb-repo', 'serendipity-archive/dsh-fleet')
 
 // Publishing a platform no node can ask for leaves an asset that nothing fetches and a release
 // body line that reads like the platform works. `win32-x64` was exactly that: the tree packs and
@@ -373,7 +373,7 @@ function releaseNotes() {
   return [
     `Node runtime for DSH ${version}, built by this project from its fork of the upstream source.`,
     '',
-    'A node downloads one of these instead of resolving a release: `~/.dsh-remote-node-harness/runtime`',
+    'A node downloads one of these instead of resolving a release: `~/.dsh-rnh/runtime`',
     'becomes exactly the unpacked tree. The `.sha256` beside each archive is what the node',
     'verifies, and what `installScript` refuses to unpack on a mismatch.',
     '',

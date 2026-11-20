@@ -22,7 +22,7 @@
   | 目录 | `packages/dsh-fleet` | `packages/dsh-remote-node-harness` |
   | 大脑包 | `@local/dsh-fleet-brain` | `@local/rnh-brain` |
   | GitHub 仓库 | `zzyyyds88/dsh-fleet` | `zzyyyds88/dsh-remote-node-harness` |
-  | CNB 仓库 | `serendipity-archive/dsh-fleet` | `serendipity-archive/dsh-remote-node-harness` |
+  | CNB 仓库 | `serendipity-archive/dsh-fleet` | **不变** —— CNB 的 Open API 不能改仓库名 |
   | 节点安装根 | `~/.dsh-fleet` | `~/.dsh-rnh` |
   | 节点 profile | `~/.dsh/profiles/fleet` | `~/.dsh/profiles/rnh` |
   | 会话 id 前缀 | `fleet_<node>_<uuid>` | `rnh_<node>_<uuid>` |
@@ -36,6 +36,9 @@
   迁移步骤：`dsh plugin --profile <p> remove @greatbaby/dsh-fleet`，再按
   [README §安装](README.md) 装新包；节点那边不用手工清，旧目录留着不影响（可以删）。
   历史 CHANGELOG 段与 ADR-0005 保留旧名，因为它们记录的是当时的事实。
+
+  **CNB 仓库名没跟着改，这是被迫的。** CNB 的 PATCH /{repo} 只接受四个字段（dto.RepoPatch：description / license / site / 	opics），传 
+ame 返回 200 但什么也不改；在组织下新建同名仓库拿到的是 Private，而节点无凭据、匿名 404。所以 CNB_REPOSITORY 仍是 serendipity-archive/dsh-fleet，下载路径不变 —— 这对节点是好事，改名不需要重发制品。
 - **节点运行时改由本项目从 fork 编译，npm 兜底路线删除。** 节点跑的不再是上游 npm 发布版，
   而是本仓库对上游源码 fork 后编译、裁剪出来的树：删掉浏览器面（62 个 `dsh-client-ui-*`）、
   Office 引擎（339.5 MiB）、实验性 bundle 与 CUA，解包 **2014.6 MiB → 408.6 MiB**，归档

@@ -132,22 +132,23 @@ node packages/dsh-remote-node-harness/test/run-all.mjs --layer offline,contract 
 
 ```
 plugin_manager(action='install_bundle',
-  target='https://cnb.cool/serendipity-archive/dsh-remote-node-harness/-/releases/download/v<版本>/greatbaby-dsh-remote-node-harness-<版本>.tgz')
+  target='https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v<版本>/greatbaby-dsh-remote-node-harness-<版本>.tgz')
 ```
 
 也可以自己敲：
 
 ```bash
 dsh plugin --profile desktop add -w <上面那条 URL>    # 推荐
-dsh plugin --profile desktop add -w @greatbaby/dsh-remote-node-harness
 dsh plugin --profile desktop add -w <仓库绝对路径>/packages/dsh-remote-node-harness   # 开发用
 ```
+
+**没有 npm 这条路。** 包名 `@greatbaby/dsh-remote-node-harness` 只是清单里的标识，registry 上没有它，也不要发上去 —— 安装只有上面两条：CNB 的 tarball，或本地目录。
 
 手机端装不了插件：中转插件的 `HARNESS_REMOTE_ALLOWLIST` 里有 `pluginManager/updateBundle`，没有 install。它负责的是装好之后连节点。
 
 装完要重启一次 DSH，新装 bundle 的客户端半边才会被加载。`engines.dsh` 是 `>=0.2.2-rc.3 <0.3.0`，版本不匹配时安装被拒绝，而不是只组合一半。
 
-从 0.5.0 之前的版本升级要换包名：`@local/dsh-remote-node-harness` → `@greatbaby/dsh-remote-node-harness`。先 remove 旧的，再装新的，最后把 profile 的 `bundles` 里旧名换掉。节点侧不用做任何事。
+从 0.5.x 或更早升级要换的不只是包名 —— 0.6.0 把 `dsh-fleet` 整个改名为 `dsh-remote-node-harness`，`~/.dsh-fleet` → `~/.dsh-rnh`、`/@fleet` → `/@rnh`、`fleet_` 会话前缀 → `rnh_`。完整对照表与迁移步骤见 [CHANGELOG 0.6.0](CHANGELOG.md)。节点不用手工清，旧目录留着不影响。
 
 ## 加节点
 
@@ -286,7 +287,7 @@ node packages/dsh-remote-node-harness/test/run-all.mjs --layer e2e
 ```
 packages/
   dsh-remote-node-harness/        插件：装在桌面端，Host 侧 + 浏览器侧
-  rnh-brain/  节点侧 bundle：只当远程大脑的 DSH 组合
+  rnh-brain/                    节点侧 bundle：只当远程大脑的 DSH 组合
 docs/
   ARCHITECTURE.md   设计与取舍：每个决定否决了什么
 reference/          上游源码（只读，不进版本库）

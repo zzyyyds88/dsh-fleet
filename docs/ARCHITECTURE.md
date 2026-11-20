@@ -274,7 +274,7 @@ D:\ProjectHub\DSHpl\
   docs/ARCHITECTURE.md  本文档：设计与取舍
   packages/
     dsh-remote-node-harness/          插件：Host 侧 + 浏览器侧
-    rnh-brain/    节点侧 bundle：只当大脑的 DSH 组合（生成物 + 生成脚本）
+    rnh-brain/            节点侧 bundle：只当大脑的 DSH 组合（生成物 + 生成脚本）
   reference/            上游源码（DSH / ZCode），独立克隆，不进版本库
 ```
 
