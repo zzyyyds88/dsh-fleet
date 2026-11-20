@@ -26,6 +26,7 @@ import { createHash } from 'node:crypto'
 import { SSH_FAILURE, toSshError } from '../ssh/connection.js'
 import {
   BUILD_STAMP,
+  FETCH_CEILING_SECONDS,
   artefactUrls,
   inspectRuntime,
   installScript,
@@ -402,7 +403,11 @@ export class RemoteHost {
     })
     const attempt = await this.connection.exec({
       argv: ['sh', '-c', script],
-      timeoutMs: 15 * 60_000,
+      // Must outlast the download ceiling, or a slow-but-healthy link gets killed by the SSH
+      // layer while curl is still making progress — and `channel.close()` does not reap the
+      // remote `curl`, measured in the `budget-recovery` probe. The ceiling is 1800 s, so
+      // this leaves a minute for unpack, the `--version` check and the stamp write.
+      timeoutMs: (FETCH_CEILING_SECONDS + 60) * 1000,
       maxBytes: 1024 * 1024,
     })
     if (attempt.code === 0) {

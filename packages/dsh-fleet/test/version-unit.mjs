@@ -214,6 +214,13 @@ const check = (ok, label, detail) => {
   check(script.includes('sha256sum') && script.includes('shasum'),
     'it verifies the checksum on either flavour of coreutils')
   check(script.includes('ARTEFACT_CHECKSUM_MISMATCH'), 'and reports a mismatch by name')
+  // **No sidecar is a failure, not a skip.** It used to be `if fetch …; then` — a missing
+  // `.sha256` silently skipped the comparison and unpacked unverified bytes, which is exactly
+  // the "half-installed runtime that fails at first use" the checksum exists to prevent.
+  check(script.includes('ARTEFACT_CHECKSUM_UNAVAILABLE') && script.includes('exit 6'),
+    'an archive whose .sha256 cannot be fetched is refused, not unpacked unverified')
+  check(!script.includes('if fetch ') || script.includes('ARTEFACT_CHECKSUM_UNAVAILABLE'),
+    'the checksum step is unconditional, not an `if fetch …` that can fall through')
   // The script is a template, so the CLI path is already substituted into it: the
   // assertion has to look for the substituted form.
   check(script.includes('node "/root/.dsh-fleet/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js" --version'),
@@ -573,6 +580,21 @@ const check = (ok, label, detail) => {
   check(String(mismatch.error?.message).includes('installing the resident host failed'),
     'and reports the checksum rather than the source list')
   check(!ranNpm(mismatch.calls), 'so a broken artefact is never retried through a registry')
+
+  // 4b. An archive that arrived without its `.sha256` is also a failure, and it must *not* read
+  //     as "no source served it": the bytes are there, they just cannot be trusted. That
+  //     distinction is the whole reason this exit code exists — `ARTEFACT_CHECKSUM_UNAVAILABLE`
+  //     deliberately does not contain the substring `ARTEFACT_UNAVAILABLE`, so it takes the
+  //     rollback branch instead of the "try the next URL" branch.
+  const noSidecar = await attempt({
+    answers: { 'ARTEFACT_CHECKSUM_UNAVAILABLE': { code: 6, stderr: 'ARTEFACT_CHECKSUM_UNAVAILABLE' } },
+  })
+  check(noSidecar.error !== undefined, 'an archive with no checksum fails the connect')
+  check(noSidecar.calls.some(call => call.includes('.previous')),
+    'and rolls back rather than leaving an unverified tree in place')
+  check(!String(noSidecar.error?.message).includes('no source served'),
+    'it is not reported as a missing artefact, because the bytes did arrive')
+  check(!ranNpm(noSidecar.calls), 'and it never reaches for a registry')
 
   // 5. A machine that cannot download cannot install, and says which tool is missing. This
   //    used to be a machine that upgraded itself through npm; it is now a machine that has

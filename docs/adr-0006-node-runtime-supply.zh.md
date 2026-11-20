@@ -183,6 +183,17 @@ pack 不 `fail-fast`：某个平台没成，其余平台的节点照样能走快
 > `build-fork-runtime.mjs`（见 ADR-0007 与 UPGRADE 第五节）。两者共用同一个上传脚本
 > `publish-runtime.mjs`，所以归档形状、校验和、CNB 的四个坑都只有一份实现。
 
+> **这个矩阵里的四个平台，只有 `linux-x64` 会作为节点运行时发布。** 工作流本身仍然打四个，
+> 因为它产出的是**上游对比树**，挂在与节点路线分开的 `v<version>-upstream` 标签下。节点路线只发
+> `linux-x64`（`PUBLISHED_PLATFORMS`，见 ADR-0007 §三第 4 条）：`win32-x64` 没有任何节点能向它要，
+> `linux-arm64` 与 `darwin-arm64` 从未构建验收过。别把这里的「四平台」读成「节点支持四个平台」。
+
+> **上传脚本现在会把「自己打的上游树」拦下来。** 在此之前只有 CI 里的一句注释挡着这件事：
+> `publish-runtime.mjs` 不带 `--cnb-only` 时用 `pack()` 现打一棵树，那棵树来自 registry、没有
+> fork、也就没有任何裁剪，传到 `v<version>/dsh-<version>-<platform>.tar.gz` 就是同名同版本换掉
+> 所有节点下载的东西。现在 `assertPublishable()` 在两条上传路径之前抛出，唯一的出口是
+> `--cnb-only`（说明字节是别人构建的）。`test/fork-runtime-unit.mjs` 守着这条。
+
 ## 八、制品发到哪：CNB 主源，GitHub 加速站灾备
 
 原来只有 GitHub Release 一条去路，节点靠**前缀加速站**下载。前缀加速表达不了 CNB 的路径形状

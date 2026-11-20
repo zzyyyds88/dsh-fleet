@@ -124,7 +124,7 @@ CNB 的发布侧有个坑（ADR-0006 八节已记）：`PUT` 返回 200 **不等
 | 两个平台的产物 | `dsh-0.2.2-rc.5-linux-x64.tar.gz` 87.6 MiB / 41 846 文件 / 91 839 618 字节，sha256 `7ba9124f…`；`dsh-0.2.2-rc.5-win32-x64.tar.gz` 85.2 MiB / 41 839 文件，sha256 `809223fb…`。**win32 这份已从两个 release 上撤掉，见下面第 4 条** |
 | 发到了两个地方 | CNB 与 GitHub Release `v0.2.2-rc.5` 各一份；CNB 匿名 `GET` 回 200（`Content-Length: 91839618`），下载 17.6 s，本地重算 sha256 与 sidecar 一致 |
 | 归档里没有 staging 清单 | 顶层只有 `node_modules/`；`./package.json`、`./package-lock.json`、`./node_modules/.package-lock.json` 计数为 0（第一版带了，见下面「没验的」） |
-| 裁剪规则有断言 | `test/fork-runtime-unit.mjs`（25 条） |
+| 裁剪规则有断言 | `test/fork-runtime-unit.mjs`（34 条） |
 | 离线验收全绿 | `run-all.mjs --layer offline`：15 个套件全过 |
 
 **没验的，写在明面上**：

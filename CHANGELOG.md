@@ -37,7 +37,7 @@
   已解包的树（只改裁剪规则时几十秒）；`--publish` 传 GitHub Release，`--cnb` 传 CNB。
   `trim-fork-runtime.mjs` 是裁剪规则的唯一来源（`DROP_RULES` 每条带理由），
   `ARTEFACT_RESIDUE` 也被 `publish-runtime.mjs` import，两份清单不会漂成两个字节。
-  `test/fork-runtime-unit.mjs`（25 条断言）守着留什么、删什么、以及两条载重规则。
+  `test/fork-runtime-unit.mjs`（34 条断言）守着留什么、删什么、以及两条载重规则。
   **受影响**：维护者。
 - **制品改从 CNB 下载，现在它是唯一的源。** `artefactUrls()` 的源是对象数组
   （`{kind:'template', template}` / `{kind:'prefix', prefix}`）。实测参考节点拉
@@ -70,6 +70,14 @@
 
 ### 修复
 
+- **拿不到 `.sha256` 不再等于「不校验就装」。** 原来的校验步骤是 `if fetch …; then`，镜像只要
+  漏发边车文件，整个比较就被跳过，未经验证的字节直接解包 —— 正是校验和存在的理由。现在缺边车
+  以退出码 6（`ARTEFACT_CHECKSUM_UNAVAILABLE`）失败并回滚，与「源没给」（码 3）、「字节坏了」
+  （码 4）分开报。**受影响**：源上少发了 `.sha256` 的部署。
+- **下载超时不再被 SSH 层提前掐断。** `curl --max-time` 是 30 分钟，而 `install` 那次 `exec`
+  只等 15 分钟：慢线路上 curl 还在正常下载，Host 这边先 `KILL` 了 channel，而 `channel.close()`
+  并不会收掉远端的 `curl`（`budget-recovery` 探针实测过）。现在 exec 超时跟随
+  `FETCH_CEILING_SECONDS + 60s`。**受影响**：线路慢或归档大时的首次安装。
 - **制品字节坏了仍然报错，不会被重试。** 校验和不符、解包失败、归档里没有
   `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 4/5）一律回滚到 `runtime.previous` 后抛错：
   重试同一个坏源只会更慢、下载更多，还会把「哪个源坏了」掩盖掉。这条在删掉 npm 兜底之后仍然
@@ -119,6 +127,13 @@
 ### 说明
 
 - `RUNTIME_BUILD` 从 2 升到 3（打包规则与戳格式都变了），节点会在下一次连接时重装一次。
+- **发布侧补了两道闸门，都是「代码里写着、但只有一句注释挡着」的地方。**
+  `publish-runtime.mjs` 不带 `--cnb-only` 时会用 `pack()` 现打一棵上游树（registry 解析、
+  无 fork、无裁剪），而它和节点下载用的是同一个上传路径：同名、同版本、校验和自洽，
+  换掉之后下载侧看不出来。现在 `assertPublishable()` 在两条上传路径前抛出，唯一出口是
+  `--cnb-only`。另一道是 `releaseNotes()` 原来按 `--out` 目录里有什么就写什么，一个撤掉的
+  平台只要本地还留着一份旧归档就会重新出现在发行说明里、还带一个看起来合法的 sha256；
+  现在按 `PUBLISHED_PLATFORMS` 过滤。`test/fork-runtime-unit.mjs` 两条都守着。
 - **节点不升 Node 24，`MINIMUM_NODE_MAJOR` 保持 22。** 上游 `engines.node` 写的是
   `>=24.9.0`，但 305 个依赖包里真正的 Node 24 API（`Promise.try` / `RegExp.escape` /
   `Float16Array` / `node:sqlite`）是 **0 处**，唯一的 `await using` 命中是 acorn 解析器里的

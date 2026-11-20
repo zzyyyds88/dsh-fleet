@@ -25,8 +25,11 @@
  *   node packages/dsh-fleet/scripts/publish-runtime.mjs [--platform linux-x64[(-musl)]] [--out dist] [--publish] [--cnb]
  *
  * `--platform` accepts the tag form the plugin uses (`linux-x64`, `linux-arm64`,
- * `linux-musl-arm64`, `darwin-arm64`). Nothing is published unless `--publish` or `--cnb` is
- * given. CI runs this per platform (`.github/workflows/release-runtime.yml`).
+ * `linux-x64-musl`, `darwin-arm64`). The order is `<os>-<cpu>[-<libc>]` — the libc suffix
+ * comes **last**, so the musl spelling is `linux-arm64-musl`, not `linux-musl-arm64` (the
+ * latter parses as `--cpu=musl --libc=arm64`, which npm rejects). Nothing is published unless
+ * `--publish` or `--cnb` is given. CI runs this per platform
+ * (`.github/workflows/release-runtime.yml`).
  *
  * **Two destinations, and they are not alternatives.** `--cnb` uploads to CNB, which is the
  * **only** source a node downloads from: it serves the archive straight at 4 233 285 B/s on
@@ -57,6 +60,7 @@ const outDir = resolve(pluginRoot, value('out', '../../dist'))
 const shouldPublish = flag('publish')
 const shouldPublishCnb = flag('cnb') || flag('cnb-only')
 const cnbOnly = flag('cnb-only')
+const allowUpstreamPublish = flag('allow-upstream-publish')
 const tag = value('tag', undefined)
 const registry = value('registry', 'https://registry.npmmirror.com')
 const cnbRepository = value('cnb-repo', 'serendipity-archive/dsh-fleet')
@@ -174,7 +178,19 @@ const archive = join(outDir, name)
 const staging = join(outDir, `.staging-${version}-${platform}`)
 const runtime = join(staging, 'node_modules')
 
-/** Pack a fresh tree, or reuse one a CI runner already built. */
+/**
+ * Pack a fresh tree from the **upstream release**, for local inspection only.
+ *
+ * **This must never be uploaded.** It resolves `@deepseek-ai/dsh` from a registry with no
+ * fork, so the tree it produces has none of the trimming (`dropPackages` lives in
+ * `build-fork-runtime.mjs`) — it is the 165 MiB upstream tree with a few residue files
+ * removed. Uploading it to `v<version>/dsh-<version>-<platform>.tar.gz` replaces exactly what
+ * every node downloads, under the same name, version and checksum contract, and nothing in
+ * the download would notice. `release-runtime.yml` has warned about this in a comment for
+ * months; a comment is not a gate.
+ *
+ * The gate is `assertPublishable()`, called from `main()` before either upload path.
+ */
 function pack() {
   mkdirSync(outDir, { recursive: true })
   rmSync(staging, { recursive: true, force: true })
@@ -290,6 +306,29 @@ function adoptExisting() {
   return sha256
 }
 
+/**
+ * Refuse to upload any archive this script packed itself.
+ *
+ * The rule is about **who produced the bytes**, not about the file name. A `--cnb-only` /
+ * adopted archive came from `build-fork-runtime.mjs` (CI packs with the same script), so it is
+ * trimmed. Anything `pack()` produced came straight from the registry with no fork, so it is
+ * the upstream tree and must stay local.
+ *
+ * `--allow-upstream-publish` exists only so this message has an escape hatch for a deliberate
+ * one-off (e.g. publishing an upstream comparison tree under its own tag). It is not a normal
+ * flag: `build-fork-runtime.mjs` never passes it.
+ */
+function assertPublishable() {
+  if (cnbOnly || allowUpstreamPublish) return
+  throw new Error(
+    'refusing to upload an archive this script packed: it resolves @deepseek-ai/dsh from the\n'
+    + 'registry without the fork, so it carries no trimming, and uploading it would replace what\n'
+    + 'every node downloads with a 165 MiB upstream tree under the same name and version.\n'
+    + '  Build and publish through build-fork-runtime.mjs (it produces the trimmed tree).\n'
+    + '  To upload bytes somebody else built, point --out at them and pass --cnb-only.',
+  )
+}
+
 const sha256 = cnbOnly ? adoptExisting() : pack()
 
 
@@ -301,6 +340,8 @@ if (!shouldPublish && !shouldPublishCnb) {
   )
   process.exit(0)
 }
+
+assertPublishable()
 
 const releaseTag = tag ?? `v${version}`
 
@@ -320,6 +361,10 @@ function releaseNotes() {
   for (const file of readdirSync(outDir).sort()) {
     const match = /^dsh-(.+)-([a-z0-9]+-[a-z0-9]+(?:-musl)?)\.tar\.gz$/u.exec(file)
     if (match === null) continue
+    // The body must describe what the release *has*, not what the out directory happens to
+    // contain: a stale archive from a platform since withdrawn (win32-x64 was withdrawn
+    // 2026-11-20) would otherwise be advertised with a live-looking sha256 that 404s.
+    if (!isPublishedPlatform(match[2])) continue
     const sidecar = join(outDir, `${file}.sha256`)
     const sha = existsSync(sidecar) ? readFileSync(sidecar, 'utf8').trim().split(/\s+/u)[0] : '(no sidecar)'
     const bytes = statSync(join(outDir, file)).size

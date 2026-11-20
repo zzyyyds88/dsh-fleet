@@ -407,6 +407,7 @@ export function artefactUrls({
  * | 3 | no source served it (`ARTEFACT_UNAVAILABLE`) | report the list it tried; never direct GitHub |
  * | 4 | checksum mismatch | roll back, report |
  * | 5 | archive is not a DSH runtime | roll back, report |
+ * | 6 | the archive arrived but its `.sha256` did not (`ARTEFACT_CHECKSUM_UNAVAILABLE`) | roll back, report — never unpack unverified bytes |
  */
 
 /**
@@ -468,18 +469,26 @@ if ! fetch ${quote(urls)}; then
 fi
 
 OUT="$archive.sha256"
-if fetch ${quote(checksumUrls)}; then
-  expected=$(cut -d' ' -f1 < "$archive.sha256")
-  if command -v sha256sum >/dev/null 2>&1; then
-    actual=$(sha256sum "$archive" | cut -d' ' -f1)
-  else
-    actual=$(shasum -a 256 "$archive" | cut -d' ' -f1)
-  fi
-  if [ "$expected" != "$actual" ]; then
-    rm -f "$archive"
-    echo "ARTEFACT_CHECKSUM_MISMATCH $expected $actual" >&2
-    exit 4
-  fi
+if ! fetch ${quote(checksumUrls)}; then
+  # **No sidecar is a failure, not a skip.** The archive came from the same host that is
+  # supposed to publish its hash beside it; a host that serves the bytes but not the hash is
+  # either a broken release or a partial mirror. Unpacking without the comparison turns
+  # "truncated download" into "half-installed runtime that fails at first use" — the exact
+  # thing the checksum exists to prevent, and the failure lands days later on a tool call.
+  rm -f "$archive"
+  echo "ARTEFACT_CHECKSUM_UNAVAILABLE" >&2
+  exit 6
+fi
+expected=$(cut -d' ' -f1 < "$archive.sha256")
+if command -v sha256sum >/dev/null 2>&1; then
+  actual=$(sha256sum "$archive" | cut -d' ' -f1)
+else
+  actual=$(shasum -a 256 "$archive" | cut -d' ' -f1)
+fi
+if [ "$expected" != "$actual" ]; then
+  rm -f "$archive"
+  echo "ARTEFACT_CHECKSUM_MISMATCH $expected $actual" >&2
+  exit 4
 fi
 
 rm -rf "$staging"

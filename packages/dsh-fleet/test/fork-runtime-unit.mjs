@@ -166,6 +166,17 @@ function packageIn(root, name) {
     'publish-runtime refuses a platform outside PUBLISHED_PLATFORMS')
   check(/PUBLISHED_PLATFORMS/u.test(publish),
     'and names the allowed set in the refusal, so the reader is not left guessing')
+  // The listing side has to be filtered too, or a stale archive left in `--out` from a
+  // withdrawn platform reappears in the release body with a live-looking sha256 that 404s.
+  check(/if \(!isPublishedPlatform\(match\[2\]\)\) continue/u.test(publish),
+    'the release body skips an archive whose platform is no longer published')
+  // And the uploader must refuse a tree it packed itself: `pack()` resolves the upstream
+  // release with no fork, so it has none of `dropPackages`. A comment in the CI workflow
+  // warned about this for months; only a branch can stop it.
+  check(/function assertPublishable\(/u.test(publish) && /assertPublishable\(\)/u.test(publish),
+    'publish-runtime refuses to upload an archive it packed itself, not just a wrong platform')
+  check(/if \(cnbOnly \|\| allowUpstreamPublish\) return/u.test(publish),
+    'the only way past that gate is an archive somebody else built (--cnb-only)')
 }
 
 if (failures.length > 0) {
