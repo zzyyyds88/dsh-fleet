@@ -228,7 +228,7 @@ Node 22：低于它仍然装得上、跑得起来（解包一棵树，从来不�
 ## 五、跟上游：怎么把新版编译出来并发出去
 
 fork 在仓库外（`DSH_FORK_DIR`，默认 `D:\ProjectHub\dsh-fork\deepseek-harness`），
-钉在一个 release tag 上，只带构建侧修复。升级 = 切 tag、重放修复、跑一次构建。
+钉在一个 release tag 上，**工作树不带本项目自己的提交**。升级 = 切 tag、跑一次构建。
 
 ```bash
 # 1. 桌面端升级之后，先在 fork 里切到同一个 tag（版本必须完全相等，否则节点会拒绝）
@@ -236,9 +236,8 @@ cd D:/ProjectHub/dsh-fork/deepseek-harness
 git fetch origin --tags
 git checkout dsh-v<新版本>
 git checkout -b dshpl-node-runtime-<新版本>
-#    重放构建侧修复：scripts/release/verify-packed-install.ts 在 Windows 上必须用
-#    Node 起 npm 的 JS 入口，不能 spawn npm.cmd。看上一分支的 diff：
-#    git diff dsh-v<旧版本>..dshpl-node-runtime -- scripts/release/verify-packed-install.ts
+#    源码改动不再直接提交在这里 —— 它们在 patches/node/*.patch 里，构建时自动叠加。
+#    构建会先 git apply --3way 一遍；补不上就报错停下，那才是要看的地方。
 
 # 2. 编译、裁剪、打包、上传（一条命令；不带 --publish 时只落本地 dist/fork）
 cd D:/ProjectHub/DSHpl
@@ -247,6 +246,26 @@ CNB_TOKEN=… node packages/dsh-remote-node-harness/scripts/build-fork-runtime.m
 
 # 3. 只改裁剪规则时不用重编上游（几十秒而不是十几分钟）
 node packages/dsh-remote-node-harness/scripts/build-fork-runtime.mjs --platform linux-x64 --reuse
+
+**源码改动怎么写进来。** 如果要把某段上游代码在节点上改成别的行为（不是删包、不是删文件），
+不要直接改 fork 的工作树 —— 升级切 tag 时会丢，而且届时分不清哪些提交是本项目的。
+放进补丁链：
+
+```bash
+# 在 fork 里改好，生成一个补丁（0001 是序号，决定应用顺序）
+cd D:/ProjectHub/dsh-fork/deepseek-harness
+git diff -- packages/<group>/<pkg>/src/<file>.ts > \
+  D:/ProjectHub/DSHpl/packages/dsh-remote-node-harness/patches/node/0001-<slug>.patch
+git checkout -- .          # 工作树回到 tag 状态，改动只活在补丁里
+
+# 台账必须同一提交补上，否则 test/node-patches-unit.mjs 会红
+# 文件：packages/dsh-remote-node-harness/docs/node-patches.zh.md
+```
+
+六列写全：改了什么、移除了什么、为什么节点不需要、怎么验证的、上游改到同一处怎么办。
+构建时 `git apply --3way` 逐个应用；**已应用**会被识别成 `already`（不会报错），
+**真冲突**会抛错并打印 git 的原文 —— 那时把补丁针对新 tag 重新生成，不要 `--reject`，
+也不要删掉它当作没发生。
 ```
 
 **只发 `linux-x64`，而且上传器会替你守着。** 名单是 `src/remote/artefact.js` 的

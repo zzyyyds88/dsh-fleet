@@ -9,6 +9,50 @@
 - 每条都说清「谁受影响」，因为这套东西的读者是「装它的人」，不是写它的人。
 - 与 `docs/ARCHITECTURE.md` 的章节对应，细节不去那边重复。
 
+## [0.6.1] — 2026-11-21
+
+### 变更
+
+- **节点运行时做包内裁剪，`RUNTIME_BUILD` 4 → 5。** 节点下一次连接会重装一次运行时，
+  下载量少三分之一：归档 87.6 → **57.9 MiB**，解包 408.2 → **267.4 MiB**。包集合没变
+  （119 个包仍是那 119 个），删的是包里面没人读的字节：
+
+  | 类目 | 删了多少 | 为什么是死的 |
+  |---|---|---|
+  | 非声明 `.ts`/`.tsx` 源码 | 9 540 个 / 91.9 MiB | 运行时加载 `lib/*.js`；1 207 个 manifest 里没有一条 `main`/`bin`/`exports` 的运行时条件指向 `.ts` |
+  | `.d.cts` 类型声明 | 7 110 个 / 22.7 MiB | 声明文件；原规则漏了 `.cts` 这个拼法 |
+  | 无人读的 `.md` | 601 个 / 5.3 MiB | 原规则 `/(^|\/)\.md$/` 只匹配**文件名恰好叫 `.md`** 的，`guide.md`、`HISTORY.md` 全漏 |
+  | Windows 调试符号 | 4 个 / 19.8 MiB | linux 归档里的 `conpty*.pdb` |
+  | 跨平台原生二进制 | 38 个 / 5.7 MiB | linux 归档里的 `win32-*` prebuilds、ConPTY、`.cmd`/`.ps1` shim |
+
+  **验收是 A/B，不是「看起来还在」**：同一份大脑组合分别喂 build 4 与 build 5 的树，
+  10 个端点的状态码与响应体逐字节相同，差 0 个。另外 build 5 在 Linux（WSL Ubuntu 24.04
+  + Node 24.15.0）里解包启动、打印 `dsh web:`、换 cookie 得 200、`POST /api/session/list`
+  返回 `{"items":[]}`。细节见 `docs/adr-0008-node-source-trim.zh.md`。
+
+- **新增节点源码补丁链与偏差台账。** 上一版规定「fork 的源码改动只有构建侧修复」，这条
+  被推翻：源码改动现在允许，但必须是一个 `patches/node/NNNN-*.patch`，构建时
+  `git apply --3way` 逐个应用，**冲突即报错**，且必须在
+  `packages/dsh-remote-node-harness/docs/node-patches.zh.md` 有一行台账（改了什么、
+  移除了什么、为什么节点不需要、怎么验证、上游改到同一处怎么办）。
+  这样上游修的 bug 一定进得来（补丁叠在 tag 之上），我们自己的改动也不会升级时静默丢失。
+  **当前补丁为空** —— 截至本次发版，节点树的源码与上游 tag 逐字节相同，全部差异都在
+  删包和删文件里。台账空着是诚实的结果，不是没做。
+
+- **`@deepseek-ai/dsh/docs/` 例外保留（481 个文件 / 4.66 MiB）。** 没有代码读它，
+  但 `dsh-doc` skill 在节点组合里，它的 `references/locate-docs.md` 让 agent 去打开
+  `DSH_INSTALL_DIR/docs/user/index.md`。路径写在散文里，`import` 扫描看不见 ——
+  第一版规则把这 481 个全删了，skill 指着一片空。**能力留着，它引用的东西就得留着。**
+
+### 修复
+
+- **三条裁剪规则的正则写错，一年多没生效。** `/(^|\/)\.md$/` 匹配的是「文件名就叫 `.md`」，
+  `.d.cts` 完全没覆盖，`.pdb` 与跨平台 prebuilds 也没规则。它们不会报错，只是让每个节点
+  多下 30 MiB。
+- **`publish-runtime.mjs` 与 `build-fork-runtime.mjs` 各有一份裁剪实现。** 两份会漂移成
+  「同一版本、不同内容」的两棵归档，而 `RUNTIME_BUILD` 正是为了防这件事。现在两处都调
+  同一个 `stripResidue`，规则与例外只有一份。
+
 ## [0.6.0] — 2026-11-20
 
 ### 变更（破坏性）

@@ -160,9 +160,9 @@ dsh plugin --profile desktop add -w <仓库绝对路径>/packages/dsh-remote-nod
 
 节点要求 Node ≥ 22，以及 `curl`（或 `wget`）。打开第三方插件开关时还需要 `npm`（插件从节点自己的 registry 装进节点的 profile）；运行时本身从不经过 registry。
 
-节点的 DSH 只有一条来路：**下载本项目自己构建的归档**（`dsh-<version>-<platform>.tar.gz`，约 87.6 MiB / 41 846 文件），只有 CNB 一个源（实测 91 839 618 字节 17.6 s，重复测量抖动 <1%）。GitHub 不作为下载源——国内节点连不上它，同一份字节仍会传到 GitHub Release 作灾备。
+节点的 DSH 只有一条来路：**下载本项目自己构建的归档**（`dsh-<version>-<platform>.tar.gz`，约 57.9 MiB / 25 038 文件），只有 CNB 一个源（实测 91 839 618 字节 17.6 s，重复测量抖动 <1%）。GitHub 不作为下载源——国内节点连不上它，同一份字节仍会传到 GitHub Release 作灾备。
 
-那棵树不是上游发布版，而是本项目从**上游源码的 fork** 编译出来的：删掉浏览器面、Office 引擎与实验性 bundle（解包 2014.6 MiB → 408.6 MiB）。为什么 fork、代价是什么，见 [`docs/adr-0007-fork-node-runtime.zh.md`](docs/adr-0007-fork-node-runtime.zh.md)。
+那棵树不是上游发布版，而是本项目从**上游源码的 fork** 编译出来的：删掉浏览器面、Office 引擎与实验性 bundle，再删掉包内没人读的字节（解包 2014.6 MiB → 267.4 MiB）。为什么 fork、代价是什么，见 [`docs/adr-0007-fork-node-runtime.zh.md`](docs/adr-0007-fork-node-runtime.zh.md)。
 
 拿不到制品（CNB 不通、没有 `curl`/`wget`、平台打不出标签）就报错并逐条列出试过的 URL。**没有 `npm install` 兜底这条路了**：它装的是上游树却写同一枚构建戳，一次网络抖动就会把节点永久钉在上游版本上，界面还显示「已就绪」。字节坏了（校验和不符、归档里没有 CLI）同样报错并回滚到上一棵树——「拿不到」和「拿到的是坏的」是两件事。
 

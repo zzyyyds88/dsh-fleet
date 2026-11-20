@@ -425,7 +425,7 @@ ssh2 发一次 exec 请求时**不切包**：`Protocol.js:1273` 的 `alloc(1 + 4
 | | 上游发布版（ADR-0006） | **自建运行时（采用）** |
 |---|---|---|
 | 节点跑什么 | `npm install` 出来的官方树 | 本项目从 fork 编译的树 |
-| 树里有什么 | 上游装出来的一切（含 62 个浏览器包、339.5 MiB Office 引擎） | 只留大脑需要的（实测 2014.6 → 408.6 MiB） |
+| 树里有什么 | 上游装出来的一切（含 62 个浏览器包、339.5 MiB Office 引擎） | 只留大脑需要的，再删包内无人读的字节（实测 2014.6 → 267.4 MiB） |
 | 拿不到制品 | 落 npm，慢一点但能连 | **报错**，逐条列出试过的 URL |
 | 上游发新版之后 | 节点自己就跟上了 | **本项目要重新编译并发版** |
 
@@ -626,11 +626,42 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 | | ADR-0006（上游发布版，两条路） | 现在（自建，一条路） |
 |---|---|---|
 | 节点跑什么 | `npm install` 出来的官方树 | 本项目从 fork 编译的树 |
-| 树大小（解包） | 957.3 MiB / 496 包 | **408.6 MiB**（裁剪 + 去残留） |
-| 归档 | 165 MiB | **87.6 MiB** / 41 846 文件 |
-| 下载 | 加速站 0.2–9.6 MB/s | **CNB 约 18 s**（实测 91 839 618 字节 17.6 s） |
+| 树大小（解包） | 957.3 MiB / 496 包 | **267.5 MiB**（裁剪 + 去残留） |
+| 归档 | 165 MiB | **58.0 MiB** / 25 065 文件 |
+| 下载 | 加速站 0.2–9.6 MB/s | **CNB 约 18 s**（实测 91 839 618 字节 17.6 s，build 4） |
 | 拿不到制品 | 落 npm，慢一点但能连 | **报错**，逐条列出试过的 URL |
 | 上游发新版之后 | 节点自己就跟上 | **本项目要重新编译并发版** |
+
+**裁剪分三种粒度，别把它们混为一谈。** 包级（`DROP_RULES`，删 119 个包）、文件级
+（`ARTEFACT_RESIDUE`，删包内文件）、**源码级**（`patches/node/*.patch`，改上游代码的行为）。
+前两种是「删」，第三种是「改」，走补丁链 + 偏差台账，见
+[`adr-0008-node-source-trim.zh.md`](adr-0008-node-source-trim.zh.md) 与
+[`node-patches.zh.md`](../packages/dsh-remote-node-harness/docs/node-patches.zh.md)。
+截至 build 5 源码级改动为 **0**：全部差异都在前两种粒度里。
+
+**文件级裁掉的四类死字节，每一类都是先量后删。** build 4 的归档 408.2 MiB 里，
+`src/**.ts` 91.9 MiB、`.d.cts` 22.7 MiB、无人读的 `.md` 5.3 MiB、Windows 调试符号与
+跨平台 prebuilds 28.4 MiB。删的依据不是「看起来像垃圾」：
+
+| 类目 | 为什么是死的 | 怎么验的 |
+|---|---|---|
+| 非声明 `.ts`/`.tsx` | 运行时加载 `lib/*.js` | 1 207 个 manifest 里，`main`/`bin`/`exports` 的 `import`·`require`·`default`·`node` 条件**无一**指向 `.ts`；`types` 与 zod 的 `@zod/source` 这类自定义条件指向 `.ts`，但那是打包器/类型检查器读的。全树没有一条 `import … './x.ts'`，也没有一处把 `.ts` 当数据读 |
+| `.d.cts` | 声明文件 | 原规则只写了 `.d.ts`/`.d.mts`，漏了 `.cts` |
+| 无人读的 `.md` | 文档 | 全树搜 `readFile…new URL(…'.md')` 与 `join(…, 'SKILL.md')`，命中 5 类目录形状（`skills/`、`assets/`、`references/`、`templates/`、`SKILL.md`），其余 601 个无读者 |
+| `.pdb` 与跨平台 prebuilds | linux 归档里的 win32/darwin 二进制 | `node-pty` 用 `prebuilds/${process.platform}-${process.arch}` 拼路径，六个目录只有一个可能被加载；build 4 里 23.2 MiB 的 prebuilds 只对应 0.07 MiB 可达字节 |
+
+**`@deepseek-ai/dsh/docs/` 是唯一一处「没有代码读、却必须留」的例外。** 481 个文件、
+4.66 MiB。`dsh-doc` skill 在节点组合里（`skill-filesystem` 的 `customSkillDirs` 指向
+`@deepseek-ai/dsh-agent-preset`），它的 `references/locate-docs.md` 直接让读者打开
+`DSH_INSTALL_DIR/docs/user/index.md` 与 `docs/upgrade-guide/`。路径写在散文里，
+`import`/`readFile` 扫描看不见 —— 第一版规则把 481 个全删了，skill 指着一片空。
+**能力留着，它引用的东西就得留着。**
+
+**A/B 是裁剪规则的验收方法。** 同一份大脑组合，分别喂 build 4 与 build 5 的树，
+逐个端点比应答：`session/list`、`session/create`、`session/page`、`session/search`、
+`workspace/create`、`terminal/shells`、`terminal/list`、`schedule/list`、`schedule/catalog`、
+`skill/list` —— 10 个端点，状态码与响应体**逐字节相同**，差 0 个。删掉 16 781 个文件
+没有改变任何一个回答，这才是「删的是死字节」的证据。
 
 **判据只有一条：拿不到 ≠ 拿到的是坏的。**
 
@@ -678,8 +709,10 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 会把树读成「早于构建戳」→ `decideGate` 返回 `node-runtime-repack` → **每次连接重装一次**。
 `parseStamp` 仍认旧格式的裸整数（现场节点的 `2`），格式升级不能把在用节点判成不可用。
 
-**`RUNTIME_BUILD` 现在是 4。** 3 → 4 是 fork：树的内容变了（少了 500 MiB 包、多了 fork 的字节），
-版本号表达不了这件事，只有戳能。**改 `ARTEFACT_RESIDUE`、改裁剪规则、改归档布局、改由谁来解析，
+**`RUNTIME_BUILD` 现在是 5。** 3 → 4 是 fork：树的内容变了（少了 500 MiB 包、多了 fork 的字节），
+版本号表达不了这件事，只有戳能。4 → 5 是**包内裁剪**：包集合没变，同一个包里少了
+TypeScript 源码、`.d.cts` 声明、调试符号与无人读的文档 —— 实测 408.2 → 268.4 MiB。
+**改 `ARTEFACT_RESIDUE`、改裁剪规则、改归档布局、改由谁来解析，
 都必须同时 bump**，否则老节点读到的戳是「当前」，它会一直跑旧字节 —— 实测过这条链：`doc/` 被
 当文档删掉，`yaml/dist/doc/directives.js` 跟着没了，节点启动即 `MODULE_NOT_FOUND`，而闸门说
 「已就绪」。
