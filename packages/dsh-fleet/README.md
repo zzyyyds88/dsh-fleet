@@ -146,8 +146,9 @@ every event the client renders.
   Session format cannot skew). `engines.dsh` is `>=0.2.2-rc.3 <0.3.0`: anything in the
   0.2.2 line installs, 0.3.0 is refused rather than half-composed.
 - SSH access to each node, with Node 22 or newer. **The runtime is an archive this project
-  builds and publishes, and the node downloads it** — so the node needs `curl` or `wget`, and
-  nothing else. There is no registry step on the node at all.
+  builds and publishes, and the node downloads it** — so the node needs `curl` or `wget`. It
+  also needs `npm` if you switch third-party plugins on: those are installed into the node's
+  own profile from the node's own registry. The runtime itself never comes from a registry.
 - `@deepseek-ai/dsh` declares `engines.node: ">=24.9.0"` for every 0.2.2 release, while
   this plugin's floor is Node 22. A node below the declared engines still installs and
   runs (the runtime is an unpacked tree; nothing ever reads that field) — the settings page

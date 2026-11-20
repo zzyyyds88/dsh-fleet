@@ -255,8 +255,11 @@ git -c http.proxy= -c https.proxy= clone https://git.yylx.win/https://github.com
 - npm：`npm install --registry=<源>`
 - pnpm：`pnpm install --registry <源>`
 - yarn：`yarn install --registry <源>`
-- 注意：**节点上不再有 `npm install`**。节点运行时是下载的归档（CNB 一个源），不解析 registry。
-  registry 只影响本机与打包机；打包时 `build-fork-runtime.mjs --registry` 默认 `npmmirror`。
+- 注意：**运行时不再从 registry 装**。节点运行时是下载的归档（CNB 一个源）。
+  但节点**仍然需要 npm**：第三方插件开关是 `npm install` 到节点 profile 里的
+  （`installPlugins`），用节点自己的 registry 配置，不由本机决定。装不上时先去节点上查
+  `npm config get registry`。registry 也影响本机与打包机；打包时
+  `build-fork-runtime.mjs --registry` 默认 `npmmirror`。
 
 ## 14. 真源优先级
 
