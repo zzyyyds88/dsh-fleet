@@ -145,14 +145,14 @@ every event the client renders.
 - DSH 0.2.2 (the node is installed at exactly the version this profile runs, so the
   Session format cannot skew). `engines.dsh` is `>=0.2.2-rc.3 <0.3.0`: anything in the
   0.2.2 line installs, 0.3.0 is refused rather than half-composed.
-- SSH access to each node, with Node 22 or newer. `curl` (or `wget`) *or* `npm` — the
-  runtime arrives one of two ways: a published artefact is downloaded if an accelerator
-  can serve it, and otherwise the node resolves the exact same release itself with
-  `npm install`. Only a machine with neither a downloader nor `npm` cannot be set up.
+- SSH access to each node, with Node 22 or newer. **The runtime is an archive this project
+  builds and publishes, and the node downloads it** — so the node needs `curl` or `wget`, and
+  nothing else. There is no registry step on the node at all.
 - `@deepseek-ai/dsh` declares `engines.node: ">=24.9.0"` for every 0.2.2 release, while
   this plugin's floor is Node 22. A node below the declared engines still installs and
-  runs (the artefact route never read that field either) — the settings page just says so.
-  The measurement behind keeping 22 is in `docs/adr-0006-node-runtime-supply.zh.md` §四-2.
+  runs (the runtime is an unpacked tree; nothing ever reads that field) — the settings page
+  just says so. The measurement behind keeping 22 is in
+  `docs/adr-0006-node-runtime-supply.zh.md` §四-2.
 - The node needs no open port: everything rides SSH `direct-tcpip` channels, and the
   resident host listens on the node's loopback only.
 
@@ -174,28 +174,29 @@ decision is which machine the folder is on.
 
 ### How the node's DSH gets there
 
-Two routes, tried in order (`runtime` in the config: `auto` / `artefact` / `npm`):
+**One route: a published archive.** `dsh-<version>-<platform>.tar.gz` is downloaded from CNB
+(`DEFAULT_SOURCES` in `src/remote/artefact.js`) and unpacked into `~/.dsh-fleet/runtime`. It
+takes no registry, no credential, and no decision on the node. Measured on the reference node:
+91 983 493 bytes in 17.6 s, spread under 1% across repeats. GitHub is **not** a download source
+— a node in mainland China cannot reach it — though the same bytes are also uploaded to the
+GitHub release as a backup.
 
-1. **A published artefact** — `dsh-<version>-<platform>.tar.gz` from a Release. One file,
-   no registry. The sources are tried in order and the list lives in
-   `DEFAULT_SOURCES` (`src/remote/artefact.js`): **CNB first**, then the GitHub
-   accelerators as disaster recovery. Measured on the reference node with the full
-   165 MiB archive: CNB served it at 4 233 285 B/s (~33 s, spread under 1% across
-   repeats) while the accelerators ranged 0.2–9.6 MB/s run to run — a 40× spread,
-   which is the difference between "connecting" and "hanging".
-2. **The node resolves it itself** — `npm install --os/--cpu/--libc
-   "@deepseek-ai/dsh@<exact version>"` on the node. Slower (a full resolve, measured
-   26–33 s for 673 packages), but it needs no artefact at all: that is what makes an
-   upstream DSH release followable without anyone pre-building a tree.
+The tree in that archive is **this project's own build**, not the upstream release: it comes
+from a fork of the upstream source with the browser surface, the Office engine and the
+experimental bundles removed (2014.6 MiB → 408.6 MiB unpacked; the archive is 87.7 MiB instead
+of 165 MiB). A node runs what this project built and tested. Why, and what it costs, is in
+[`docs/adr-0007-fork-node-runtime.zh.md`](../../docs/adr-0007-fork-node-runtime.zh.md).
 
-Which one to skip is decided by *why* the first failed. A tree that could not be
-**had** — every source down, no `curl`/`wget`, `mirrors: []` — falls through to
-`npm`. A tree that arrived and was **wrong** (bad checksum, bad archive, no CLI inside)
-rolls back and reports: re-resolving the same broken release would download more and
-hide which source was at fault.
+A download that could not be **had** — CNB unreachable, no `curl`/`wget`, no platform tag —
+is reported with every URL it tried. A tree that arrived and was **wrong** (bad checksum, bad
+archive, no CLI inside) rolls back to the previous runtime and reports as well. Neither one is
+retried anywhere else, and there is nowhere else to retry it: the `npm install` fallback was
+**removed**, not disabled, because it installs the *upstream* tree while writing this build's
+stamp — one network blip would pin a node to the upstream runtime permanently while the
+settings page said "ready".
 
-Both routes stamp the tree with the same build id, so the next connect recognises it
-either way. The node card shows which route it used.
+The install stamps the tree with the build id, so the next connect recognises it. The node
+card shows the runtime it has.
 
 ### Which plugins run on a node
 
@@ -312,37 +313,22 @@ Nothing on a node needs to change: the node side is the embedded
   config:
     enabled: true
     autoConnect: true
-    # How a node gets its DSH: auto (default, artefact then npm),
-    # artefact (published tree only), or npm (let the node resolve it).
-    runtime: auto
-    # Where an artefact is fetched from, best first. Omit to use
-    # DEFAULT_SOURCES: CNB, then the GitHub accelerators. A template
-    # source fills in {version} {platform} {tag} {file}; a prefix source
-    # is prepended to the GitHub release URL.
+    # Where the runtime archive is fetched from. Omit to use DEFAULT_SOURCES,
+    # which is CNB alone. A template source fills in {version} {platform}
+    # {tag} {file}; a prefix source is prepended to the GitHub release URL
+    # (supported, but none is configured by default: nodes cannot reach GitHub).
     sources:
       - kind: template
         template: https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/{tag}/{file}
-      - kind: prefix
-        prefix: https://gh.inkchills.cn/
-    # Shorthand for the prefix sources only; an empty list turns the
-    # artefact route off, which falls through to npm.
-    mirrors: [https://git.yylx.win/, https://gh.inkchills.cn/]
-    # Registry the *node* uses when it resolves the release itself.
-    # Omit to use the node's own `npm config get registry`.
-    registry: https://registry.npmmirror.com
 ```
 
 `autoConnect: false` keeps every node idle until you press *Connect*.
 
-`runtime` exists so a failure can be attributed: `artefact` turns a download problem into a
-named error instead of a slower connect, and `npm` is how you check whether the node's own
-registry works at all. `registry` is passed through to the node's `npm install --registry`;
-leaving it out is usually right, because the node knows its own network.
-
-`sources` and `mirrors` are not the same knob. `sources` is the whole ordered list, including
-hosts with their own URL layout; `mirrors` only names accelerators, which is why it is kept —
-it is what a person usually wants to change. Setting `mirrors: []` is the documented way to
-switch the artefact route off entirely, and it does *not* leave CNB as a lone source.
+`sources` replaces the list entirely, so a private mirror is one configuration value. There is
+no `mirrors` shorthand any more: a shorthand for "the accelerators, minus CNB" describes a
+knob that no longer has anything to turn. There is no `runtime` switch either, and no
+`registry` — see *How the node's DSH gets there* above for why the node-side resolve was
+deleted rather than kept as a fallback.
 
 ## Endpoints that stay local, on purpose
 

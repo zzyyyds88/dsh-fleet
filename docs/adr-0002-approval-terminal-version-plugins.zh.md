@@ -60,8 +60,8 @@ sha256 + 解压替换 `runtime/`。闸门比较 `pluginVersion` 与节点 `statu
 回滚：替换前把旧树改名 `runtime.previous`，解压失败或宿主起不来则回滚并报告。
 
 **当时写的是「加速地址可配置（`$DSH_FLEET_MIRROR`），失败自动回官方」。这两点后来都被推翻了**：
-现在是 `DEFAULT_MIRRORS` 列表依次试、**不回退直连 GitHub、也不回退 npm**（理由与实测见
-ARCHITECTURE §六之四）。本 ADR 保留这句是为了说明演进，不是当前行为。
+现在只有一个源（CNB），**不回退直连 GitHub、也没有 npm 兜底**（理由与实测见 ARCHITECTURE §六之四
+与 [ADR-0007](adr-0007-fork-node-runtime.zh.md)）。本 ADR 保留这句是为了说明演进，不是当前行为。
 
 ## 决策四：每插件同步开关
 

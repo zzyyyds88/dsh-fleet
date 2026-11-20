@@ -50,7 +50,7 @@
 ## 4. 项目边界
 
 - **目标**：让桌面端把局域网 Linux 机器当成**本地工作区**用 —— 大脑（agent、模型调用、工具执行、会话日志）跑在节点上，桌面端只做身份编码、请求转发、结果还原；远端会话出现在同一个侧栏，手机端 `ds-harness-remote` 也能读到。
-- **非目标**（用户已明确否定，不许换名保留）：把远端目录镜像/挂载到本地再在本机跑工具；fork 官方 DSH 包；改 Electron 主进程；接管 `/api` 或 `/api/remote.mux`；碰上游 Loader 行。
+- **非目标**（用户已明确否定，不许换名保留）：把远端目录镜像/挂载到本地再在本机跑工具；改 Electron 主进程；接管 `/api` 或 `/api/remote.mux`；碰上游 Loader 行；**改上游语义**（fork 只允许构建侧修复，裁剪是打包步骤，不是改源码）；**不发 npm**；**不给 GitHub 留下载源**。
 - **节点的形态**：只当远程大脑。做法是**源码级定制组合层** —— 节点 profile 组合 `dsh-base` + `@local/dsh-fleet-brain`，`dsh-web-app` 那层根本不加载。所有节点共用同一份组合（不做 per-node 定制）。
 - 用户明确否定过的概念必须从代码、文档、命名里删干净，不许换名保留。
 - 无意义兼容先问：旧字段、旧接口、双路径污染当前合同时，按 §11 确认取舍，不许擅自保留。
@@ -142,9 +142,27 @@ verification: "`node packages/dsh-fleet/test/routing-unit.mjs && node packages/d
 - 节点组合（`dsh-fleet-brain`）必须从**已安装的那个 release** 派生，不能从 master 派生。master 领先于发布版，会让节点组合出该版本不存在的行（实测踩过：`authentication-token` 行在 `0.2.2-rc.3` 里不存在，节点报 "1 entry did not activate"）。
 - 生成物链：`sync-from-upstream.mjs` → `cordis.patch.yml` + `presets/` → `embed-into-fleet.mjs` → `dsh-fleet/src/host/brain-bundle.generated.js`。改组合只能改脚本或 `src/runtime.js`。
 - 节点上的 DSH 是**独立安装**（版本与桌面完全相等），有自己的 `~/.dsh`。它没有 provider、没有 API key，所以 provisioning 是连接流程的一部分，不是可选优化。
-- 节点运行时有**两条有序路线**（`RUNTIME_ROUTES = ['artefact', 'npm']`）：先下 Release 制品，制品**拿不到**才让节点自己 `npm install`。判据是「拿不到 ≠ 拿到了是坏的」：校验和/解包失败仍要回滚后抛错，不许从 registry 再下一次。两条路必须写同一枚构建戳（`stampJson`），否则 `inspectRuntime` 判无戳 → 每次连接重装。见 `docs/adr-0006-node-runtime-supply.zh.md`。
-- 上游 `@deepseek-ai/dsh` 声明 `engines.node: ">=24.9.0"`，本项目 `MINIMUM_NODE_MAJOR = 22`。**这条闸门报而不拦**（`--engine-strict=false` + `engineWarning`）：制品路线从来没读过这个字段，不能因为换成 npm 就变成硬停。**2026-11-19 已核实：保持 22，不升 24。** 依据（305 个依赖包里真正的 Node 24 API 是 0 处、唯一的 `await using` 命中是 acorn 里的字符串字面量、`workflow-ptc` 在节点组合里 `disabled: true`）写在 `docs/adr-0006-node-runtime-supply.zh.md` §四-2。什么时候该重开：依赖闭包里出现真正的 Node 24 语法或 API，或上游开始用 `engines` 之外的机制强制版本。
-- **制品的源是对象数组，不是前缀数组**（`DEFAULT_SOURCES`）：`{kind:'template', template}` 填 `{version}/{platform}/{tag}/{file}`（CNB 那种自有路径布局），`{kind:'prefix', prefix}` 才做 GitHub URL 的前缀拼接。CNB 排第一（实测 4.3 MB/s、抖动 <1%），四个加速站是灾备（0.2–9.6 MB/s，抖动 40 倍）。`mirrors: []` 仍是「关掉制品路线」。**发布侧有个坑：CNB 的 `PUT` 返回 200 不等于附件已关联，必须再 `POST` 一次 `verify_url`。**
+- 节点运行时有**一条路**：下载本项目从 fork 编译的制品（`scripts/build-fork-runtime.mjs` →
+  `scripts/publish-runtime.mjs`）。npm 兜底路线**已删除**，不是关掉开关 —— 它装的是上游发布版、
+  写的是同一枚构建戳，一次网络抖动就会把节点永久钉在上游版本上而界面显示「已就绪」。判据仍然只有
+  一条：**拿不到 ≠ 拿到了是坏的**，后者回滚后抛错，永远不重试。构建戳（`stampJson`）必须写，
+  否则 `inspectRuntime` 判无戳 → 每次连接重装。见 `docs/adr-0007-fork-node-runtime.zh.md`。
+- 上游 `@deepseek-ai/dsh` 声明 `engines.node: ">=24.9.0"`，本项目 `MINIMUM_NODE_MAJOR = 22`。
+  制品路线解包一棵树、从不读这个字段，所以这个下限就是节点真实的门槛。
+  **2026-11-19 已核实：保持 22，不升 24。** 依据（305 个依赖包里真正的 Node 24 API 是 0 处、
+  唯一的 `await using` 命中是 acorn 里的字符串字面量、`workflow-ptc` 在节点组合里
+  `disabled: true`）写在 `docs/adr-0006-node-runtime-supply.zh.md` §四-2。什么时候该重开：
+  依赖闭包里出现真正的 Node 24 语法或 API，或上游开始用 `engines` 之外的机制强制版本。
+- **制品的源是对象数组，只有一条**（`DEFAULT_SOURCES`）：`{kind:'template', template}` 填
+  `{version}/{platform}/{tag}/{file}`（CNB 那种自有路径布局）。`{kind:'prefix', prefix}` 这种源
+  仍然支持，但**默认一个都没有**：国内节点连不上 GitHub，加速站（0.2–9.6 MB/s，抖动 40 倍）
+  已退役成 `RETIRED_MIRRORS`，只作记录。GitHub Release 仍收到同一份字节作灾备，节点不从那里取。
+  **发布侧有个坑：CNB 的 `PUT` 返回 200 不等于附件已关联，必须再 `POST` 一次 `verify_url`。**
+- **fork 的裁剪规则与两条载重规则**在 `scripts/trim-fork-runtime.mjs` / `build-fork-runtime.mjs`：
+  ①`@deepseek-ai/dsh-web-app` 的 **manifest 必须留着**（上游按安装树的 manifest 求 profile bundle
+  的依赖闭包，删掉它大脑保留的 15 行全部 `MODULE_NOT_FOUND`）；②staging 清单只把
+  `@deepseek-ai/dsh` 列为依赖、其余 fork 产物全进 `overrides`（否则装上「发布出来的一切」，
+  实测 1789.2 MiB vs 957.3 MiB）。`test/fork-runtime-unit.mjs` 守着这两条。
 
 ### toolchain/node-esm
 
@@ -237,7 +255,8 @@ git -c http.proxy= -c https.proxy= clone https://git.yylx.win/https://github.com
 - npm：`npm install --registry=<源>`
 - pnpm：`pnpm install --registry <源>`
 - yarn：`yarn install --registry <源>`
-- 注意：节点上的 `npm install @deepseek-ai/dsh@<version>` 用**节点自己**的 registry 配置，不由本机决定。装不上时先去节点上查 `npm config get registry`。
+- 注意：**节点上不再有 `npm install`**。节点运行时是下载的归档（CNB 一个源），不解析 registry。
+  registry 只影响本机与打包机；打包时 `build-fork-runtime.mjs --registry` 默认 `npmmirror`。
 
 ## 14. 真源优先级
 

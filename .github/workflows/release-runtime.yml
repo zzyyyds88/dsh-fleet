@@ -1,16 +1,17 @@
-name: Release node runtime
+name: Release node runtime (upstream tree)
 
-# Publish the node runtime for one upstream DSH release, built per platform on CI rather
-# than on somebody's laptop.
+# Pack the **upstream release** for one DSH version, per platform, on CI rather than on
+# somebody's laptop.
 #
-# Why this exists: a node *can* resolve its own runtime (`npmInstallScript` in
-# `src/remote/artefact.js`), so nothing here is required for an upgrade to be possible. What
-# it buys is the fast path — one download against a mirror instead of a full resolve against
-# a registry — for every node, without the maintainer's machine being on the critical path.
+# **This is not the route a node takes.** Nodes download the tree this project builds from its
+# own fork (`build-fork-runtime.mjs`, see `docs/adr-0007-fork-node-runtime.zh.md`), and there is
+# no node-side fallback any more. What this workflow still buys is the upstream tree itself, as
+# a comparison point and as the thing `verify-packed-install` can check without a fork
+# checkout: it answers "does the release we pinned to still pack cleanly?".
 #
-# Measured on the reference node (Linux x86_64, glibc 2.35, Node v22.20.0): the npm route
-# takes 26-33 s for 673 packages and needs a registry; the artefact route is one 165 MiB
-# download a mirror serves at 4.97 MiB/s, so ~34 s, with no registry at all.
+# Measured on the reference node (Linux x86_64, glibc 2.35, Node v22.20.0): the upstream tree is
+# a 165 MiB download; the fork build is 87.7 MiB and 41 849 files, because it drops the browser
+# surface, the Office engine and the experimental bundles.
 #
 # The matrix packs natively. `publish-runtime.mjs` resolves **for the target platform** with
 # `--os/--cpu/--libc` and `--ignore-scripts`, so running it on the matching runner is not what
@@ -20,6 +21,11 @@ name: Release node runtime
 # The build and the upload are separate jobs on purpose: four matrix legs uploading into one
 # release would race on `gh release create`, and a failure there would look like a packaging
 # bug. The legs only produce artifacts; one job publishes all of them.
+#
+# **Uploading here overwrites the fork archive at the same tag.** A node reads
+# `v<version>/dsh-<version>-<platform>.tar.gz` from CNB, so publishing an upstream tree into that
+# path would replace what every node downloads with a 165 MiB tree that has none of the trimming.
+# Keep `publish` off unless you mean to replace it, and re-run the fork build afterwards.
 
 on:
   workflow_dispatch:
@@ -29,7 +35,7 @@ on:
         required: true
         type: string
       publish:
-        description: 'Upload to the GitHub release (otherwise only build artifacts)'
+        description: 'Upload to the v<version>-upstream comparison tag (otherwise only build artifacts)'
         required: false
         default: true
         type: boolean
@@ -102,7 +108,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish to the release
+    name: Publish to a comparison tag
     needs: pack
     if: ${{ github.event_name == 'repository_dispatch' || inputs.publish }}
     runs-on: ubuntu-latest
@@ -129,83 +135,36 @@ jobs:
         env:
           # `gh` reads this; `contents: write` is what makes the upload legal.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # One `create` (tolerating "already exists", which is the normal case when this runs a
-        # second time for a re-pack) and one `upload --clobber` for all eight files, so the
-        # release either has every platform or fails loudly here with nothing half-published.
+        # **The tag carries `-upstream` on purpose.** The node release is `v<version>`, and its
+        # assets are the fork build; uploading an upstream tree into that tag with `--clobber`
+        # would replace the backup with a runtime no node should run, under the same name and
+        # version. A separate tag keeps both, and makes "which one is this" answerable from the
+        # URL alone.
         run: |
           set -eu
           version="${{ steps.wanted.outputs.version }}"
-          tag="v${version}"
+          tag="v${version}-upstream"
           ls -l dist
           gh release create "$tag" \
-            --title "DSH ${version} node runtime" \
-            --notes "Node runtime for DSH ${version}, one archive per platform. A node downloads
-          this instead of resolving the release itself; \`~/.dsh-fleet/runtime\` becomes exactly
-          the unpacked tree. Verified by sha256 next to each archive." \
+            --title "DSH ${version} upstream runtime (comparison)" \
+            --notes "The **upstream** tree for DSH ${version}, one archive per platform. This is
+          not what a node runs: nodes download the fork build published at \`v${version}\`
+          (\`build-fork-runtime.mjs\`), which drops the browser surface, the Office engine and the
+          experimental bundles. Kept for comparison and for \`verify-packed-install\`.
+          Verified by sha256 next to each archive." \
             || echo "release ${tag} already exists; uploading into it"
           gh release upload "$tag" dist/dsh-*.tar.gz dist/dsh-*.tar.gz.sha256 --clobber
 
-  # The primary source, and the reason it is a separate job: the matrix legs produce
-  # archives, and only a successful pack of one platform should be published to CNB. CNB
-  # serves the archive straight (measured 4.3 MB/s on the reference node, spread under 1%)
-  # where an accelerator varies by a factor of 40 between runs.
-  #
-  # `CNB_TOKEN` is a repository secret and never appears in a log. Without it this job is
-  # skipped, and GitHub remains the only destination — which is exactly the pre-CNB state,
-  # so a fork that has no token still publishes.
-  cnb:
-    name: Publish to CNB
-    needs: pack
-    if: ${{ needs.pack.result != 'failure' && (github.event_name == 'repository_dispatch' || inputs.publish) }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  # There used to be a `cnb` job here that uploaded these archives to the CNB release. It is
+  # **removed**, not disabled: CNB is the one place a node downloads from, and the path is
+  # `v<version>/dsh-<version>-<platform>.tar.gz` — the same path the fork build publishes to.
+  # An upstream tree landing there would replace what every node downloads with a 165 MiB tree
+  # that has none of the trimming, and nothing in the download would notice: same name, same
+  # version, valid checksum, different runtime. `build-fork-runtime.mjs --cnb` is the only
+  # thing that may write to that path.
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Resolve the version
-        id: wanted
-        shell: bash
-        run: |
-          set -eu
-          version="${{ github.event.inputs.version || github.event.client_payload.version }}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Collect every platform's archive
-        uses: actions/download-artifact@v4
-        with:
-          pattern: runtime-*
-          path: dist
-          merge-multiple: true
-
-      - name: Upload each archive
-        shell: bash
-        env:
-          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
-        # `publish-runtime.mjs --cnb` repacks before uploading, which would need a registry
-        # and several minutes per platform. `--cnb-only` takes the archives that were already
-        # built on the matching runners and only does the upload half.
-        run: |
-          set -eu
-          if [ -z "${CNB_TOKEN}" ]; then
-            echo "::notice::CNB_TOKEN is not configured; CNB is skipped and GitHub is the only destination"
-            exit 0
-          fi
-          version="${{ steps.wanted.outputs.version }}"
-          for archive in dist/dsh-*.tar.gz; do
-            platform="$(basename "$archive" .tar.gz)"
-            platform="${platform#dsh-${version}-}"
-            node packages/dsh-fleet/scripts/publish-runtime.mjs \
-              --version "$version" \
-              --platform "$platform" \
-              --out dist \
-              --cnb-only
-          done
-
-  # One summary job, so a person reading the run knows whether nodes can take the fast path
-  # for this release without opening four logs.
+  # One summary job, so a person reading the run knows what this produced without opening four
+  # logs — and so the note that this is not the node route is impossible to miss.
   summary:
     needs: pack
     if: always()
@@ -217,6 +176,7 @@ jobs:
           set -eu
           result="${{ needs.pack.result }}"
           echo "pack: $result"
+          echo "::notice::these are upstream trees, for comparison and for verify-packed-install; nodes run the fork build (build-fork-runtime.mjs)"
           if [ "$result" != "success" ]; then
-            echo "::warning::some platforms did not pack — those nodes will resolve the release themselves, which is slower but works"
+            echo "::warning::some platforms did not pack — that says nothing about what nodes can install, because nodes do not take this route"
           fi

@@ -6,13 +6,18 @@ name: CI
 # `composition` read `app.asar` through Electron's patched `fs`, and the contract and e2e
 # layers need a running Host and an SSH-reachable node. What runs here needs neither.
 #
-# `ssh2` is the one real dependency (only `src/ssh/connection.js` imports it). Seven of the
-# eight suites below reach it not at all; `version-unit` does, through
-# `remote/daemon.js` → `ssh/connection.js` — measured by running all eight in a copy of the
+# `ssh2` is the one real dependency (only `src/ssh/connection.js` imports it). Most of the
+# suites below reach it not at all; `version-unit` does, through
+# `remote/daemon.js` → `ssh/connection.js` — measured by running them all in a copy of the
 # package with no `node_modules`: only `version-unit` failed, with ERR_MODULE_NOT_FOUND for
 # `ssh2`. So dependencies are installed, but with `--ignore-scripts`: ssh2's optional native
 # helper (`cpu-features`) then never builds, and a suite that starts needing a build shows up
 # as a failure rather than being hidden by a working install.
+#
+# `fork-runtime-unit` reads the two build scripts as text and checks the trim rules, so it
+# needs neither a fork checkout nor a built archive — it runs here for the same reason the
+# others do: the rules it pins down (keep the `dsh-web-app` manifest, stage by `overrides`)
+# are the ones whose absence produces a runtime that installs fine and cannot boot.
 
 on:
   push:
@@ -47,6 +52,7 @@ jobs:
           node test/multipart-unit.mjs
           node test/waterfall-unit.mjs
           node test/version-unit.mjs
+          node test/fork-runtime-unit.mjs
           node test/picker-paths-unit.mjs
           node test/install-unit.mjs
           node test/fleet-control-unit.mjs

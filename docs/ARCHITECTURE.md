@@ -384,7 +384,7 @@ ssh2 发一次 exec 请求时**不切包**：`Protocol.js:1273` 的 `alloc(1 + 4
 
 ---
 
-## 六之二、节点侧：源码级定制节点组合
+## 六之二、节点侧：源码级定制组合 + 自建运行时
 
 ### 问题
 
@@ -393,19 +393,17 @@ ssh2 发一次 exec 请求时**不切包**：`Protocol.js:1273` 的 `alloc(1 + 4
 1. **它装的是 web-app 组合**，等于在服务器上加载一整套浏览器插件 —— 56 个 `dsh-client-ui-*` 包、SPA dist 服务、HMR 链、桌面 telemetry。没有窗口的机器上，这些要么空转，要么在缺 dist 时直接报错。
 2. **它没有 provider 路由、没有 API key**，所以能启动、能答 `session/list`，然后**第一句话就失败**。从桌面端看，这和"路由坏了"长得一模一样。
 
-### 决定：定制**组合**，不 fork **包**
+### 决定：定制**组合** + 自建**运行时**
 
-这是本节的核心取舍，也是本轮否掉前一个方案的原因。
+节点侧的定制分两层，一层决定**加载哪些行**，一层决定**那些行的代码从哪来**。
+
+**层一：组合层，不 fork 包。** 这是本节最初的取舍，仍然成立：
 
 上游发布的 6 个 bundle 是：`base`（核心，无 Host）、`web-app`（核心 + 浏览器面）、`headless`（一次性任务，无 Host/HTTP）、`acp-app`、`sdk-app`、`sdk-minimal`。**没有一个是大脑**：唯一带 Host + HTTP + Remote API 的是 `web-app`，而它同时带着整个浏览器面。
 
-两条路：
-
-| | fork `@deepseek-ai/dsh-*` 源码删 UI | **定制组合层（采用）** |
+| | 直接改官方包的源码 | **定制组合层（采用）** |
 |---|---|---|
-| 节点上装什么 | 自己发布的 fork 包 | 官方包 + 一个本地 bundle |
-| 上游升级 | 每次手工 merge，冲突要人判 | `npm i` 换版本即可 |
-| 版本对齐 | 节点与本机版本从此可能不一致 | 天然一致（同版本官方包） |
+| 节点上装什么 | 自己改过的 `@deepseek-ai/dsh-*` | 官方包 + 一个本地 bundle |
 | 删 UI 的彻底程度 | 物理删除 | 组合层不含该行 → **根本不加载** |
 | 出问题的样子 | 编译错或运行期缺符号 | 组合缺行 → 启动时明确报 "entry did not activate" |
 
@@ -419,6 +417,17 @@ ssh2 发一次 exec 请求时**不切包**：`Protocol.js:1273` 的 `alloc(1 + 4
 ```
 
 `dsh-web-app` 这一层根本不出现在组合里，不是"加载后再 disable"。
+
+**层二：运行时自建，从 fork 编译。** 组合层能决定加载哪些行，决定不了那些行**里面的代码**，也决定不了磁盘上有哪些包。所以节点跑的那棵树由本项目自己构建（详见 [`adr-0007-fork-node-runtime.zh.md`](adr-0007-fork-node-runtime.zh.md)）：
+
+| | 上游发布版（ADR-0006） | **自建运行时（采用）** |
+|---|---|---|
+| 节点跑什么 | `npm install` 出来的官方树 | 本项目从 fork 编译的树 |
+| 树里有什么 | 上游装出来的一切（含 62 个浏览器包、339.5 MiB Office 引擎） | 只留大脑需要的（实测 2014.6 → 408.6 MiB） |
+| 拿不到制品 | 落 npm，慢一点但能连 | **报错**，逐条列出试过的 URL |
+| 上游发新版之后 | 节点自己就跟上了 | **本项目要重新编译并发版** |
+
+这两层不重叠：组合层是"要哪些行"，运行时是"那些行从哪来"。**后者的代价写在明面上** —— 跟着上游从自动变成手动，这是为了换来对节点运行时的完全控制。
 
 ### 怎么减：从**已安装的 release** 派生，不是从 master
 
@@ -600,138 +609,113 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 stamp 不符或缺席就**重装**。改 `STRIPPED`、改归档布局、或改由谁来解析（见下节），都必须同时
 bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在下节展开。
 
-### 运行时从哪来：两条路，制品优先
+### 运行时从哪来：一条路，本项目自建的制品
 
-节点拿到运行时只有两种方式，`RUNTIME_ROUTES` 决定顺序，默认 `['artefact', 'npm']`：
+节点拿到运行时**只有一条路**：下载本项目自己构建的制品。制品由
+`scripts/build-fork-runtime.mjs` 从本仓库对上游源码的 fork 编译、裁剪、打包，再由
+`scripts/publish-runtime.mjs` 发到 CNB 与 GitHub Release。节点下它，解到 `~/.dsh-fleet/runtime`。
 
-1. **制品**：桌面（或 CI）用 `scripts/publish-runtime.mjs` 把某个版本按平台打成
-   `dsh-<version>-<platform>.tar.gz` + `.sha256` 发到 GitHub Release，节点下载它。
-2. **节点自建**：制品拿不到时，节点上跑
-   `npm install --os/--cpu/--libc "@deepseek-ai/dsh@<精确版本>"`，自己解析出同一版。
+**为什么从「上游发布版 + 两条路」改成「自建 + 一条路」。** ADR-0006 的两条路线解决的是**等待**：
+上游发版之后没人打制品，节点就卡住。它没有解决**控制**：节点上跑的那棵树内容由上游决定，
+本项目一个字节都改不了 —— 于是"节点不要浏览器面那 62 个包""节点不要 339.5 MiB 的 Office 引擎"
+这些主张只能停留在组合层，磁盘上的包一个不少。完整理由与代价见
+[`adr-0007-fork-node-runtime.zh.md`](adr-0007-fork-node-runtime.zh.md)。
 
-**为什么必须有第二条。** 上游 DSH 一旦发新版，只有「维护者先构建并上传 165 MiB」这一条路时，
-所有人都卡在制品的发布者手上 —— 一份本可以在节点上完成的工作变成了别人的等待。上游的每一个
-发行版本来就在 npm 上（`@deepseek-ai/dsh` 已发 46 个版本，`0.2.2-rc.5` 在 `next` 标签上，
-91 个依赖里 83 个是精确锁定），所以「节点自己解析」不是新能力，是把已有的能力接上。
+| | ADR-0006（上游发布版，两条路） | 现在（自建，一条路） |
+|---|---|---|
+| 节点跑什么 | `npm install` 出来的官方树 | 本项目从 fork 编译的树 |
+| 树大小（解包） | 957.3 MiB / 496 包 | **408.6 MiB**（裁剪 + 去残留） |
+| 归档 | 165 MiB | **87.7 MiB** / 41 849 文件 |
+| 下载 | 加速站 0.2–9.6 MB/s | **CNB 约 20 s**（实测 91 983 493 字节 17.6 s） |
+| 拿不到制品 | 落 npm，慢一点但能连 | **报错**，逐条列出试过的 URL |
+| 上游发新版之后 | 节点自己就跟上 | **本项目要重新编译并发版** |
 
 **判据只有一条：拿不到 ≠ 拿到的是坏的。**
 
 | 情形 | 现在 | 为什么 |
 |---|---|---|
-| 加速站全挂 / 没有 `curl`、`wget` / `mirrors: []` / 平台打不出标签 | 落 npm | 这是「上游刚发版、制品还没打」的常态，不该是死路 |
-| 校验和不符、解包失败、归档里没有 `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 4/5） | 回滚 + **抛错** | 字节到了但是错的。从 registry 再解析同一份坏版本只会更慢、下载更多，还把「哪一个源坏了」彻底掩盖 |
+| CNB 拿不到 / 没有 `curl`、`wget` / 平台打不出标签 / 没配源 | 报错，列出试过的 URL | 没有第二条路可落。这是 fork 路线的代价，写在明面上 |
+| 校验和不符、解包失败、归档里没有 `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 4/5） | 回滚 + **抛错** | 字节到了但是错的。重试同一个坏源只会更慢、还把「哪个源坏了」掩盖 |
 
-节点头上有两条路线也可以单独强制（`runtime: auto|artefact|npm`）：排查时能让失败可归因，
-而不是在一句复合错误里猜是哪条路出的问题。两条都不通时才报错，且**同时点名两条**缺什么
-（"neither curl nor wget" + "no npm on PATH"）—— "装 curl" 和 "装 npm" 是两个不同的动作。
-
-实测代价对比（参考节点，Linux x86_64 / glibc 2.35 / Node v22.20.0，registry 指向 `npmmirror`）：
-
-| 路线 | 耗时 | 树大小 | 额外依赖 |
-|---|---|---|---|
-| 制品 | 一次 165 MiB 下载，加速站 4.97 MiB/s 约 34 s | 680.2 MiB / 51 520 文件（打包时裁过） | 加速站可达 |
-| 节点自建 | `npm install` 26–33 s / 673 包；第二次同版本 1 s | 958 MiB / 93 983 文件（未裁） | registry 可达；首次 275.7 MiB npm 缓存 |
-
-两条树的 277 MiB / +40.8% 差在打包脚本的 `STRIPPED`：`.map`（9 933 个）、`.d.ts`（16 144 个）、
-`.md`、per-package 的 test 目录都不进制品，而 npm 装出来的是完整包。这只影响节点的磁盘占用，
-不影响能不能跑；真要省，制品路线就是省的那条。
+**为什么连 npm 兜底也删了，而不是留着当保险。** 那条兜底装的是**上游发布版**，而且写的是
+同一枚 `{"build":4,"via":"npm"}` 的戳。于是一个走了兜底的节点会被判成「可用」，此后再也不会被
+换回 fork 树 —— 一次网络抖动就把节点永久钉在上游版本上，而界面显示「已就绪」。留着它比删掉它
+更危险，所以 `RUNTIME_ROUTES` 这个常量也一起没了：只有一条路时，「路线」不是一个概念。
 
 **制品必须按平台分。** DSH 不是纯 JS：`node-pty`、`sharp`、`sherpa-onnx`、`koffi` 带原生二进制，
 安装树里就写着平台（`sherpa-onnx-win-x64`、`@img/sharp-linux-x64`、`@koromix/koffi-linux-x64`）。
 把 Windows 的树解到 Linux 节点上，节点能起来，但终端和图片工具会在第一次使用时炸 ——
-比它替代的慢安装更糟，因为失败得更晚、离原因更远。所以两条路都用 npm 的
-`--os/--cpu/--libc` **为目标平台解析**：打包脚本按 `--platform` 的目标值给，节点侧按自己的
-`uname` + libc 探测（`ldd --version` 与 `/lib/ld-musl-*` 两条路，任一命中即 musl）给。
+比它替代的慢安装更糟，因为失败得更晚、离原因更远。所以构建脚本用 npm 的
+`--os/--cpu/--libc` **为目标平台解析**，按 `--platform` 的目标值给（`linux-x64`、
+`win32-x64`、`linux-x64-musl` 等）。
 
-**装完要留痕，否则每次连接都重装。** 两条路都写 `BUILD_STAMP`
-（`.fleet-artefact.json`），内容是 `stampJson()` 的 `{"build":N,"via":"artefact"|"npm"}`。
-`via` 只上报、不参与判定（自己构建的树和下载的树一样能用），`build` 参与判定：
-`inspectRuntime` 要求它等于 `RUNTIME_BUILD`。没有这一枚戳，`inspectRuntime` 会把树读成
-「早于构建戳」→ `decideGate` 返回 `node-runtime-repack` → **每次连接重装一次**：
-一分钟的安装变成一分钟的连接。实测过这条链（`daemon.js` 的 npm 分支当时不写戳）。
+**装完要留痕，否则每次连接都重装。** 安装写 `BUILD_STAMP`（`.fleet-artefact.json`），
+内容是 `stampJson()` 的 `{"build":N,"via":"artefact"}`。`via` 只上报、不参与判定，
+`build` 参与判定：`inspectRuntime` 要求它等于 `RUNTIME_BUILD`。没有这一枚戳，`inspectRuntime`
+会把树读成「早于构建戳」→ `decideGate` 返回 `node-runtime-repack` → **每次连接重装一次**。
 `parseStamp` 仍认旧格式的裸整数（现场节点的 `2`），格式升级不能把在用节点判成不可用。
 
-`RUNTIME_BUILD` 是 3：打包改用 `--ignore-scripts`。install 脚本按**打包机**的
-`process.platform` 跑，于是 koffi 的 `cnoke` 在 Windows 上编出 `koffi/build/win32_x64`，
-被打进一个 `linux-x64` 制品 —— 实测那份 rc.5 归档里有 48 个 `.exe`/`.cmd`/`.dll`/`.lib`
-和 147 条 `koffi/build` 条目。跳过脚本不丢东西：树里每个原生依赖都自带预编译平台包
-（实测带脚本 968.2 MiB / 94106 文件，不带 957.3 MiB，四个原生模块都在）。
+**`RUNTIME_BUILD` 现在是 4。** 3 → 4 是 fork：树的内容变了（少了 500 MiB 包、多了 fork 的字节），
+版本号表达不了这件事，只有戳能。**改 `ARTEFACT_RESIDUE`、改裁剪规则、改归档布局、改由谁来解析，
+都必须同时 bump**，否则老节点读到的戳是「当前」，它会一直跑旧字节 —— 实测过这条链：`doc/` 被
+当文档删掉，`yaml/dist/doc/directives.js` 跟着没了，节点启动即 `MODULE_NOT_FOUND`，而闸门说
+「已就绪」。
 
 **可执行位是 `tar` 传不了的那一件事。** 实测 bsdtar 在 Windows 上给每个条目写
 `-rw-rw-rw-`（51500 个文件全是，仅 20 个带 `+x` 且全是 `.exe`/`.cmd`），`chmodSync` 在
 Windows 是空操作，`--owner/--group` 改了也没用。所以 `installScript` 解包后自己补
-`chmod 0755 node-pty/prebuilds/*/spawn-helper` —— 少了这一步，Darwin 节点的终端在第一次
-打开时才失败，而错误信息一个字都不会提到这个文件。
+`chmod 0755 node-pty/prebuilds/*/spawn-helper`，构建脚本打包前也补 `spawn-helper` 与 `*.node`
+的 0755 —— 少了这一步，Darwin 节点的终端在第一次打开时才失败，而错误信息一个字都不会提到
+这个文件。
 
 **节点侧不硬拦 `engines`。** 上游 `0.2.2` 的四个 rc 全部声明 `engines.node: ">=24.9.0"`，
-而现场节点是 Node v22.20.0、一直在跑 rc.3。制品路线从不读这个字段，所以这条闸门不能因为
-安装方式换成 npm 就突然变成硬停：`npmInstallScript` 用 `--engine-strict=false`，装完比对一次，
-不符就回 `engineWarning` 让界面如实显示。抱怨 · 可运行 · 不静默，是这里的三条。
+而现场节点是 Node v22.20.0、一直在跑 rc.3。制品路线从不读这个字段（它解包一棵树），
+所以 `MINIMUM_NODE_MAJOR` 保持 22：**2026-11-19 已核实，依据见 ADR-0006 §四-2**。
 
 安装脚本的其余硬约束（`src/remote/artefact.js`）：`set -eu`；`~/…` 要换成 `$HOME` 才能带引号
 （否则会真的建一个叫 `~` 的目录）；下载器 `curl`/`wget` 二选一；校验和在下载时失败而不是首次
 使用时失败；解压到 `runtime.incoming` 后整体 rename，失败回滚到 `runtime.previous`。
 
-**发到哪：CNB 主源，GitHub 加速站灾备。** 加速站只能**前缀**一个 GitHub URL，表达不了 CNB 的
-路径形状（`https://cnb.cool/<org>/<repo>/-/releases/download/<tag>/<file>`），所以 `artefactUrls()`
-的参数从「前缀数组」变成「源对象数组」：`{kind:'template', template}` 填
-`{version}/{platform}/{tag}/{file}`，`{kind:'prefix', prefix}` 仍做拼接。`DEFAULT_SOURCES`
-是 CNB 在前、四个加速站在后；`mirrors: string[]` 保留（只换加速站），`mirrors: []` 仍是
-「关掉制品路线」的写法。
+**发到哪：CNB 是唯一的下载源。** 加速站只能**前缀**一个 GitHub URL，表达不了 CNB 的路径形状
+（`https://cnb.cool/<org>/<repo>/-/releases/download/<tag>/<file>`），所以 `artefactUrls()` 的
+参数是「源对象数组」：`{kind:'template', template}` 填 `{version}/{platform}/{tag}/{file}`，
+`{kind:'prefix', prefix}` 仍做拼接。`DEFAULT_SOURCES` **只有一条**：CNB。四个加速站前缀退成
+`RETIRED_MIRRORS`（只作记录，不是候选），`mirrors` 配置项删除 —— 没有第二个源时，「换加速站」
+这个旋钮是空的。`{kind:'prefix'}` 这种源仍然支持，所以接一个私有镜像是一个配置值，不是一次改代码。
 
-**抖动才是问题，不是平均速度。** 参考节点拉整档 170 092 405 字节：CNB 4 311 729 B/s，
-重复测量抖动 <1%；同一时段 `gh.inkchills.cn` 178 047 B/s，四个加速站的历史区间是
-0.2–9.6 MB/s —— **40 倍**。同样的节点、同样的归档，有时 34 s 有时一小时，读起来就是「连接卡住了」。
+**为什么不是「CNB 在前、加速站在后」。** 因为加速站每一个都实测过抖动：同一个归档、同一台节点，
+0.2–9.6 MB/s，**40 倍**。一张列表里排着已知会抖的条目，只会把「一个失败」变成「一串慢失败」。
+而用户的现场条件更直接：**国内节点连不上 GitHub**，加速站是给 GitHub 加速的，所以它们连理论上的
+用途都不成立。GitHub Release 仍会收到同一份字节（`--publish`，灾备与留档），但**节点不从那里取**。
+
+| 源 | 完整 91 983 493 字节耗时 | 吞吐 | 抖动 | 现在 |
+|---|---|---|---|---|
+| CNB（公开仓库，匿名 302 → `asset.cnb.cool`，Range/206） | 17.6 s | ~5 MB/s | <1% | **唯一的源** |
+| `git.yylx.win` / `gh.inkchills.cn` / `tvv.tw` / `ghfast.top` | — | 0.2–9.6 MB/s | 40 倍 | 已退役 |
+| 直连 GitHub（**从来不是候选**） | 1.8 小时（165 MiB 时实测） | ~27 KB/s | — | 不适用 |
+
+`github.akams.cn` 是这些替代站的**汇总目录，不是代理**：`https://github.akams.cn/https://github.com/…`
+回 404。留在这里是因为接私有镜像时仍要从那里找域名。
+`artefactUrls()` 因此接受 `sources`，为空时抛 `no artefact source configured`。
+`version-unit` 断言了「只有一条候选」「它就是 CNB 且形状正确」「**没有任何一条以
+`https://github.com/` 开头**」「空项不算候选」「空列表报命名错误」，并用桩连接跑
+`RemoteHost.install` 证明拿不到制品**报错而不是落 npm**。
 
 发布侧有四个实测撞过的坑，全在 `scripts/publish-runtime.mjs --cnb` 里：
 `target_commitish` 必填且必须解析成提交对象（空仓库要先 push 一次 `main`）；重复建同名
 release 返回 **409** 且响应体没有 id（要按 tag 再查）；**`PUT` 到预签名地址返回 200 不等于
 附件已关联**，必须再 `POST` 一次返回里的 `verify_url`，否则 assets 一直为空、匿名下载 404；
-`ttl` 最大 180 天、`0` 是永久。`version-unit` 断言了「第一条是 CNB 且形状
-正确」「其余是加速站前缀」「没有任何一条以 `https://github.com/` 开头」「模板占位符全部代入」
-「未知 kind 报错而不是被跳过」。
+`ttl` 最大 180 天、`0` 是永久。发布脚本最后会回读 CNB 自己算的 `hash_value` 与本地 sha256 比对，
+不一致就报错 —— 「传上去了」和「传对了」是两件事。
 
-**加速站必须是列表，不能是一个；而且不许回退直连。** 候选 URL 只有一条路：源列表里的条目
-依次试。原来只有一个默认加速站 `git.yylx.win`，它一旦挂掉（实测：节点上 443 端口直接
-connection refused），每次安装都静默落到直连 —— 直连实测 ~27 KB/s，172 683 323 字节要 **1.8 小时**，
-对用户就是「连节点卡住了」。
-
-**所以「直连 GitHub」从候选里删掉了，不是压到最后。** 这条是用户明确要求、也有实测支撑的取舍：
-能在加速站层面失败的机器，恰恰也是直连又慢又被挡的机器，直连是**唯一必然更糟**的兜底 —— 它把
-「加速站挂了」这个可判断的故障，变成 1.8 小时的静默等待。现在所有源都失败时**由 npm 路线接手**
-（见上表），而不是直连，也不是报死。`artefact: only` 时才抛错，逐条列出试过的 URL + 节点原文，
-由人换一个可用源。
-
-顺序只在「所有站都活着」时有意义：连不上的站一次 connection refused 是毫秒级代价，所以项目
-既定的首选加速站 `git.yylx.win`（AGENTS.md §13）仍然排在**加速站里的第一位** —— 它今天在测试
-节点上 443 拒绝连接，但恢复后就是最快的加速路径。以下是这张**实测过的**列表（从测试节点拉
-完整归档，不是 HEAD）：
-
-| 源 | 完整 170 092 405 字节耗时 | 吞吐 | 抖动 |
-|---|---|---|---|
-| CNB（`cnb.cool`，公开仓库，匿名 302 → `asset.cnb.cool`，Range/206） | ~40 s | 4 311 729 B/s | <1% |
-| `git.yylx.win`（加速站首选） | 今天 connection refused | — | — |
-| `gh.inkchills.cn` | 70.8 s | 178 047 B/s – 2.4 MB/s | 大 |
-| `tvv.tw` | — | ~2.3 MB/s | 大 |
-| `ghfast.top` | — | ~0.7 MB/s | 大 |
-| 直连 GitHub（**已不是候选**） | 1.8 小时 | ~27 KB/s | — |
-
-`github.akams.cn` 是这些替代站的**汇总目录，不是代理**：`https://github.akams.cn/https://github.com/…`
-回 404，可用的是它目录里的那些域名（换站去那里找）。
-`artefactUrls()` 因此接受 `sources` 与 `mirrors`，两者都为空时抛 `no artefact source configured` ——
-`install()` 捕获它并当成「制品路线关掉了」落到 npm。
-`version-unit` 断言了「每个源各一条」「顺序不变」「**没有任何一条以 `https://github.com/` 开头**」
-「空项不算候选」「重复项去重」「空列表报命名错误」，并用桩连接跑 `RemoteHost.install` 证明
-下载失败会落到 npm、而坏制品不会。
-
-**制品的构建搬到了 CI**（`.github/workflows/release-runtime.yml`）：四平台各自在本平台 runner 上
-打包（`--platform` 认 libc 后缀，`linux-x64-musl`），打包与上传分成两个作业 —— 四条腿同时
-`gh release create` 会互抢，且抢输看起来像打包 bug。上游发版后点一次或让 webhook 触发
-`repository_dispatch`，维护者的机器不再在关键路径上。真要没跑，节点自己解析也能升。
+**制品的构建搬到了 CI**（`.github/workflows/release-runtime.yml`）：各平台在本平台 runner 上
+打包（`--platform` 认 libc 后缀，`linux-x64-musl`），打包与上传分成两个作业 —— 多条腿同时
+`gh release create` 会互抢，且抢输看起来像打包 bug。**注意：CI 打包的是上游发布版，不是 fork**；
+fork 路线的构建要在有 fork checkout 的机器上跑 `build-fork-runtime.mjs`（见 ADR-0007）。
 
 **下载要有下限，也要有上限。** 旧脚本对 curl 只有 `--connect-timeout 15 --retry 2` —— 那只管
 **建连**，不管**传输**。现在的判据是 `--speed-limit 4096 --speed-time 60`（低于 4 KB/s 持续 60 秒
-就放弃这一路，换下一个候选；全挂就按 `ARTEFACT_UNAVAILABLE` 返回，由 npm 路线接手）
+就放弃这一路；全部候选挂掉就按 `ARTEFACT_UNAVAILABLE` 返回，由调用方报错）
 加 `--max-time 1800`（慢但能用的线路仍有 ~100 KB/s 的完整预算）。两个数都是常量
 （`FETCH_FLOOR_BYTES` / `FETCH_FLOOR_SECONDS` / `FETCH_CEILING_SECONDS`），`version-unit` 有断言守着。
 
@@ -1029,8 +1013,13 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
 - **不接管 `/api` 或 `/api/remote.mux`**：它们已被 gateway 独占，**本机**的 `registerFallback` 也已被 `frontend-static` 占走（节点上则相反：大脑没有 static，那个座位空着，由 `brain-runtime` 认领）。
 - **不做本地镜像目录**：工作区路径就是节点上的真实路径。这正是工具能用的原因 —— 见下一节。
 - **不碰上游 Loader 行**：插件自己的 `cordis.patch.yml` 只有一条 `insert`。
-- **不 fork 任何上游包**。节点侧改的是**组合层**，官方包一个字节没动。
-- **不做 per-node 组合定制**：所有节点共用同一份 `@local/dsh-fleet-brain`。某台机器要不同插件集时再讨论，不预留空壳配置。
+- **不改上游语义**。节点运行时来自本项目的 fork，但 fork 上的源码改动**只有构建侧修复**
+  （第一处：`verify-packed-install.ts` 在 Windows 上不能用 `npm.cmd` 起子进程）。裁剪是
+  **打包步骤**，不是改源码；任何要改运行时行为的改动，先在 fork 上单独一个提交、写清理由与
+  验证方式。见 [`adr-0007`](adr-0007-fork-node-runtime.zh.md) §五。
+- **不发 npm**。节点不经过 registry：拿的是归档。往 npm 发 375 个包只会多一条版本线。
+- **不给 GitHub 留下载源**。GitHub Release 收到同一份字节作灾备与留档，但节点只从 CNB 取。
+- **不做 per-node 组合定制**：所有节点共用同一份 `@local/dsh-fleet-brain`，也共用同一份构建产物。某台机器要不同插件集时再讨论，不预留空壳配置。
 
 ---
 

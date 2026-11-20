@@ -36,45 +36,43 @@ ELECTRON_RUN_AS_NODE=1 "DeepSeek Harness.exe" test/dispatch-seam.mjs
 ## 二、自己构建节点运行时
 
 节点上的 DSH 是一份**独立安装**，版本必须与桌面端**完全相等**。正常路径是插件自己搞定：
-先下 Release 制品，拿不到就让节点 `npm install` 同版本（见
-[`docs/adr-0006`](docs/adr-0006-node-runtime-supply.zh.md)）。你想自己控制这一步也可以。
+从 CNB 下载本项目发布的归档（见 [`docs/adr-0007`](docs/adr-0007-fork-node-runtime.zh.md)）。
+**没有 `npm install` 兜底这条路了** —— 它装的是上游树却写本项目构建戳，一次网络抖动就会把节点
+永久钉在上游版本上。想在节点上手工装一棵树来排查，也请让它与归档同源，别用 registry。
 
-**在节点上直接装**（这就是兜底路线的配方）：
-
-```bash
-mkdir -p ~/.dsh-fleet/runtime && cd ~/.dsh-fleet/runtime
-npm install --no-audit --no-fund --engine-strict=false \
-  --os=linux --cpu=x64 --libc=glibc \
-  '@deepseek-ai/dsh@<与桌面端完全一致的版本>'
-node node_modules/@deepseek-ai/dsh/lib/bin.js --version
-```
-
-三个参数都不是可选的：
-
-- `--os/--cpu/--libc` 决定 npm 解析哪一套原生包（`@img/sharp-linux-x64`、
-  `sherpa-onnx-linux-x64`、`@koromix/koffi-linux-x64`）。省略就按**运行 npm 的那台机器**解析。
-- `--engine-strict=false`：上游 0.2.2 全四个 rc 都声明 `engines.node: ">=24.9.0"`，而本项目的
-  节点下限是 Node 22；低于它仍然装得上、跑得起来，只是应当知道。
-- 装完要写版本戳 `~/.dsh-fleet/runtime/.fleet-artefact.json`，内容
-  `{"build":3,"via":"npm"}`。**少了它，插件每次连接都会重装一次**
-  （`inspectRuntime` 把无戳的树读成「早于构建戳」）。
-
-**打一个分平台的制品**（发到 Release，任何节点都能下载）：
+**从 fork 编译、裁剪、打包**（这就是发布路线）：
 
 ```bash
-node packages/dsh-fleet/scripts/publish-runtime.mjs \
-  --version 0.2.2-rc.5 --platform linux-x64 --out dist
+# 全流程：编译 fork → 打包 → 按目标平台解析 → 裁剪 → 归档
+node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64
+
+# 只改裁剪规则时复用已解包的树（几十秒而不是十几分钟）
+node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --reuse
+
+# 上传（GitHub Release 作灾备，CNB 是节点唯一的下载源）
+CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --publish --cnb
 ```
 
 `--platform` 认 `linux-x64`、`linux-arm64`、`linux-musl-arm64`、`darwin-arm64`、`win32-x64`。
-加 `--publish` 才会上传（需要 `gh` 已登录）。CI 用
-[`.github/workflows/release-runtime.yml`](.github/workflows/release-runtime.yml) 做同一件事，
-四个平台各自在本平台 runner 上打包。
+fork 位置由 `DSH_FORK_DIR` 决定，默认 `D:\ProjectHub\dsh-fork\deepseek-harness`，钉在与桌面端
+相同的 release tag 上。
 
-打包脚本有三个不显眼但必要的行为，改它之前先读代码里的注释：
-`--ignore-scripts`（否则打包机的原生构建产物会被塞进别的平台的归档）、
-`STRIPPED`（删错了会 `MODULE_NOT_FOUND`，`docs/` 形状的目录里也可能是代码）、
-以及 `RUNTIME_BUILD`（改了打包规则必须 bump）。
+底层还有两个脚本，改它们之前先读代码里的注释：
+
+- `trim-fork-runtime.mjs`：`DROP_RULES`（每条带理由）与 `ARTEFACT_RESIDUE`（**唯一一份**
+  残留清单，`publish-runtime.mjs` 也从这里 import）。两条载重规则：`@deepseek-ai/dsh-web-app`
+  的 **manifest 必须留着**（否则大脑保留的 15 行全部 `MODULE_NOT_FOUND`）；staging 清单只把
+  `@deepseek-ai/dsh` 列为依赖、其余 fork 产物全进 `overrides`（否则装上「发布出来的一切」，
+  实测 1789.2 MiB vs 957.3 MiB）。
+- `publish-runtime.mjs`：唯一的发布脚本，CNB 的四个坑都在它里面（`target_commitish` 必填、
+  409 要按 tag 再查、`PUT` 后必须再 `POST` 一次 `verify_url`、`ttl=0` 才是永久）。
+
+**`RUNTIME_BUILD` 必须在制品内容变化时 +1**：改裁剪规则、改 `ARTEFACT_RESIDUE`、改归档布局，
+任一都要。否则老节点读到的戳是「当前」，它会一直跑旧字节 —— 实测过：`doc/` 被当文档删掉，
+`yaml/dist/doc/directives.js` 跟着没了，节点启动即 `MODULE_NOT_FOUND`，而闸门说「已就绪」。
+
+CI 的 [`.github/workflows/release-runtime.yml`](.github/workflows/release-runtime.yml) 打的是
+**上游发布版**，不是 fork；fork 路线要在有 fork checkout 的机器上跑 `build-fork-runtime.mjs`。
 
 ## 三、改代码时的几条线
 

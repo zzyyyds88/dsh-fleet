@@ -155,16 +155,13 @@ dsh plugin --profile desktop add -w <仓库绝对路径>/packages/dsh-fleet   # 
 
 ![远程节点设置页：本机是 conductor，下面是已连接的节点与其工作区数量](docs/screenshots/nodes.jpg)
 
-节点要求 Node ≥ 22，以及 `curl`（或 `wget`）与 `npm` 至少有一个，其余都由插件准备。
+节点要求 Node ≥ 22，以及 `curl`（或 `wget`），其余都由插件准备。
 
-节点的 DSH 有两条来路，按顺序试：
+节点的 DSH 只有一条来路：**下载本项目自己构建的归档**（`dsh-<version>-<platform>.tar.gz`，约 87.7 MiB / 41 849 文件），只有 CNB 一个源（实测 91 983 493 字节 17.6 s，重复测量抖动 <1%）。GitHub 不作为下载源——国内节点连不上它，同一份字节仍会传到 GitHub Release 作灾备。
 
-1. **下载 Release 制品**：一次约 162 MiB，可离线复用。源列表里 CNB 排第一（实测 4.3 MB/s，重复测量抖动 <1%），四个 GitHub 加速站做灾备（0.2–9.6 MB/s，抖动 40 倍）。不回退直连 GitHub。
-2. **节点自己 `npm install`**：制品拿不到时走这条，实测 26–33 s / 673 包。上游发新版、制品还没打时不会卡住。
+那棵树不是上游发布版，而是本项目从**上游源码的 fork** 编译出来的：删掉浏览器面、Office 引擎与实验性 bundle（解包 2014.6 MiB → 408.6 MiB）。为什么 fork、代价是什么，见 [`docs/adr-0007-fork-node-runtime.zh.md`](docs/adr-0007-fork-node-runtime.zh.md)。
 
-两条路都把版本戳写进树里，下次连接认得出来。制品字节坏了（校验和不符、归档里没有 CLI）报错并回滚，不会从 registry 再下一次——同一份坏版本再解析只会更慢、下载更多，还把"哪个源坏了"掩盖掉。
-
-配置 `runtime: 'artefact'` 或 `'npm'` 可以强制单条路线，排查时用。
+拿不到制品（CNB 不通、没有 `curl`/`wget`、平台打不出标签）就报错并逐条列出试过的 URL。**没有 `npm install` 兜底这条路了**：它装的是上游树却写同一枚构建戳，一次网络抖动就会把节点永久钉在上游版本上，界面还显示「已就绪」。字节坏了（校验和不符、归档里没有 CLI）同样报错并回滚到上一棵树——「拿不到」和「拿到的是坏的」是两件事。
 
 ### 连接会自己恢复
 
@@ -246,7 +243,19 @@ SSH 断开之后状态不再是绿色的 `connected`：卡片落 `idle` 并记�
 
 ## 升级
 
-DSH 升级时节点侧不需要预先打好制品，所以是这五条命令：
+DSH 升级之后**第一件事是重建节点运行时**，不是跑测试：桌面端换了版本，节点就没有可下载的制品了，连不上。
+
+```bash
+# fork 切到同一个 tag（版本必须完全相等）
+cd D:/ProjectHub/dsh-fork/deepseek-harness && git checkout dsh-v<新版本>
+
+# 编译 → 裁剪 → 打包 → 上传（一条命令，两个平台各跑一次）
+cd D:/ProjectHub/DSHpl
+CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --publish --cnb
+CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform win32-x64 --publish --cnb
+```
+
+然后是组合层和契约层的五条命令：
 
 ```bash
 node packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs          # 从已安装的 release 重新派生组合
@@ -256,9 +265,9 @@ node packages/dsh-fleet-brain/scripts/embed-into-fleet.mjs            # 嵌进�
 node packages/dsh-fleet/test/run-all.mjs --layer offline,contract     # 契约层先炸
 ```
 
-实测 rc.3 → rc.5：重新生成的组合逐字节无变化，上游只删了 `authentication-token` 与 `ui-session-status` 两行，都在被丢掉的那一侧；契约层 3 个套件全过。节点在下一次连接时自己 `npm install` 同版本。
+实测 rc.3 → rc.5：重新生成的组合逐字节无变化，上游只删了 `authentication-token` 与 `ui-session-status` 两行，都在被丢掉的那一侧；契约层 3 个套件全过。
 
-想省那次下载就按 [`CONTRIBUTING.md`](CONTRIBUTING.md) 打一份制品发到 Release。三条升级链（DSH / 中转插件 / DSH Go）各自要重跑什么，见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md)。
+**跟着上游从自动变成了手动**：上游发版、桌面升级之后，节点在新制品发出来之前连不上。这是 fork 路线的代价，不是缺陷。完整步骤（切 tag、重放构建侧修复、什么时候要加 `RUNTIME_BUILD`、裁剪规则的两个坑）见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md) 第五、六节。三条升级链（DSH / 中转插件 / DSH Go）各自要重跑什么，同一份文档。
 
 ## 跑测试
 

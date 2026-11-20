@@ -11,25 +11,38 @@
 
 ## [未发布]
 
+### 变更（破坏性）
+
+- **节点运行时改由本项目从 fork 编译，npm 兜底路线删除。** 节点跑的不再是上游 npm 发布版，
+  而是本仓库对上游源码 fork 后编译、裁剪出来的树：删掉浏览器面（62 个 `dsh-client-ui-*`）、
+  Office 引擎（339.5 MiB）、实验性 bundle 与 CUA，解包 **2014.6 MiB → 408.6 MiB**，归档
+  **165 MiB → 87.7 MiB / 41 849 文件**。理由：组合层能决定加载哪些行，决定不了磁盘上有哪些包，
+  也决定不了那些行里面的代码。见 [`docs/adr-0007`](docs/adr-0007-fork-node-runtime.zh.md)。
+  **受影响**：所有人 —— 跟着上游从自动变成手动，上游发版后节点在新制品发出来之前连不上。
+- **`npm install` 兜底整条删除，`RUNTIME_ROUTES` 常量、`runtime` 与 `registry` 配置项一起删。**
+  那条兜底装的是上游发布版，却写同一枚 `{"build":N,"via":"npm"}` 的戳，于是一次网络抖动就会把
+  节点永久钉在上游版本上，而界面显示「已就绪」。留着它比删掉它更危险，所以不是关掉开关。
+  拿不到制品现在**报错**并逐条列出试过的 URL。「拿不到 ≠ 拿到的是坏的」不变：校验和/解包失败
+  仍然回滚后抛错。**受影响**：所有配置里写过 `runtime:` / `registry:` 的人（键被忽略）。
+- **`RUNTIME_BUILD` 3 → 4。** 树的内容变了（少了 500 MiB 包、多了 fork 的字节），版本号表达
+  不了这件事。所有在用节点会在下一次连接时重装一次。
+- **`mirrors` 配置项删除，`DEFAULT_MIRRORS` 退役成 `RETIRED_MIRRORS`。** 国内节点连不上
+  GitHub，加速站的前提不成立；而且它们实测抖动 40 倍（0.2–9.6 MB/s）。`DEFAULT_SOURCES`
+  现在只有 CNB 一条，`{kind:'prefix'}` 仍支持，所以接私有镜像是一个配置值。GitHub Release
+  仍收到同一份字节作灾备与留档，节点不从那里取。**受影响**：设过 `mirrors` 的人。
+
 ### 新增
 
-- **制品拿不到时，节点自己构建运行时。** 上游 DSH 每发一版，所有节点原来都卡在「维护者还没
-  构建并上传 165 MiB 制品」上 —— 而那件制品的内容本来就是在节点上跑一次
-  `npm install --os/--cpu/--libc '@deepseek-ai/dsh@<版本>'` 能得到的东西。现在
-  `RemoteHost.install` 有两条有序路线（`RUNTIME_ROUTES = ['artefact', 'npm']`）：先试制品，
-  制品**拿不到**（所有源全挂、没有 `curl`/`wget`、`mirrors: []`、平台打不出标签）就让节点
-  自己解析同一版本。实测参考节点：制品是 162 MiB 下载，自建是 26–33 s / 673 包。
-  **受影响**：所有人。上游升级不再需要等任何人；最坏情况是一次慢一点的连接。
-- **配置新增 `runtime: auto | artefact | npm`（默认 `auto`）与 `registry`。** 强制单条路线
-  是为了让失败可归因，排查「节点自己的 registry 通不通」时直接 `runtime: 'npm'`。
-  节点卡片会显示这一棵树是下载的还是自建的。
-- **制品改从 CNB 主源下载，GitHub 加速站降为灾备。** `artefactUrls()` 原来只会给 GitHub 官方
-  URL 加前缀，表达不了 CNB 的 `-/releases/download/<tag>/<file>` 形状；现在源是对象数组
-  （`{kind:'template', template}` / `{kind:'prefix', prefix}`），`DEFAULT_SOURCES` 里 CNB 排第一。
-  实测参考节点拉 170 092 405 字节整档：CNB **4 311 729 B/s、重复测量抖动 <1%**，同一时段
-  `gh.inkchills.cn` 178 047 B/s，四个加速站历史区间 0.2–9.6 MB/s（**抖动 40 倍**）。抖动才是
-  问题：同样的节点同样的归档，有时 34 s 有时一小时，读起来就是「连接卡住了」。
-  **受影响**：所有人。`mirrors: string[]` 继续可用，`mirrors: []` 仍是「关掉制品路线」的写法。
+- **`build-fork-runtime.mjs`：一条命令完成 fork 编译、裁剪、打包、上传。** `--reuse` 复用
+  已解包的树（只改裁剪规则时几十秒）；`--publish` 传 GitHub Release，`--cnb` 传 CNB。
+  `trim-fork-runtime.mjs` 是裁剪规则的唯一来源（`DROP_RULES` 每条带理由），
+  `ARTEFACT_RESIDUE` 也被 `publish-runtime.mjs` import，两份清单不会漂成两个字节。
+  `test/fork-runtime-unit.mjs`（19 条断言）守着留什么、删什么、以及两条载重规则。
+  **受影响**：维护者。
+- **制品改从 CNB 下载，现在它是唯一的源。** `artefactUrls()` 的源是对象数组
+  （`{kind:'template', template}` / `{kind:'prefix', prefix}`）。实测参考节点拉
+  91 983 493 字节整档：CNB **17.6 s、重复测量抖动 <1%**。抖动才是问题：同样的节点同样的归档，
+  有时半分钟有时一小时，读起来就是「连接卡住了」。**受影响**：所有人。
 - **插件本体改由 CNB Release 的 tarball 分发。** `dsh plugin add -w https://…/*.tgz` 是 DSH
   安装器的原生形态（`install-spec.js` 对 http(s) tarball 有明确分支），所以不再依赖 npm 上还
   留着哪个版本。桌面端会话里的 `plugin_manager(action='install_bundle', target=<该 URL>)`
@@ -57,14 +70,14 @@
 
 ### 修复
 
-- **制品字节坏了仍然报错，不会从 registry 再下一次。** 校验和不符、解包失败、归档里没有
+- **制品字节坏了仍然报错，不会被重试。** 校验和不符、解包失败、归档里没有
   `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 4/5）一律回滚到 `runtime.previous` 后抛错：
-  同一份坏版本从 registry 再解析只会更慢、下载更多，还会把「哪个源坏了」掩盖掉。
-  这次翻转只改「拿不到」，不改「拿到了是坏的」。
-- **npm 路线原来不写构建戳，接成兜底后会变成每次连接重装。** `inspectRuntime` 会把无戳的树
-  读成「早于构建戳」→ `decideGate` 返回 `node-runtime-repack` → 重装，一分钟的安装变成一分钟
-  的连接。两条路现在写同一枚戳（`{"build":3,"via":"artefact"|"npm"}`）；`parseStamp` 仍认旧格式
-  的裸整数，现场节点的 `2` 不会因为换格式被判不可用。
+  重试同一个坏源只会更慢、下载更多，还会把「哪个源坏了」掩盖掉。这条在删掉 npm 兜底之后仍然
+  成立，而且更强 —— 现在根本没有第二条路可以「再来一次」。
+- **构建戳必须写，否则每次连接重装。** `inspectRuntime` 会把无戳的树读成「早于构建戳」→
+  `decideGate` 返回 `node-runtime-repack` → 重装，一分钟的安装变成一分钟的连接。`parseStamp`
+  仍认旧格式的裸整数，现场节点的 `2` 不会因为换格式被判不可用；`npm` 这个 `via` 值也仍被读取
+  （旧节点带着它），只是不再有代码写它。
 - **归档里不再混进打包机的原生产物。** 包的 `install` 脚本按**打包机**的 `process.platform`
   跑，koffi 的 `cnoke` 于是在 Windows 上编出 `koffi/build/win32_x64`。实测那份 rc.5 归档里有
   48 个 `.exe`/`.cmd`/`.dll`/`.lib` 和 147 条 `koffi/build` 条目，全在一个 `linux-x64` 制品里。

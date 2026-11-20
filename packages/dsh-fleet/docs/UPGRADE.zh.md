@@ -19,7 +19,19 @@
 
 ## 一、DSH 升级后必须重跑的三件事
 
-桌面端升级 DSH（`0.2.2-rc.3` → `0.2.3` 之类）之后，按顺序做：
+桌面端升级 DSH（`0.2.2-rc.3` → `0.2.3` 之类）之后，按顺序做。**第 0 步不是测试，是重建节点
+运行时** —— 桌面端升了版本，节点就没有可下载的制品了，连不上（见第四节）。
+
+### 0. 从 fork 重新编译并发版
+
+```bash
+cd D:/ProjectHub/dsh-fork/deepseek-harness && git checkout dsh-v<新版本>
+cd D:/ProjectHub/DSHpl
+CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --publish --cnb
+CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform win32-x64 --publish --cnb
+```
+
+完整步骤（含切 tag、重放构建侧修复、什么时候要加 `RUNTIME_BUILD`）见第五节。
 
 ### 1. 重跑不依赖网络的测试
 
@@ -30,6 +42,7 @@ node test/multipart-unit.mjs      # Gateway 二进制应答解码
 node test/picker-paths-unit.mjs   # /@fleet 命名空间编解码、影子目录清理
 node test/install-unit.mjs        # 安装清单自洽（patch 文件、files、engines.dsh、详情页）
 node test/fleet-control-unit.mjs  # 节点控制面：密钥只能引用不能粘贴
+node test/fork-runtime-unit.mjs   # fork 裁剪规则：留什么、删什么、为什么
 ```
 
 或者一条命令跑完这三层（它自己起隔离 profile 的 Host）：
@@ -189,29 +202,75 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 `$DSH_INSTALL_DIR/package.json` 读）。理由：Session 日志格式、事件类型、投影结构都随版本走，
 两边版本不一致会以"能连上但会话显示错乱"这种最难查的方式失败。
 
-版本不符时 `connect` 会换掉节点 `runtime/`，两条路线按顺序试（见
-`docs/ARCHITECTURE.md` §六之四与 `docs/adr-0006-node-runtime-supply.zh.md`）：
+版本不符时 `connect` 会换掉节点 `runtime/`。**只有一条路线：下载本项目自己构建的制品。**
+它来自本仓库对上游源码的 fork，裁剪掉节点用不到的部分，由本项目编译并发版（见
+[`docs/adr-0007-fork-node-runtime.zh.md`](../../../docs/adr-0007-fork-node-runtime.zh.md)）。
 
-1. **制品**：下载对应的 Release 归档。**升级桌面端后第一次连节点会慢**（165 MiB 左右，
-   加速站实测 4.97 MiB/s 约 34 s），之后复用。
-2. **节点自建**：制品拿不到（加速站全挂 / 没 `curl`、`wget` / `mirrors: []` / 平台打不出标签）
-   时，节点自己 `npm install @deepseek-ai/dsh@<同版本>`。实测 26–33 s / 673 包，首次留
-   275.7 MiB 的 npm 缓存。
+- 归档 `dsh-<version>-<platform>.tar.gz` 只有 CNB 一个源
+  （`https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/<tag>/<file>`）。
+  节点匿名 GET，不需要任何凭据。**GitHub 不作为下载源**：国内节点连不上。
+- 实测 87.7 MiB / 41 849 文件，CNB 约 20 s（旧的上游制品 165 MiB 约 34 s）。
+- 拿不到制品就是**报错**，逐条列出试过的 URL 与节点原文。不会再退到
+  `npm install @deepseek-ai/dsh`：那条路装的是**上游发布版**，写同一枚构建戳，
+  于是一次网络抖动就会把节点永久钉在上游版本上，而界面显示"已就绪"。
 
-所以**上游发新版但还没打制品时不会再卡住**：最坏情况是一次慢一点的连接。反过来，如果字节
-到了但坏了（校验和不符、归档里没有 CLI），那仍然报错并回滚 —— 从 registry 再解析同一份坏
-版本只会更慢、还把「哪个源坏了」掩盖掉。
+**上游发新版之后，节点会连不上，直到本项目重新编译并发版。** 这是 fork 路线的全部代价，
+不是缺陷。发版流程见下面第五节，一条命令。
 
-不想让它自建就设 `runtime: 'artefact'`：那时下载失败会直接抛错，逐条列出试过的 URL，
-由人换加速站。反过来排查「节点自己的 registry 通不通」可以设 `runtime: 'npm'`。
-节点卡片上会写清楚这一棵树是下载的还是自建的。
+如果字节到了但坏了（校验和不符、归档里没有 CLI），仍然报错并回滚到 `runtime.previous` ——
+「拿不到」和「拿到的是坏的」是两件事，后者永远不重试。
 
 上游 `@deepseek-ai/dsh` 的每个 0.2.2 版本都声明 `engines.node: ">=24.9.0"`，而本插件的最低要求是
-Node 22：低于它仍然装得上、跑得起来（制品路线从来没读过这个字段），设置页会如实说明。
+Node 22：低于它仍然装得上、跑得起来（解包一棵树，从来不读这个字段）。**2026-11-19 核实保持 22**，
+依据见 `docs/adr-0006-node-runtime-supply.zh.md` §四-2。
 
 ---
 
-## 五、节点侧的改造：只当远程大脑
+## 五、跟上游：怎么把新版编译出来并发出去
+
+fork 在仓库外（`DSH_FORK_DIR`，默认 `D:\ProjectHub\dsh-fork\deepseek-harness`），
+钉在一个 release tag 上，只带构建侧修复。升级 = 切 tag、重放修复、跑一次构建。
+
+```bash
+# 1. 桌面端升级之后，先在 fork 里切到同一个 tag（版本必须完全相等，否则节点会拒绝）
+cd D:/ProjectHub/dsh-fork/deepseek-harness
+git fetch origin --tags
+git checkout dsh-v<新版本>
+git checkout -b dshpl-node-runtime-<新版本>
+#    重放构建侧修复：scripts/release/verify-packed-install.ts 在 Windows 上必须用
+#    Node 起 npm 的 JS 入口，不能 spawn npm.cmd。看上一分支的 diff：
+#    git diff dsh-v<旧版本>..dshpl-node-runtime -- scripts/release/verify-packed-install.ts
+
+# 2. 编译、裁剪、打包、上传（一条命令；不带 --publish 时只落本地 dist/fork）
+cd D:/ProjectHub/DSHpl
+CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs \
+  --platform linux-x64 --publish --cnb
+CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs \
+  --platform win32-x64 --publish --cnb
+
+# 3. 只改裁剪规则时不用重编上游（几十秒而不是十几分钟）
+node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --reuse
+```
+
+**顺序不能反**：`RUNTIME_BUILD`（`src/remote/artefact.js`）必须在制品内容变化时加一。
+裁剪规则、`ARTEFACT_RESIDUE`、归档布局任一改动都要加，否则老节点读到的戳是"当前"，
+它会一直跑旧字节 —— 实测过这条链（`doc/` 被当文档删掉，`yaml/dist/doc/directives.js`
+跟着没了，节点启动即 `MODULE_NOT_FOUND`，而闸门说"已就绪"）。
+
+**两个实测撞过的坑，改脚本时别踩回去：**
+
+1. `@deepseek-ai/dsh-web-app` 的 **manifest 必须留着**，哪怕它一个字节都不加载。上游按
+   安装树里的 manifest 求 profile bundle 的依赖闭包（`dsh-app-boot` 的
+   `collectInstallationScopePackages`），删掉它之后大脑保留的 15 行全部
+   `ERR_MODULE_NOT_FOUND`。一个 0.2 MiB 的 manifest 换来能启动。
+2. staging 清单只能把 `@deepseek-ai/dsh` 列为依赖，其余 fork 产物放进 `overrides`。
+   把 384 个 tarball 全列成直接依赖会装上"发布出来的一切"（1789.2 MiB / 673 包，
+   含 `@openai/codex-linux-x64` 319.4 MiB、`@anthropic-ai/claude-agent-sdk-linux-x64`
+   205.7 MiB），而不是"运行时真正 import 的闭包"（957.3 MiB / 496 包）。
+
+---
+
+## 六、节点侧的改造：只当远程大脑
 
 节点的常驻宿主是一个**独立的 DSH 安装**，有自己的 `~/.dsh`。改造分两层，职责不重叠：
 
@@ -254,7 +313,7 @@ Node 22：低于它仍然装得上、跑得起来（制品路线从来没读过�
 
 ---
 
-## 六、小改动怎么发
+## 七、小改动怎么发
 
 插件通常以两种形态之一装进 profile：npm 包（`@greatbaby/dsh-fleet`），或开发时的本地目录
 （`@greatbaby/dsh-fleet: link:D:/ProjectHub/DSHpl/packages/dsh-fleet`）。两种都改代码后：
@@ -304,7 +363,7 @@ DSH 升级才需要。
 
 ---
 
-## 七、中转插件（`ds-harness-remote`）升级后要看什么
+## 八、中转插件（`ds-harness-remote`）升级后要看什么
 
 这条链此前是空白，而它**无声失效**：中转改一处行为，手机端某个功能就不响应，
 不报错、不打日志，现有端到端又全部走本机 `/api`，一条都测不到。
@@ -326,7 +385,7 @@ fleet 有三处行为是**围着中转写的**，升级后逐一确认：
 钉版本的做法：`docker inspect` 确认 tag 不再是 `latest`，升级前先看上游 `docs/compatibility.zh.md`
 的 peer range；重启后 DSH Go 仍能连上才算通过。
 
-## 八、DSH Go（安卓客户端）升级后要看什么
+## 九、DSH Go（安卓客户端）升级后要看什么
 
 手机能调什么，由客户端的 `harnessRemoteAllowlist` 决定，那是一份 `const Set`。
 不在表里的端点**手机连发都不发**，Host 侧放宽白名单没有任何用。所以 DSH Go 升级的风险

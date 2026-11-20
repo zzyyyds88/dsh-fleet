@@ -44,9 +44,9 @@ node packages/dsh-fleet/test/run-all.mjs --host <base> --token <t>   # 复用已
 | 项 | 要求 |
 |---|---|
 | 桌面端 | 用 `--profile fleettest` 启动的 Host，不是你正在用的那个 profile |
-| 节点 | 一台 Linux 机器，Node ≥ 22，SSH 可达，能从 `DEFAULT_MIRRORS` 里的任一加速站下载（源列表与「不回退直连」的理由见 [ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六之四） |
+| 节点 | 一台 Linux 机器，Node ≥ 22，SSH 可达，能匿名下载 CNB 上的归档（源与理由见 [ARCHITECTURE](../../../docs/ARCHITECTURE.md) §六之四） |
 | 凭据 | 只从环境变量读：`DSH_FLEET_TEST_HOST/USER/PASSWORD/KEY_FILE/PORT` |
-| 加速 | 节点侧确认 `curl -fLsS -o /dev/null -w '%{http_code}' https://gh.inkchills.cn/` 返回 200；加速站会挂，`src/remote/artefact.js` 里的列表是实测排序，不是固定答案 |
+| 加速 | 节点侧确认 `curl -fLsS -o /dev/null -w '%{http_code}' https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v<版本>/dsh-<版本>-<平台>.tar.gz` 返回 200 或 302；CNB 是唯一的下载源（ADR-0007） |
 
 启动测试 Host（PowerShell，`DSH_HOME` 是你的真实 home，profile 是隔离的）：
 
@@ -185,8 +185,8 @@ node packages\dsh-fleet\test\multi-node-acceptance.mjs <base> <token>
 
 期望与判据：
 
-1. 节点自动下载 `dsh-<version>-<platform>.tar.gz`（依次试 `DEFAULT_MIRRORS`；**都挂就报错**，
-   报出试过哪些站，不回退直连也不回退 npm），校验 sha256，解压后替换 `runtime`，旧树留成
+1. 节点自动下载 `dsh-<version>-<platform>.tar.gz`（CNB，唯一的源；**拿不到就报错**，
+   报出试过的 URL，不回退直连也不回退 npm），校验 sha256，解压后替换 `runtime`，旧树留成
    `runtime.previous`；
 2. 装完 `node …/lib/bin.js --version` 等于桌面版本；
 3. **原生包必须是节点的平台**：`sherpa-onnx-linux-x64`、`@img/sharp-linux-x64`，不能出现
@@ -199,12 +199,11 @@ node packages\dsh-fleet\test\artefact-acceptance.mjs
 node packages\dsh-fleet\test\version-unit.mjs
 ```
 
-发布新制品（会写 GitHub Release，需要用户确认）：
+发布新制品（会写 CNB 与 GitHub Release，需要用户确认；制品必须来自 fork 构建，不是上游发布版）：
 
 ```powershell
-$env:ELECTRON_RUN_AS_NODE = "1"
-& "D:\Program Files\DSH\DeepSeek Harness.exe" packages\dsh-fleet\scripts\publish-runtime.mjs `
-    --platform linux-x64 --publish
+$env:CNB_TOKEN = "…"
+node packages\dsh-fleet\scripts\build-fork-runtime.mjs --platform linux-x64 --publish --cnb
 ```
 
 ## 7. 插件同步开关

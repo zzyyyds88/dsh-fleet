@@ -1,6 +1,11 @@
 # ADR-0006 节点运行时供给：制品优先，节点自建兜底
 
-> 状态：已定（2026-11-19）。用户已确认「制品路线保留，别人想自己构建就自己构建」。
+> 状态：**第二、三节与第九节已被 [ADR-0007](adr-0007-fork-node-runtime.zh.md) 推翻**
+> （2026-11-20）。两条路线收敛成一条：节点运行时由本项目从 fork 编译，npm 兜底整条删除。
+> 仍然有效的是第四节（构建戳）、第五节（实测数据）、第六节（制品缺陷）、第七、八节
+> （发布侧），以及第四节第 2 条对 `engines` 的结论。读本文时以 ADR-0007 为准。
+>
+> 原始状态：已定（2026-11-19）。用户已确认「制品路线保留，别人想自己构建就自己构建」。
 > 上承 [ADR-0005](adr-0005-release-and-maintenance.zh.md)。
 > 本文只决定「节点的运行时从哪来」，不改路由、组合、会话语义。
 > 现在怎么用：安装与升级步骤见根 [README.md](../README.md) 与
@@ -25,7 +30,12 @@ npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/
 `0.2.2-rc.5`，91 个依赖里 83 个是精确锁定），所以「节点自己解析」不是新能力，是把已有的
 能力接上。
 
-## 二、决定：两条有序路线，制品优先
+> **这一段的前提已经不成立。** 制品的内容不再是「上游发布版跑一次 npm install」，
+> 而是本项目从 fork 编译并裁剪出来的树（实测 957.3 MiB → 408.6 MiB）。节点自己解析
+> 永远得不到那份字节，所以兜底路线不是「慢一点」，是「换了一个运行时」。
+> 见 ADR-0007。
+
+## 二、决定：两条有序路线，制品优先（已被 ADR-0007 推翻）
 
 `RUNTIME_ROUTES = ['artefact', 'npm']`，由 `RemoteHost.install` 依次尝试。
 
@@ -37,32 +47,43 @@ npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/
 配置新增 `runtime: auto | artefact | npm`（默认 `auto`）与 `registry`。能强制单条路线，是为了
 让失败可归因 —— 排查时不至于在一句复合错误里猜是哪条路出的问题。
 
-## 三、判据：拿不到 ≠ 拿到的是坏的
+**这三样都已经不存在了**（ADR-0007）：`RUNTIME_ROUTES`、`runtime`、`registry` 全部删除，
+`mirrors` 也删除。删 `runtime` 不是精简，是因为留着它就成了陷阱 —— 见第三节。
+
+## 三、判据：拿不到 ≠ 拿到的是坏的（结论保留，落点变了）
 
 这是本次唯一的行为翻转，也是全部风险的集中点。
 
-| 情形 | 处理 |
-|---|---|
-| 所有源全挂（退出码 3，`ARTEFACT_UNAVAILABLE`） | 落 npm |
-| 没有 `curl` 也没有 `wget` | 落 npm（原来直接报错） |
-| `mirrors: []`（原来是配置错误） | 落 npm，等于「制品路线关掉了」 |
-| 平台打不出标签 | 落 npm（原来也是这样） |
-| 校验和不符（退出码 4） | 回滚 + **抛错**，不落 npm |
-| 解包失败 / 归档里没有 `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 5） | 回滚 + **抛错**，不落 npm |
-| 两条路都不通 | 报错，且**同时点名**两条各缺什么 |
+| 情形 | 处理（ADR-0006） | 处理（现在） |
+|---|---|---|
+| 所有源全挂（退出码 3，`ARTEFACT_UNAVAILABLE`） | 落 npm | **报错**，列出试过的 URL |
+| 没有 `curl` 也没有 `wget` | 落 npm（原来直接报错） | **报错**，点名缺下载器 |
+| `mirrors: []`（原来是配置错误） | 落 npm，等于「制品路线关掉了」 | 该配置项已删除 |
+| 平台打不出标签 | 落 npm（原来也是这样） | **报错**，点名平台 |
+| 校验和不符（退出码 4） | 回滚 + **抛错**，不落 npm | 不变 |
+| 解包失败 / 归档里没有 `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 5） | 回滚 + **抛错**，不落 npm | 不变 |
 
-理由：**拿不到**是「上游刚发版、制品还没打」的常态，不该是死路；**拿到了但坏了**是从 registry
-再解析同一份坏版本也不会变好的事，只会更慢、下载更多，并把「哪一个源坏了」掩盖掉。
+理由里仍然成立的一半：**拿到了但坏了**是从 registry 再解析同一份坏版本也不会变好的事，只会更慢、
+下载更多，并把「哪一个源坏了」掩盖掉 —— 这一条现在更强，因为根本没有 registry 可落。
+
+不再成立的一半：**拿不到**曾经是「上游刚发版、制品还没打」的常态，而兜底装的是同一个官方版本，
+所以「慢一点」说得通。现在兜底装的是**另一个运行时**（上游树而不是 fork 树），它写的是同一枚
+`{"build":4,"via":"npm"}` 的戳，于是一次网络抖动就会把节点永久钉在上游版本上，界面还显示
+「已就绪」。**留着它比删掉它更危险**，所以整条删掉，不是关掉开关。
 
 ## 四、两件必须一起做的事
 
-### 1. 两条路写同一枚构建戳
+### 1. 安装写同一枚构建戳
 
-`BUILD_STAMP`（`.fleet-artefact.json`）的内容改为 `stampJson()` 的
+`BUILD_STAMP`（`.fleet-artefact.json`）的内容是 `stampJson()` 的
 `{"build":N,"via":"artefact"|"npm"}`：
 
 - `build` 参与判定，必须等于 `RUNTIME_BUILD`；
-- `via` 只上报，不参与判定 —— 自己构建的树和下载的树一样能用。
+- `via` 只上报，不参与判定 —— 它记录的是「这棵树怎么来的」，不是「能不能用」。
+
+`npm` 这个值现在只出现在**旧节点**的戳里。读取端必须照旧认它（否则格式变化会把在用节点判成
+不可用），但不再有任何代码写它。`RUNTIME_BUILD` 升到 4 之后，那些树会被 `build` 判定为需要重装，
+理由和它记录的路线无关。
 
 没有这枚戳，`inspectRuntime` 会把树读成「早于构建戳」→ `decideGate` 返回
 `node-runtime-repack` → **每次连接重装一次**。实测过这条链：`daemon.js` 的 npm 分支当时不写戳，
@@ -74,11 +95,15 @@ npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/
 ### 2. `engines` 报而不拦
 
 上游 `0.2.2` 的四个 rc（rc.1/rc.3/rc.4/rc.5）全部声明 `engines.node: ">=24.9.0"`，而参考节点
-是 **Node v22.20.0**，它一直在跑 rc.3。制品路线从不读这个字段，所以这条闸门不能因为安装方式
-换成 npm 就突然变成硬停。
+是 **Node v22.20.0**，它一直在跑 rc.3。制品路线从不读这个字段（它解包一棵树），所以这条闸门
+不能因为安装方式换成 npm 就突然变成硬停。
 
 做法：`npmInstallScript` 用 `--engine-strict=false` 装，装完比对一次，不符就回 `engineWarning`，
 界面如实显示。**抱怨、可运行、不静默**是这三条。
+
+> **这条已经自然消解**（ADR-0007）：节点不再解析 registry，`npmInstallScript` 与 `engineWarning`
+> 一起删除。解包一棵树永远不读 `engines`，所以 `MINIMUM_NODE_MAJOR = 22` 就是节点真实的门槛，
+> 不存在「同一条闸门在两条路线上松紧不一」的问题了。下面的判定依据仍然有效。
 
 > **已决（2026-11-19）：节点不升 Node 24，`MINIMUM_NODE_MAJOR` 保持 22。** 用户的原话是「有必
 > 要就升，没必要就拉倒」，下面是判定「没必要」的实测依据：
@@ -138,7 +163,7 @@ session,node-control` 在一个真 Host 上跑了 112.4 s 全绿，之后节点�
 
 `RUNTIME_BUILD` 因此从 2 升到 3。
 
-## 七、制品构建搬到 CI
+## 七、制品构建搬到 CI（仍然有效，但 CI 打包的不是 fork）
 
 `.github/workflows/release-runtime.yml`：四平台（linux-x64 / linux-arm64 / darwin-arm64 /
 win32-x64）各自在**本平台** runner 上打包，`workflow_dispatch` 给入参版本，
@@ -149,6 +174,10 @@ pack 不 `fail-fast`：某个平台没成，其余平台的节点照样能走快
 
 在本平台 runner 上打包**不是**为了让原生包正确（`--os/--cpu/--libc` 已经保证了），而是为了
 让 `tar` 能记下可执行位 —— Windows 记不了（见上）。
+
+> **现在这个工作流打包的是上游发布版，不是 fork。** fork 路线要在有 fork checkout 的机器上跑
+> `build-fork-runtime.mjs`（见 ADR-0007 与 UPGRADE 第五节）。两者共用同一个上传脚本
+> `publish-runtime.mjs`，所以归档形状、校验和、CNB 的四个坑都只有一份实现。
 
 ## 八、制品发到哪：CNB 主源，GitHub 加速站灾备
 
@@ -165,6 +194,10 @@ DEFAULT_SOURCES = [
   { kind: 'prefix', prefix: 'https://ghfast.top/' },
 ]
 ```
+
+> **加速站已经退役**（ADR-0007）：`DEFAULT_SOURCES` 只剩第一条，其余四项进 `RETIRED_MIRRORS`
+> 只作记录。原因是国内节点连不上 GitHub —— 加速站是给 GitHub 加速的，前提不成立；而且它们
+> 实测抖动 40 倍。GitHub Release 仍收到同一份字节（`--publish`），但节点不从那里取。
 
 `mirrors: string[]` 继续可用（转化为 prefix 源追加在模板源之后），`mirrors: []` 仍是「关掉制品
 路线」的写法。`sources` 是整条有序列表，给需要自有布局的源用。
@@ -188,11 +221,14 @@ DEFAULT_SOURCES = [
    少了这一步，release 的 assets 一直是空的，匿名下载 404。这条只写在 API 描述里。
 4. `ttl` 最大 180 天，`0` 表示永久。制品要用永久 —— 否则半年后快路径会自己消失。
 
-## 九、非目标
+## 九、非目标（第一条已被 ADR-0007 推翻，其余保留）
 
-- **不 fork 官方 DSH 包。** 节点自建的是**上游发布版本身**，不是本项目的分叉。所有定制仍然只走
-  `@local/dsh-fleet-brain` 与 profile patch（AGENTS.md §4）。
+- **~~不 fork 官方 DSH 包。~~** 现在 **fork 了**：节点运行时来自本仓库对上游源码的 fork，
+  只留大脑需要的包。理由、裁剪规则与实测数字见 [ADR-0007](adr-0007-fork-node-runtime.zh.md)。
+  「定制走 `@local/dsh-fleet-brain` 与 profile patch」这条仍然成立，只是不再是**唯一**的定制层。
 - **不出锁文件。** 一份 `package-lock.json` 的 `resolved` 写死 registry 域名；实测 npm 11 的
   `replace-registry-host` 默认只对 `registry.npmjs.org` 开头的 URL 生效，把锁绑到 npmmirror 就
   在别的节点上失效。保持每次在线解析，代价可接受。
-- **不把 npm 设成默认。** 制品快、可离线、字节确定；npm 是兜底，不是替代。
+  > 现在构建发生在打包机上（`build-fork-runtime.mjs`），锁文件问题只剩打包侧；节点不再解析任何东西。
+- **不把 npm 设成默认。** ~~制品快、可离线、字节确定；npm 是兜底，不是替代。~~
+  **npm 已经不是兜底了**：整条路线删除。节点只有制品一条路。
