@@ -41,8 +41,11 @@ ADR-0006 让节点在拿不到制品时自己 `npm install` 上游发布版。�
 
 - 位置：`D:\ProjectHub\dsh-fork\deepseek-harness`（仓库外，`DSH_FORK_DIR` 可改）。
   不进本仓库：它是别人代码的完整副本，和 `reference/` 同一性质，只是**可写**。
-- 版本：`dsh-v0.2.2-rc.5`（commit `9c2670d3`），与本机桌面端**完全相等**。
+- 版本：`dsh-v0.2.2-rc.5`（上游 commit `9c2670d3`），与本机桌面端**完全相等**。
   节点跑的就是桌面的版本，`decideGate` 只认完全相等（见 ADR-0002 与 ARCHITECTURE 六之四）。
+- 分支：`dshpl-node-runtime`，相对 tag 只有**一个提交**（`057ce8f3`，
+  `git diff dsh-v0.2.2-rc.5 --stat` = 1 file changed, 14 insertions, 2 deletions）。
+  这个提交就是下面说的构建侧修复；升级时照它重放即可。
 - fork 上允许有的改动：**只允许构建侧的修复**。第一处是 `verify-packed-install.ts` 在
   Windows 上用 `npm.cmd` 起子进程必然失败（`ENOENT`/`EINVAL`），改成用 Node 起 npm 的
   JS 入口。语义改动不放在这里 —— 见下面第 3 条。
@@ -118,12 +121,23 @@ CNB 的发布侧有个坑（ADR-0006 八节已记）：`PUT` 返回 200 **不等
 | fork 能构建 | `pnpm run build:official`：10 个 gate 全过，183 s |
 | fork 能打包 | `release:pack --family dsh`：375 个 tarball；`verify-packed-install` 报 `installed @deepseek-ai/dsh reports 0.2.2-rc.5` |
 | 裁剪后的树能当大脑启动 | 打印 `dsh web: http://127.0.0.1:<port>/?token=…`；`/?token=…` 换 cookie 得 303 + `Set-Cookie`；`POST /api/session/list` 得 200 |
-| 两个平台的产物 | `dsh-0.2.2-rc.5-linux-x64.tar.gz` 87.6 MiB / 41 846 文件 / 91 839 618 字节；`dsh-0.2.2-rc.5-win32-x64.tar.gz` 85.2 MiB / 41 839 文件 |
-| 裁剪规则有断言 | `test/fork-runtime-unit.mjs`（19 条） |
+| 两个平台的产物 | `dsh-0.2.2-rc.5-linux-x64.tar.gz` 87.6 MiB / 41 846 文件 / 91 839 618 字节，sha256 `7ba9124f…`；`dsh-0.2.2-rc.5-win32-x64.tar.gz` 85.2 MiB / 41 839 文件，sha256 `809223fb…` |
+| 发到了两个地方 | CNB 与 GitHub Release `v0.2.2-rc.5` 各一份；CNB 匿名 `GET` 回 200（`Content-Length: 91839618`），下载 17.6 s，本地重算 sha256 与 sidecar 一致 |
+| 归档里没有 staging 清单 | 顶层只有 `node_modules/`；`./package.json`、`./package-lock.json`、`./node_modules/.package-lock.json` 计数为 0（第一版带了，见下面「没验的」） |
+| 裁剪规则有断言 | `test/fork-runtime-unit.mjs`（25 条） |
+| 离线验收全绿 | `run-all.mjs --layer offline`：15 个套件全过 |
 
-**没验的，写在明面上**：没有真节点（本轮没有 `DSH_FLEET_TEST_*`），所以
-「桌面端连上节点、下载这份制品、启动、跑通会话」这条端到端链**未验证**。
-它是下一轮的第一步，验收命令见 UPGRADE 第四节。
+**没验的，写在明面上**：
+
+1. **没有真节点**（本轮没有 `DSH_FLEET_TEST_*`），所以「桌面端连上节点、下载这份制品、启动、
+   跑通会话」这条端到端链**未验证**。它是下一轮的第一步，验收命令见 UPGRADE 第四节。
+2. **只有两个平台。** `linux-arm64` / `darwin-arm64` / `linux-x64-musl` 没有发布，也没有机器
+   验证过。`platformTag()` 现在会为 musl 节点请求 `linux-x64-musl`，所以 Alpine 节点会得到
+   明确的「没有这个平台的制品」而不是一棵用不了的树 —— 那是正确行为，不是缺口。
+3. **第一次发布出去的归档带着 staging 清单**（`package.json` 里是打包机的绝对路径，
+   `package-lock.json` 里是同样的路径），几分钟后修掉并重发。没有 bump `RUNTIME_BUILD`：
+   带 4 的插件版本从未发布，不可能有节点读到过第一版。理由与断言都在
+   `build-fork-runtime.mjs` 与 `test/fork-runtime-unit.mjs` 里。
 
 ## 四、代价与什么时候该重开
 

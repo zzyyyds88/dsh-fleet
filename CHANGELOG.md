@@ -37,7 +37,7 @@
   已解包的树（只改裁剪规则时几十秒）；`--publish` 传 GitHub Release，`--cnb` 传 CNB。
   `trim-fork-runtime.mjs` 是裁剪规则的唯一来源（`DROP_RULES` 每条带理由），
   `ARTEFACT_RESIDUE` 也被 `publish-runtime.mjs` import，两份清单不会漂成两个字节。
-  `test/fork-runtime-unit.mjs`（19 条断言）守着留什么、删什么、以及两条载重规则。
+  `test/fork-runtime-unit.mjs`（25 条断言）守着留什么、删什么、以及两条载重规则。
   **受影响**：维护者。
 - **制品改从 CNB 下载，现在它是唯一的源。** `artefactUrls()` 的源是对象数组
   （`{kind:'template', template}` / `{kind:'prefix', prefix}`）。实测参考节点拉
