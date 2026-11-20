@@ -73,13 +73,22 @@ driving a real task and auditing the transcript for path failures and Windows pa
 ## How it is wired
 
 The plugin touches **no upstream Loader row** and imports **nothing from inside
-`app.asar`**. Three runtime seams do all the work:
+`app.asar`** (the client half `require`s `@deepseek-ai/dsh-client-ui-primitives` at
+runtime, which is what makes its dialogs behave like the shipped ones). Five runtime
+seams do the work; the full reasoning is in
+[`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) §三.
 
 | Seam | What it does |
 |---|---|
 | own property on the live Service | `sessionController`, `workspaceController`, `workspaceFiles`, `jobController`, `terminalController` each get a routed method *on the instance*. The Gateway discovers endpoints from the class prototype's `@Remote` descriptor and dispatches with `Reflect.get(view, name)`, so the override wins and the declared surface does not change. |
 | `typert.lookups.configure('workspaceFileScope', …)` | A `fleet_…` Session id is not a local Session, so the Host's own lookup answers `not-found` before the decorator could run. The override delegates every local id to the upstream provider verbatim and synthesises the scope object for a wrapped id. |
-| `webServer.register('/fleet/api')` | Node management, `POST /fleet/api/workspaces`, `GET /fleet/api/browse` and the per-plugin switches. The local directory picker browses *this* machine and can never select `/root/project` on a node, so the plugin occupies the shell's `*.directoryFlow` slots and asks "which machine" first. |
+| `typert.lookupStore.resolvers`'s `agent` entry | The public `configure` is already taken by upstream (a second call on the same key throws), so the resolver table is the only place left to answer "which Agent owns this `fleet_…` id". |
+| the Gateway's pending-event table | Upstream's only local waterfall entry point wants a carrier that only `@deepseek-ai/dsh-scope` can build. The plugin builds a same-shaped pending entry into `pendingRemoteEvents` and lets upstream deliver and settle it. |
+| HTTP and RFC 6455 over SSH `direct-tcpip` | A node opens no port, so every `/api` call and the `$events` stream ride an SSH channel. Two traps: the Gateway pings every 2 s and drops the carrier on silence, and a result carrying bytes is **not** JSON (`Uint8Array` arrives as `null`) — it comes back as `multipart/form-data`. |
+
+Plus one non-seam: `ctx.webServer.register({ prefix: '/fleet/api' })` for the plugin's own
+management surface, and the shell's three `*.directoryFlow` slots, which the plugin takes
+over to ask "which machine" before browsing.
 
 ### The node is a brain, not a second desktop
 
@@ -87,7 +96,7 @@ A node is a **separate DSH installation** with its own `~/.dsh` — its own prof
 its own credential store, its own model roster. Two consequences:
 
 1. It ships the **Web composition**, so a server with no screen loads a whole browser
-   surface: 57 `dsh-client-ui-*` rows, an SPA dist server, a reload chain, desktop
+   surface: 56 `dsh-client-ui-*` rows, an SPA dist server, a reload chain, desktop
    telemetry. Either it idles them or it fails to start without a dist to point at.
 2. It has **no provider route and no API key**, so it boots, answers `session/list`,
    and then fails the first prompt — which from the desktop looks exactly like a
@@ -346,82 +355,40 @@ switch the artefact route off entirely, and it does *not* leave CNB as a lone so
 
 ## Tests
 
-One command runs everything, picking the right interpreter per suite (the contract layer
-must run under the harness's Electron Node to read `app.asar`):
-
 ```bash
-node test/run-all.mjs                    # all 35
+node test/run-all.mjs                            # all 35, right interpreter per suite
 node test/run-all.mjs --layer offline,contract   # the two layers that need no node
-node test/run-all.mjs --list             # the matrix, without running
+node test/run-all.mjs --list                     # the matrix, without running
 ```
 
 A suite that cannot run here exits 3 and is reported **SKIP with a reason**, never as a
-pass. `--layer e2e` that could not run a single suite exits non-zero: the layer that
-proves a user can work is not exercised by skipping it.
+pass; `--layer e2e` that could not run a single suite exits non-zero.
 
-### offline — pure logic, no Host, no node
+| Layer | Suites | What it covers | Needs |
+|---|---|---|---|
+| `offline` | 14 | Identity round-trips and routing by each namespace's own shape; multipart decoding; what provisioning writes (and what it must not); approval relay bookkeeping; version gate and artefact URLs; the connect lifecycle (dropped socket → `idle`, reconnect ladder, host key, failure phase, offline rows kept); error classification and log redaction; the `/@fleet` path namespace; install-manifest self-consistency; autoconnect; the node-control surface; the brain composition; and the SSH packet ceiling. | Node 22, except `provision` and `composition`, which read `app.asar` and need the Electron Node |
+| `contract` | 3 | The upstream seams: `@Remote` descriptors and `static inject` are readable; the Gateway still dispatches to an own property on the instance; the controllers the wrappers decorate still export what they expect. | The installed DSH, under its Electron Node |
+| `e2e` | 18 | Everything that needs a real Host and a real node: transport, every routed endpoint, workspace add/browse/pick, plugin switch, the agent's own tools, git and `read_image`, client bundle, event relay, remote turn, PTY, two nodes at once, both runtime routes, approval round-trip, node-control preset, browser. | A running Host + SSH-reachable node; `browser` also needs `DSH_BROWSER_DEBUG_PORT` |
 
-| Suite | What it proves |
-|---|---|
-| `routing` | Identity round-trips, stream fan-out, workspace merging, and the rule that a local call reaches the upstream method untouched. Fake fleet, no network. |
-| `routing-extra` | The remaining identity-carrying namespaces route by their own shape: goals/userQuestions by `Agent`, feedback by request field, subagents by child uuid, and schedule merges while its per-entry verbs route. |
-| `multipart` | The Gateway's `multipart/form-data` answers decode: byte attachments become `Uint8Array` at the right JSON path, and malformed parts are refused instead of silently read as `null`. |
-| `provision` | What a node is given: provider rows copied but account routes not, the credential ref inferred even when a row omits `apiKeyEnv`, no browser row ever reaches the overlay, and the rendered patch round-trips through a real YAML parser. |
-| `waterfall` | Approval/question relay: only allowed waterfalls cross, and refusal and timeout each settle exactly once. |
-| `version` | Version-gate branches, artefact URLs, the install script, per-node layout, and switch semantics. |
-| `fleet-lifecycle` | A dropped socket becomes `idle` with a timestamp, the reconnect ladder arms and a deliberate disconnect cancels it, the first host key is recorded and handed back, a failed connect keeps its phase, and an unreachable node keeps its workspace rows. |
-| `errors` | A connect failure becomes a code with one action and a retryable flag; a node's own log redacts secrets before storing them and stays bounded. |
-| `picker-paths` | The `/@fleet` namespace round-trips through both path normalisers (drive letter, backslashes, repeated separators, case), a malformed identity never half-matches, and the shadow cleanup cannot remove a directory with anything in it. |
-| `install` | The manifest a bundle is installed from is self-consistent: every `dsh.bundle.patch` file exists and is declared, `engines.dsh` is a range npm understands, `files` covers every runtime artefact, `locale.meta.detail` names a file that is really there, and no shipped file carries a LAN address or a private key. |
-| `autoconnect` | A restarted Host connects its nodes without a click: `autoConnect` adopts the stored credential *before* testing `credentialsReady`, and still skips a node that has none. |
-| `fleet-control` | The surface behind the node-control tool: a pasted password or private key is refused (tool arguments are logged; the refusal is the feature), a reference is read on this machine, a result can never carry authentication material, and an unknown identity is a named failure rather than an empty list. |
-| `composition` | The node composition is still a brain: Remote controllers in, no `dsh-client-ui-*` row, no `web-runtime`, and it parses as YAML. |
-| `packet` | No payload rides a command line. One `exec` request is one SSH packet, OpenSSH drops the connection over 256 KiB, and the two tree-writing functions ship their payload on stdin. |
-
-### contract — the upstream seams, must run under Electron's Node
-
-| Suite | What it proves |
-|---|---|
-| `descriptor` | The upstream `@Remote` descriptors and `static inject` are readable from the installed release. |
-| `dispatch` | The Gateway still dispatches to an own property on the instance, and the endpoint set is unchanged. |
-| `upstream` | The upstream controllers the decorators wrap still export what the wrappers expect. |
-
-These three are what to run first after a DSH upgrade: they fail before a user notices that
-every remote Session has stopped opening.
-
-### e2e — a running Host and a real node
-
-| Suite | What it proves |
-|---|---|
-| `gateway` | Cookie minting, unary RPC, and the stream carrier upgrade over SSH against a resident node. |
-| `host-routing` | Every routed endpoint through the local `/api`, plus the ones that must stay local — including a **binary** read (what a remote image preview depends on) and the job roster (whose node-side `job/not-found` is the only way to tell routing from a silent local answer). |
-| `workspace-flow` | The end-to-end gesture: add a remote workspace, create a Session in it, prompt it, watch the node's `bash` output arrive, and confirm the file it wrote exists on the node. |
-| `workspace-browse` | Choosing a workspace folder the way the dialog does: this machine and a node answer in the same shape, the node listing is really the node's, and a picked node folder becomes a workspace with the node wrapped into its id. |
-| `picker-flow` | The phone's view of a node: `/@fleet` lists the nodes, `/@fleet/<id>/` lists that machine's real folders with every entry spelled back inside the namespace, the breadcrumbs never go above it, `workspace/create` by such a path creates the workspace **on the node**, and the directory the relay made on this machine before dispatching is gone. |
-| `plugin-switch` | A per-plugin switch really lands on the node: the package is installed or copied there, the node names it in its own bundle list **before** the brain bundle, the resident host restarts, and the node still lists the same remote workspaces. Switching it off removes it again, switching it back restores the default, and the switch is restored on every exit path. |
-| `tool-parity` | The check the mirror-based approach could not pass: the agent's own `read` / `write` / `edit` / `grep` / `glob` run against the node's real paths, with no path failure and no Windows path anywhere in the transcript. |
-| `tool-git-image` | `git` on a real repository, `read_image` on a real PNG, and `grep` over real files — the three tools that returned `code=127` or `ENOENT` when the tools ran locally against a mirror. |
-| `client-bundle` | The shell serves this plugin's client module; its three own slots plus the three folder-picker slots register and render. |
-| `event-relay` | A Session created **on the node** reaches the browser: its `api-session/*` list events and its `session/control` projections both arrive under the wrapped identity. |
-| `session` | A real remote turn (write/bash/grep), `session/follow` over the carrier, and the bytes witnessed over a separate SSH connection. |
-| `terminal` | A real PTY on the node: environment, shells, create, attach snapshot, echo round-trip, close. |
-| `multi-node` | Two nodes at once: distinct ids, sessions land on the right one, removing one leaves the other intact. |
-| `artefact` | The real install script on the real node: download, checksum, unpack, replace, version, rollback. |
-| `npm-install` | The fallback route on the real node: npm resolves the exact release, writes the stamp, picks the node's natives, and leaves the PTY helper executable. |
-| `approval` | A node approval reaches this Host as a waterfall, the answer resumes the remote turn, and a refusal is honoured. |
-| `node-control` | The node-control preset is registered with two rows, a Session from it can call `fleet_nodes` and no other tool at all, and the answer is the real roster. |
-| `browser` | A real Chrome renders the remote workspaces in the ordinary sidebar, and the plugin entry is reachable. Needs `DSH_BROWSER_DEBUG_PORT`. |
+`node test/run-all.mjs --list` prints the one-line contract of each suite, and
+[docs/ACCEPTANCE.zh.md](docs/ACCEPTANCE.zh.md) records what passed in each round with the
+numbers.
 
 Set `DSH_FLEET_TEST_HOST` / `DSH_FLEET_TEST_USER` / `DSH_FLEET_TEST_PASSWORD` (or
-`DSH_FLEET_TEST_KEY_FILE`) to point them at a machine. There are no defaults in the source:
-this repository is public.
+`DSH_FLEET_TEST_KEY_FILE`) to point the e2e layer at a machine. There are no defaults in
+the source: this repository is public.
 
 Upgrading DSH? [docs/UPGRADE.zh.md](docs/UPGRADE.zh.md) lists what to re-run and which
-upstream contract each test defends. The per-round record of what actually passed, with
-the numbers, is in [docs/ACCEPTANCE.zh.md](docs/ACCEPTANCE.zh.md).
+upstream contract each test defends.
 
 ## Known limits
 
+- **A node keeps its own MCP servers and its own `~/.dsh/skills`.** Provisioning copies
+  the provider routes, the default model, the permission preset and the credential refs
+  those rows name — nothing else. `mcpManager`'s server table is a per-Host volatile
+  config with no cross-machine transfer, and skill directories are enumerated by each
+  Host with `node:fs` over its own home. A node therefore has the runtime's packaged
+  skills (`dsh-doc`, the office set) and no MCP server you configured here.
 - **A remote Session's live stream needs an active turn.** `session/follow` on a
   cold remote Session delivers its snapshot, and later events arrive as the node's
   Agent runs. This matches local behaviour.

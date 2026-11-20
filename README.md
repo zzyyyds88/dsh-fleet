@@ -1,365 +1,230 @@
-# DSHpl — 把远程 Linux 机器变成 DeepSeek Harness 里"像本地一样"的工作区
+# DSHpl
 
-> 痛点一句话：**工具不可用**。
-> 远程的目录接进桌面端之后，`grep`、`glob`、`git`、`read_image` 在那里全部失效。
-
-这个仓库是我为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称
-DSH）写的一套东西。核心是 `packages/dsh-fleet` 这个插件，配套 `packages/dsh-fleet-brain`
-是节点侧的 DSH 组合。
+把远程 Linux 机器接进 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，当成本地工作区用。
 
 ```
-packages/
-  dsh-fleet/        插件：装在桌面端（Host 侧 + 浏览器侧）
-  dsh-fleet-brain/  节点侧 bundle：只当远程大脑的 DSH 组合
-docs/
-  ARCHITECTURE.md   设计与取舍：每个决定否决了什么
-reference/          上游源码（只读，不进版本库，见其 README）
+手机 (DSH Go)  ──P2P──▶  家里的 Windows (DSH + 本插件)  ──SSH──▶  Linux 开发机 (完整 DSH)
 ```
 
----
+这是我原本在 ZCode 上的用法，想原样搬到 DSH：手机上通过 `ds-harness-remote` 连到桌面端，桌面端远程连接开发机，人在外面也能写代码。DSH 官方没有这条路，所以有了这个仓库。
 
-## 一、痛处
+<img src="packages/dsh-fleet/docs/preview.svg" alt="侧栏里本地工作区与两台远程节点的工作区并列，右侧是节点设置页与插件开关" width="640">
 
-DSH 的桌面端很好用，但它的**工具全部跑在本机**。当你需要另一台机器干活 —— 编译、
-跑服务、GPU、只有它装了那套工具链 —— 麻烦就开始了：
+## 远程的工作区，本地的用法
+
+远程工作区出现在侧栏里，和本地工作区并排。点进去新建会话、发 prompt、看输出、开终端，都和本地一样。
+
+差别在工具跑在哪。节点上跑着一个完整的 DSH Host，`bash`、`grep`、`glob`、`git`、`read_image`、PTY、MCP 服务器、skills 全部在那台机器的进程里执行，用的是它的文件系统、它的二进制、它的 shell。桌面端只做三件事：给跨界的身份编码、转发请求、还原结果。
+
+这也是手机端能读到它们的原因：远程会话在 `session/list` 里就是普通行，`ds-harness-remote` 不用知道这个插件存在。
+
+先前试过 `@artenx/dshb` 那条路（把远程目录镜像到本地），五种坏法：
 
 | 你想做的事 | 实际发生 |
 |---|---|
-| `bash` 里敲 `ls /root/project` | 拿到的是**本机**的 `/root/project`，或者直接没有这个目录 |
-| 代码在远端，agent 改文件 | 编辑器能读到远端内容，但 `edit`/`write` 落在本地，远端文件一动没动 |
-| 远端有个截图/PDF 想看 | `read_image` 在本机找那个路径，报 "bytes do not decode" |
-| `git log` | `fatal: not a git repository`（本地副本里没有 `.git`），或者更糟：关于错仓库的正确回答 |
+| `bash` 里敲 `ls /root/project` | 拿到的是本机的 `/root/project`，或者根本没有这个目录 |
+| agent 改远端文件 | 编辑器能读到远端内容，但 `edit`/`write` 落在本地，远端文件一动没动 |
+| 看远端截图 | `read_image` 在本机找那个路径，报 "bytes do not decode" |
+| `git log` | `fatal: not a git repository`，或者更糟：关于错仓库的正确回答 |
 | `grep` / `glob` | 搜的是本地那份副本，远端后来新增的文件永远搜不到 |
 
-我先试过 `@artenx/dshb` 那条路（把远端目录镜像到本地），失败方式有五种，
-全部写在 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 第九节。核心原因是结构性的：
+原因只有一个：工具进程在本机，它读的就是本机的文件系统。路径翻译、argv 改写、"把远端文件同步到本地再跑"都是在和这个事实对抗。让大脑长在节点上，这些问题不存在，而不是被绕开。
 
-**只要工具进程在本机，它读的就是本机的文件系统。** 路径翻译、argv 改写、
-"把远端文件同步到本地再跑"都是在和这个事实对抗，补不完。
+参考了 [ZCode](https://github.com/zai-org/ZCode)：它的远控好用，根本原因是远端有大脑，本地不发每条指令、只连过去用。这个观察定下了整个方案。
 
-还有一条更隐蔽的诉求：手机端的 `ds-harness-remote`（P2P 端到端加密远控）
-要能读到这些远端会话。如果远端会话只是"另一个窗口里的东西"，它读不到。
+## 接线方式
 
----
+插件不 import 任何 `@deepseek-ai/*`，唯一运行时依赖是 `ssh2`。它站在 DSH 的几处实现细节上，每一处都有测试守着，细节见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §三。
 
-## 二、参考了谁
-
-[ZCode](https://github.com/zai-org/ZCode) 的远控之所以好用，根本原因是
-**远端有大脑**：本地不发每条指令，只连过去用。这个观察定下了整个方案。
-
-对比下来，"本地调度 + 远端执行"的代理模型有四个绕不过去的硬缺口：
-
-| 缺口 | 为什么补不了 |
+| 接入点 | 做什么 |
 |---|---|
-| MCP 服务器在**本机** spawn | MCP client 直连 SDK，不经可重定向的进程服务 |
-| skills 用 `node:fs` 扫**本机** | 枚举发生在本地进程里 |
-| `bash`/`pwsh` 按 `process.platform` 二选一 | 本地 Windows 选 pwsh，转发到 Linux 必然 `code=127` |
-| 沙箱管不到远端 | 本地权限模式管的是本地进程 |
+| 实例上的 own property | Gateway 从类原型读 `@Remote` 描述符，dispatch 用 `Reflect.get`。在实例上覆写方法，端点表不变、实现换掉。 |
+| `workspaceFileScope` lookup | `fleet_…` 不是本地 Session，覆写后本地 id 原样委派，包装 id 合成 scope。 |
+| `lookupStore.resolvers` 的 `agent` 项 | 公开的 `configure` 已被上游占用，直接换 resolver 表那一项。 |
+| Gateway 的待处理事件表 | 自己造一条同形 pending 塞进 `pendingRemoteEvents`，投递与结算交给上游。 |
+| SSH `direct-tcpip` 上的 HTTP 与 RFC 6455 | 节点不开端口，`/api` 调用和 `$events` 流都跑在 SSH channel 上。 |
+| `/fleet/api` 与三个 `*.directoryFlow` 插槽 | 插件的管理面，以及"先选机器、再选目录"的选择器。 |
 
-四条全部消失的办法只有一个：**让大脑长在远端**。
+上游的 `/api`、`/api/remote.mux`、sidebar 槽位一行没改。
 
----
+### 不改的东西
 
-## 三、怎么做的
-
-### 3.1 大脑在远端，本地只做三件事
-
-```
-┌────────────────── 你的 Windows 桌面端 ──────────────────┐
-│  DSH Desktop（Electron）                                │
-│    └─ 本地 Host 进程                                    │
-│         ├─ 官方 /api、/api/remote.mux   ← 一行没改      │
-│         │    └─ 插件在**服务实例上**覆写若干方法：       │
-│         │       session/list、workspace/follow、…       │
-│         │       → 本地行 + 每台节点自己的行             │
-│         └─ /fleet/api   ← 节点管理 + 选机器/选目录 + 插件开关  │
-└─────────────────────────────────────────────────────────┘
-                    │  SSH :22（唯一入口，节点不开放端口）
-                    ▼
-┌──────────────── 远端 Linux · 常驻大脑 ───────────────────┐
-│  dsh --profile fleet --host 127.0.0.1 --port 0 --no-open  │
-│    ├─ 完整 DSH Host：rg / git / read_image / bash / PTY   │
-│    └─ 会话、工作区、审批、终端全部在远端                   │
-└─────────────────────────────────────────────────────────┘
-```
-
-本地只做三件事：**身份编码、请求转发、结果还原**。
-
-- **身份编码**：远端的东西跨界时变成 `fleet_<nodeId>_<remoteId>`，
-  比如 `fleet_n0123456789ab_session-1dc98667-…`。这一个字符串同时回答
-  "这是本地的还是远端的""哪台机器""远端是谁"。
-- **请求转发**：本地 `/api` 收到 `session/prompt`，是远端会话就转给节点自己的
-  `/api`。
-- **结果还原**：节点回来的 id 再套回 `fleet_…`，字节附件（图片预览）用
-  `multipart/form-data` 解回来。
-
-于是**工具层零改动**：`grep`/`git`/`read_image`/`bash` 在节点上就是本地的，
-因为它们本来就是本地的。同时远端会话出现在**同一个侧栏**里，手机端自然也能读到 ——
-对 Host 来说它们就是普通会话。
-
-列表是快照，侧栏靠的是活流。上游客户端另外订阅两路，本地会话天然在流里，
-远端会话不在 —— 只做合并的话行会"在，但死着"（标题停在 "New Session"、
-运行中转圈不转、在节点上新建的会话要等下一次整表拉取才出现）。所以插件还并流
-两件事：每个节点一条 `$events`（`api-session/*` 重发到本机事件总线）和一条
-`session/control`（每会话的 `title`、`modelSelection`、待处理审批标记）。
-两路都是 Host 级、每连接一条，所以是**并流**而不是转发 —— 浏览器侧同样一行没改。
-
-### 3.2 五处运行时缝隙（而不是改上游代码）
-
-插件**不 import 任何 `@deepseek-ai/*`**，唯一运行时依赖是 `ssh2`。
-它站在五处 DSH 自己的实现细节上，每一处都有测试守着（细节见
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §三「五条缝隙」）：
-
-| 缝隙 | 是什么 |
+| 不改 | 说明 |
 |---|---|
-| 实例上的 own property | Gateway 从**类原型**读 `@Remote` 描述符，但 dispatch 用 `Reflect.get(view, name)` —— 实例属性优先。所以在实例上覆写方法，端点表不变、实现换掉。 |
-| `typert.lookups.configure('workspaceFileScope', …)` | `fleet_…` 不是本地 Session，Host 自己的 lookup 会先返回 not-found。覆写后本地 id 原样委派上游，包装 id 合成 scope。 |
-| `typert.lookupStore.resolvers` 的 `agent` 项 | `agent: Agent` 形参在方法体之前就被解析掉，而公开的 `configure` 已被上游占用（同一 key 第二次调用直接抛错）。所以直接换 resolver 表里那一项。 |
-| Gateway 的待处理事件表 | 上游唯一的「本地发起 waterfall」入口要求一个只有 `@deepseek-ai/dsh-scope` 能造的 carrier。改为自己造一条同形 pending 塞进 `pendingRemoteEvents`，投递与结算交给上游。 |
-| SSH `direct-tcpip` 上的 HTTP 与 RFC 6455 | 节点不开放端口，所有 `/api` 调用与 `$events` 流都跑在一条 SSH channel 上。自写客户端两个坑：Gateway 每 2 秒 ping 一次不应答就断；带字节的结果**不是 JSON**，`Uint8Array` 被换成 `null` 后另走 `multipart/form-data`。 |
+| DSH 上游 | 不改 Loader 行、不 import `app.asar` 里的东西、不接管 `/api`。升级 DSH 时这套东西跟着走，靠的是上面那几处实现细节的测试。 |
+| `ds-harness-remote`（中转插件） | 手机端那侧一行不动。它读到的远程会话就是普通 `session/list` 行，不知道这个插件存在。 |
+| DSH Go（手机客户端） | 不动。它连的是桌面 Host，剩下的事都是桌面端做的。 |
+| `@artenx/dshb` | 已移除，功能重复。 |
 
-另有一处不在缝隙之列但同样是实现细节：插件用 `ctx.webServer.register({ prefix: '/fleet/api' })`
-挂自己的管理面，并占用壳的三个 `*.directoryFlow` 插槽把本机目录选择器换成"先选机器、再选目录"。
+手机端唯一做不到的事是装插件：中转插件的 allowlist 里有 `pluginManager/updateBundle`，没有 install。它负责装好之后连节点。
 
-这几条都是**实现细节，不是公开契约**。所以有 `test/dispatch-seam.mjs`：
-DSH 升级后它先炸，而不是等你某天发现所有远端会话都点不开。
+### 身份是一个字符串
 
-### 3.2b 手机入口：节点路径挤进同一套语法
+远程的东西跨界时变成 `fleet_<nodeId>_<remoteId>`，比如 `fleet_n0123456789ab_session-1dc98667-…`。一个字符串同时回答"是本地的还是远端的""哪台机器""远端是谁"，不需要第二张路由表。
 
-手机端 `ds-harness-remote` 只会说「本机绝对路径」，节点路径必须有语法位置。用
-`/@fleet/<nodeId>/…` 前缀（取舍见 [ADR-0004](docs/adr-0004-node-control-and-picker.zh.md) §二）。
-两个硬理由：`fleet://` 在 win32 上过不了中转 dispatch 前的 `isAbsolute` 检查；
-而 `/@fleet` 让中转那次 `mkdir -p` 的落点集中到 `<盘>:\@fleet\` 之下，fleet 在工作区
-建好后自底向上 `rmdir` 空目录链 —— 能删的只会是刚被建出来的空链，不是启发式。
+只改写完整 Session 身份的字符串。用 `startsWith('session-')` 这种宽松判断会命中 `session-log-deepseek/delivery-accepted` 这类事件类型，把客户端渲染的每个事件都改坏。
 
-同样是手机入口的一部分：`directoryPicker/list` 与 `createDirectory` 由 fleet
-**整体替换**而不是装饰 —— 桌面上 `directory-picker-auto` 解析成 native 后端，
-原生 `list` 会 `requireCapability("browse")` 抛错，中转随即改用自己那份实现，
-继承式的覆写永远调不到。
+### 侧栏要活，不只是快照
 
-### 3.2c 节点控制模式：一个只有一种能力的会话
+列表是快照，侧栏靠的是活流。上游客户端订阅两路，本地会话天然在流里，远程会话不在——只合并列表的话，行会"在，但死着"：标题停在 New Session、运行中转圈不转、在节点上新建的会话要等下一次整表拉取才出现。
 
-新会话可以选 `node-control` 预设。「除节点管理外一律拒绝」不是运行时判断，
-而是**组合属性**：web 那层 patch 把宿主面的 agent 工具行全部 disable，所以一个预设的
-`config.plugins` 就是那个会话的完整工具集，而这个预设只列了 `fleet_nodes` 一个工具。
-密钥只收引用、拒绝内联粘贴，因为工具参数会写进会话日志。
+所以插件还并流两件事：每个节点一条 `$events`（把 `api-session/*` 重发到本机事件总线）和一条 `session/control`（每会话的标题、模型选择、待处理审批标记）。两路都是 Host 级、每连接一条，浏览器侧同样一行没改。
 
-被控节点不会得到这个能力：`NODE_NEVER_SYNC` 把本插件挡在节点之外（它是全开默认值里的
-硬排除项），所以节点不会变成第二个能管理节点的入口。
+### 节点只当大脑
 
-### 3.3 节点只当大脑 —— 定制组合，不是 fork
+节点上装的是独立的 DSH，默认加载 Web 组合，服务器上于是多出一整套浏览器插件：56 个 `dsh-client-ui-*` 包、SPA dist 服务、HMR 链、桌面遥测。没有窗口的机器要么空转，要么因为找不到 dist 直接报错。
 
-节点上装的是一个**独立的 DSH 安装**，有自己的 `~/.dsh`。默认它装的是 Web 组合，
-于是服务器上会加载一整套浏览器插件（56 个 `dsh-client-ui-*` 包、SPA dist 服务、
-HMR 链、桌面遥测）—— 没有窗口的机器上要么空转，要么因为找不到 dist 直接报错。
+上游的 6 个 bundle 里没有"大脑"这个形态。我没有 fork 包，而是定制**组合**：节点 profile 组合 `@deepseek-ai/dsh-base` + `@local/dsh-fleet-brain`，`dsh-web-app` 那层根本不在组合里，那些包连 import 都不会发生。
 
-上游发布的 6 个 bundle 里没有"大脑"这个形态：`base`（无 Host）、`web-app`
-（带整个浏览器面）、`headless`（一次性任务，无 Host/HTTP）、`acp-app`、
-`sdk-app`、`sdk-minimal`。
+`@local/dsh-fleet-brain` 的 patch 从**已安装的那个 release** 派生，不是从 master：
 
-**我没有 fork。** DSH 是 Cordis 组合式架构 —— 一个插件是否存在于运行时，
-完全由 profile 的组合层决定。所以节点 profile 现在组合：
-
-```
-@deepseek-ai/dsh-base + @local/dsh-fleet-brain      ← 现在
-@deepseek-ai/dsh-base + @deepseek-ai/dsh-web-app    ← 之前
+```bash
+node packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs   # 重新派生
+git diff packages/dsh-fleet-brain/cordis.patch.yml             # 有 diff 就读它
 ```
 
-`dsh-web-app` 那一层**根本不在组合里**，那些包连 `import` 都不会发生。
-效果等价于删代码，但可逆、且跟着官方版本走。
+第一版从 master 派生，多出一行 `authentication-token`，而 `0.2.2-rc.3` 没发布那个包，节点启动报 `1 entry did not activate`。组合必须描述它要启动进去的那个运行时。
 
-`@local/dsh-fleet-brain` 的 patch 是**从已安装的那个 release 派生**的
-（`scripts/sync-from-upstream.mjs`）：keep 全部 host-plane 行，drop 56 个 UI 行
-加 9 个浏览器专属行（每个都写了理由），公式化复制 surface 值与 agent plane 的
-disable。`scripts/check-composition.mjs` 断言结果"仍然是个大脑"。
+### 模型和密钥由本机下发
 
-> 第一版从 master 派生，多出一行 `authentication-token`。而 `0.2.2-rc.3` 根本没
-> 发布那个包，节点启动报 `1 entry did not activate: Cannot find package …`。
-> 组合必须描述它要**启动进去的那个运行时**，所以默认源改成"已安装的 release"。
-> 这条现在由 `scripts/sync-from-upstream.mjs` 的默认行为保证，每次 DSH 升级重跑一次、
-> 读 diff 就行 —— 实测 rc.3 → rc.5 重新生成后**逐字节无变化**。
+组合决定加载哪些插件，不决定用什么模型、用谁的 key。每次连接同步两样：
 
-### 3.4 节点仍然没有模型和密钥
+1. 本机活的 provider 路由、默认模型、权限预设写进节点的 `~/.dsh/profiles/fleet/cordis.patch.yml`。这是节点自有 profile 的配置层，节点宿主会热重载它，所以改完立刻生效，不重启、不断会话。
+2. 那些行点名的 key 在本机取值，通过节点自己的 `credentials/set` 推进节点凭据库。
 
-组合决定"加载哪些插件"，不决定"用什么模型、用谁的 key"。这两件事每次 `connect`
-同步，全部由本机驱动：
+本机订阅自己的 `app-boot/config-reload` 与 `credentials/reference-updated`，本地改配置或换 key 就给所有已连接节点重新下发。
 
-1. **配置**：本机活的 provider 路由、默认模型、权限预设写进节点的
-   `~/.dsh/profiles/fleet/cordis.patch.yml`。这是节点**自有 profile** 的配置层，
-   也正是节点宿主会热重载的文件之一 —— 改完立刻生效，**不重启、不断会话、不用重连**。
-2. **凭据**：那些行点名的 key 在本机 `credentials.resolve()` 取值，通过节点自己的
-   `credentials/set` 推进节点凭据库。
-3. **跟随**：本机订阅自己的 `app-boot/config-reload` 与 `credentials/reference-updated`，
-   本地一改配置或换 key，就给所有已连接节点重新下发一次。
+早期版本用 `--patch` 传 overlay，实测它不在 HMR 的监视列表里，改配置必须重启节点宿主。换成节点自有 profile 的 patch 后问题消失，记录见 [`docs/adr-0001`](docs/adr-0001-node-config-carrier.zh.md)。
 
-> 早期版本用 `--patch` 传一份 overlay。实测发现它**不在 HMR 的监视列表里**
-> （上游只 watch profile patch 和 home patch），所以改配置必须重启节点宿主，
-> 而且只在连接时同步一次。换成节点自有 profile 的 patch 后，两个问题都消失。
-> 实验记录见 [`docs/adr-0001-node-config-carrier.zh.md`](docs/adr-0001-node-config-carrier.zh.md)。
+## 跑过什么
 
-三步都幂等（内容摘要决定要不要重写）。只有 **brain bundle 的代码**变了才重启宿主 ——
-模块要重新 import，那是唯一需要重启的情形。
-
-### 3.5 断线看得见，失败说得清
-
-三条都不是新功能，是"出了事之后界面仍然像没事"的三处修补。取舍与实测写在
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §三「连接状态机」一带，这里只说结论。
-
-**断线不再假装连着。** SSH socket 掉了之后 `state` 原来一直是 `connected`：卡片是绿的、
-侧栏还列着那台机器的工作区，而任何调用都回 `fleet/node-offline` —— 一个界面上从未出现过的
-状态。现在 `close` 事件（排除 `invalidate`/`dispose` 这两条主动路径）会上报，状态落 `idle`
-并记 `droppedAt`，卡片写「已断线，正在重连」。
-
-**重连是阶梯，不是死循环。** `2s → 4s → 8s`，之后每 2 分钟一次，直到成功或用户点「断开」。
-阶梯期间**不报错**，只是 `idle`。实测 `systemctl restart ssh` 两秒回来（第一档就成），
-整机重启 21 s 回来（第三或第四档）。
-
-**失败要能分诊。** 原来所有失败都是一行英文原文加一个重试按钮 —— 而重试按钮只对其中一种
-有意义。现在每次失败分类成 `{code, message, action, retryable, detail}`，`action` 是封闭
-集合（`fix-credential` / `review-host-key` / `check-network` / `retry` / `upgrade-node` /
-`upgrade-desktop` / `reinstall` / `inspect-log`），界面把它翻成按钮。密码错**不配重试按钮**，
-因为按了只会得到同一次失败。
-
-**每个节点自带最近 100 行日志。** 桌面端总日志里混着所有节点和插件，出了问题的人找不到它。
-节点的日志走 `/fleet/api/nodes/<id>/log`，卡片上可展开、可复制，**写入时脱敏**
-（`Bearer` 那条规则必须在 `key=value` 之前，否则 token 会漏在行尾）。
-
-### 3.6 一次 exec 就是一个 SSH 包
-
-这条是踩出来的：节点上曾长期刷 `Bad packet length 88734736.` + `Connection corrupted`，
-把整轮 e2e 打红。真因不在加密、并发或运行时，而在命令行的长度。
-
-ssh2 发 exec 请求时**不切包**（`Protocol.js:1273` 的 `alloc(1 + 4 + 4 + 4 + 1 + 4 + cmdLen)`），
-而 OpenSSH 的 `PACKET_MAX_SIZE` 是 256 KiB。超了之后 sshd 不回错误，它按错位的长度继续读，
-之后每个包都成垃圾。而插件当时把整棵插件树 base64 拼进命令行：`dsh-whale-widget` 在磁盘上
-5.9 MB，拼出来 **7,923,386 字节**，日志里那个 `7923616` 就是它（差 230 字节 = 脚本尾部）。
-
-单连接量出来的边界正好在 256 KiB（262,000 字节干净、262,200 字节六条连接全坏），而同样的
-内容走 stdin 不论多大都干净。所以规则是 **payload 走 stdin，命令行走 argv**，另加一道本地
-闸门 `MAX_COMMAND_BYTES = 128 KiB`。细节与实测表见
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §三「一次 exec 就是一个 SSH 包」。
-
----
-
-## 四、证据
-
-不是"应该能用"，是跑过。
-
-**工具真的在节点上跑**（`test/tool-parity.mjs`）：agent 自己调用了
-`read`×2 / `write` / `edit` / `grep` / `glob` / `bash`，全部打 `/root/fleet-second/…`
-真实路径，无路径类失败，整份 transcript 里**没有任何 Windows 路径**。
-
-**那三个当初必坏的工具**（`test/tool-git-image.mjs`）：
+**工具真的在节点上执行**（`e2e/tool-parity`）：agent 自己调用 `read`×2 / `write` / `edit` / `grep` / `glob` / `bash`，全部打 `/root/fleet-second/…` 真实路径，无路径类失败，整份 transcript 里没有 Windows 路径。当初必坏的三个工具（`e2e/tool-git-image`）：
 
 ```
-git log        → 2de1061 initial commit
-read_image     → image/png image, 4x4 px, 75 bytes
-grep           → 命中 module.exports
+git log     → 2de1061 initial commit
+read_image  → image/png image, 4x4 px, 75 bytes
+grep        → 命中 module.exports
 ```
 
-**节点确实是个大脑**（实测，DSH 0.2.2-rc.5）。下面每个数都能从
-`packages/dsh-fleet-brain/cordis.patch.yml` 数出来（`check-composition.mjs` 每次都会重新数）：
+**节点确实是个大脑**。下面每个数都能从 `packages/dsh-fleet-brain/cordis.patch.yml` 数出来，`check-composition.mjs` 每次重新数：
 
 ```
 profile bundles    : @deepseek-ai/dsh-base + @local/dsh-fleet-brain
 本层贡献的行       : 59   (24 条 config 覆写 + 35 条 insert)
-派生自官方 web-app : 98 行 → keep 33、丢 9 条浏览器专属、丢 56 条 dsh-client-ui-*
+派生自官方 web-app : 98 行 → keep 33、丢 9 条浏览器专属、丢 56 条 client-ui
 dsh-client-ui-*    : 0
 web-runtime        : 0
 ```
 
-**测试矩阵**：35 个套件，分三层，由 `test/run-all.mjs` 一次调度（`--list` 打印完整清单）。
-
-| 层 | 数量 | 套件 | 需要什么 |
-|---|---|---|---|
-| `offline` | 14 | `routing`、`routing-extra`、`multipart`、`provision`、`waterfall`、`version`、`fleet-lifecycle`、`errors`、`picker-paths`、`install`、`autoconnect`、`fleet-control`、`composition`、`packet` | 其中 12 个只要 Node 22；`provision` 与 `composition` 要装好的 DSH（读 `app.asar`） |
-| `contract` | 3 | `descriptor`、`dispatch`、`upstream` | 装好的 DSH，必须用它的 Electron Node 跑 |
-| `e2e` | 18 | `gateway`、`host-routing`、`workspace-flow`、`workspace-browse`、`picker-flow`、`plugin-switch`、`tool-parity`、`tool-git-image`、`client-bundle`、`event-relay`、`session`、`terminal`、`multi-node`、`artefact`、`npm-install`、`approval`、`node-control`、`browser` | 运行中的 Host + SSH 可达的节点 |
-
-实测（`fleettest` Host + 真节点 `probe-93`）：**34 passed, 0 failed, 1 skipped in 289.8s**，
-唯一 SKIP 是 `browser`（没给 Chrome 调试端口）。
+**测试**：35 个套件分三层，`test/run-all.mjs` 一次调度。全量跑在 `fleettest` Host + 真实节点上：**34 passed, 0 failed, 1 skipped in 358.5s**，唯一 SKIP 是 `browser`（没给 Chrome 调试端口）。跑不了的套件带原因记 SKIP，不记成通过；`--layer e2e` 一个都没跑成时非零退出。
 
 ```bash
-node packages/dsh-fleet/test/run-all.mjs                     # 全部
-node packages/dsh-fleet/test/run-all.mjs --layer offline,contract   # 不需要节点的那两层
+node packages/dsh-fleet/test/run-all.mjs                            # 全部
+node packages/dsh-fleet/test/run-all.mjs --layer offline,contract   # 不需要节点
 ```
 
-端到端层里有两个套件真的在节点上装东西：
 
-- `artefact` 从发布源下载一份 162 MiB 的运行时（`v0.2.2-rc.5` 的制品实测 170 092 405 字节，
-  源列表是 `DEFAULT_SOURCES`：CNB 优先，其后是加速站，**不回退直连 GitHub**）；全都拿不到时
-  它以 `ARTEFACT_UNAVAILABLE` 退出并被记成 SKIP。
-- `npm-install` 让节点自己 `npm install` 同一版本，证明兜底路线留下的树带着构建戳、解析到了
-  节点自己的原生包、且 `node-pty` 的 `spawn-helper` 可执行。节点连不上 registry 时退出码 3，
-  同样记成 SKIP。实测参考节点 26–33 s。
+## 安装
 
-换源改 `packages/dsh-fleet/src/remote/artefact.js` 的 `DEFAULT_SOURCES`（整条有序列表，含
-CNB 那种自有路径布局的源），只换加速站改 `DEFAULT_MIRRORS`。`browser` 套件需要一个带
-`--remote-debugging-port` 的 Chrome，默认不跑。
-
----
-
-## 五、怎么用
-
-### 安装
-
-```bash
-# 1. 一条 URL（推荐，不需要 npm 账号，也不需要先下载）
-dsh plugin --profile desktop add -w https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v<版本>/greatbaby-dsh-fleet-<版本>.tgz
-
-# 2. 从 npm 装（0.5.1 及更早发过的版本仍然可用）
-dsh plugin --profile desktop add -w @greatbaby/dsh-fleet
-
-# 3. 或从源码目录装（开发时用，pnpm 会记成 link:）
-dsh plugin --profile desktop add -w <本仓库的绝对路径>/packages/dsh-fleet
-```
-
-第 1 种就是 DSH 安装器的原生形态：`install-spec.js` 里对 `https://…/*.tgz` 有明确分支
-（`URL must point at a git repository or a tarball`），所以 tarball 放哪都行 —— 这里放 CNB 的
-Release，因为它是公开仓库、匿名可下、而且不依赖 npm 上还留着哪个版本。
-
-**让 agent 装。** 桌面端会话里有 `plugin_manager` 工具，`install_bundle` 接受同一个 tarball URL，
-所以可以对 agent 说「装远程节点插件」，它自己完成安装：
+在桌面端会话里对 agent 说一句「装远程节点插件」，它自己完成：
 
 ```
 plugin_manager(action='install_bundle',
   target='https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v<版本>/greatbaby-dsh-fleet-<版本>.tgz')
 ```
 
-这条路**只能在桌面端会话里走**：中转插件的 `HARNESS_REMOTE_ALLOWLIST` 里有
-`pluginManager/updateBundle`，没有 install —— 手机端装不了插件，它负责的是装好之后连节点。
+也可以自己敲：
 
-安装后 profile 的 `dsh.profile.bundles` 里必须把本插件排在 `@deepseek-ai/dsh-base` 之后
-（桌面端还要排在 `dsh-web-app` 之后）。`engines.dsh` 钉住了运行时范围，DSH 版本不匹配时安装会
-被直接拒绝，而不是只组合一半。
+```bash
+dsh plugin --profile desktop add -w <上面那条 URL>    # 推荐
+dsh plugin --profile desktop add -w @greatbaby/dsh-fleet
+dsh plugin --profile desktop add -w <仓库绝对路径>/packages/dsh-fleet   # 开发用
+```
 
-**从 0.5.0 之前的版本升级**：包名变了（`@local/dsh-fleet` → `@greatbaby/dsh-fleet`），
-旧名已无法安装也不会再更新。先 `dsh plugin --profile <p> remove @local/dsh-fleet`，
-再用新名安装，最后把 profile 的 `bundles` 里的旧名换掉。节点侧不需要做任何事。
+手机端装不了插件：中转插件的 `HARNESS_REMOTE_ALLOWLIST` 里有 `pluginManager/updateBundle`，没有 install。它负责的是装好之后连节点。
 
-### 加节点
+装完要重启一次 DSH，新装 bundle 的客户端半边才会被加载。`engines.dsh` 是 `>=0.2.2-rc.3 <0.3.0`，版本不匹配时安装被拒绝，而不是只组合一半。
 
-在 DSH 的**设置 → Remote nodes**（或侧栏的 Remote nodes 面板）里加节点
-（host / 端口 / 用户 / 密码或私钥），点连接。首次连接会自动在节点上装同版本 DSH、
-装大脑组合、下发模型与密钥、启动，然后验证 `session/list` 真的能答 ——
-只有它成功才报 connected。
+从 0.5.0 之前的版本升级要换包名：`@local/dsh-fleet` → `@greatbaby/dsh-fleet`。先 remove 旧的，再装新的，最后把 profile 的 `bundles` 里旧名换掉。节点侧不用做任何事。
 
-节点要求：Node ≥ 22，以及 `curl`（或 `wget`）与 `npm` **至少有一个**。别的都由插件准备。
+## 加节点
 
-节点上的 DSH 有两条来路，按顺序试：先下 Release 制品（一次 ~162 MiB 下载，可离线复用），
-拿不到就让节点自己 `npm install` 同版本（实测 26–33 s / 673 包）。所以上游发新版、制品还没打
-时不会卡住，最坏是一次慢一点的连接。两条路都会把版本戳写进树里，下次连接认得出来；
-**制品字节坏了**（校验和不符、归档里没有 CLI）仍然报错并回滚，不会从 registry 再下一次。
-配置 `runtime: 'artefact'` 或 `'npm'` 可强制单条路线，排查时用。
+**设置 → Remote nodes → 添加**：host、端口、用户、密码或私钥，点连接。首次连接会自动在节点上装同版本 DSH、装大脑组合、下发模型与密钥、启动，然后验证 `session/list` 真的能答。只有它成功才报 connected。
 
-制品的源按顺序试：**CNB 在前**（公开仓库，匿名可下，实测 4.3 MB/s、重复测量抖动 <1%），
-四个 GitHub 加速站在后做灾备（历史区间 0.2–9.6 MB/s，抖动 40 倍）。加源或换源改
-`DEFAULT_SOURCES`；只换加速站改 `DEFAULT_MIRRORS`；`mirrors: []` 是「关掉制品路线」的写法。
+节点要求 Node ≥ 22，以及 `curl`（或 `wget`）与 `npm` 至少有一个，其余都由插件准备。
 
-### 在手机上用
+节点的 DSH 有两条来路，按顺序试：
 
-装 `ds-harness-remote`，手机端连到这台桌面 Host。远程会话就是普通的
-`session/list` 行，所以它们出现在同一个侧栏里；节点的文件系统挤进同一套路径语法：
+1. **下载 Release 制品**：一次约 162 MiB，可离线复用。源列表里 CNB 排第一（实测 4.3 MB/s，重复测量抖动 <1%），四个 GitHub 加速站做灾备（0.2–9.6 MB/s，抖动 40 倍）。不回退直连 GitHub。
+2. **节点自己 `npm install`**：制品拿不到时走这条，实测 26–33 s / 673 包。上游发新版、制品还没打时不会卡住。
+
+两条路都把版本戳写进树里，下次连接认得出来。制品字节坏了（校验和不符、归档里没有 CLI）报错并回滚，不会从 registry 再下一次——同一份坏版本再解析只会更慢、下载更多，还把"哪个源坏了"掩盖掉。
+
+配置 `runtime: 'artefact'` 或 `'npm'` 可以强制单条路线，排查时用。
+
+### 连接会自己恢复
+
+SSH 断开之后状态不再是绿色的 `connected`：卡片落 `idle` 并记时间，写「已断线，正在重连」。重连是阶梯：`2s → 4s → 8s`，之后每 2 分钟一次，直到成功或你点断开。阶梯期间不报错。实测 `systemctl restart ssh` 两秒回来，整机重启 21 s 回来。
+
+失败会分类成 `{code, message, action, retryable, detail}`，界面把 `action` 翻成按钮。密码错不配重试按钮，因为按了只会得到同一次失败。
+
+每个节点自带最近 100 行日志（`/fleet/api/nodes/<id>/log`），写入时脱敏。桌面端总日志混着所有节点和插件，出了问题的人找不到它。
+
+## 加工作区：先选机器，再选目录
+
+侧栏工作区旁的加号，或者新建会话时的「添加工作区」。对话框第一页是设备：
+
+- **此设备** → 下一页是这台电脑的盘符
+- **节点** → 下一页是该节点的根目录 `/`
+- **添加远程设备…** → 就地加节点，不用先去设置页
+
+选过的目录记在设备下面，下次直接点「上次使用」。浏览时能新建文件夹、能直接输完整路径；工作区名称可以自己填，留空则用文件夹名。
+
+给两类机器看不同的入口是有意的：这台电脑有盘符，节点的树从 `/` 开始。给节点看盘符、给 Windows 看 POSIX 路径，就是设备这一步要挡住的错。
+
+## 节点上有什么、没有什么
+
+节点是独立安装，所以它有自己的配置。连接时同步的只有三样：**provider 路由、默认模型、权限预设**，加上这些行点名的 key。
+
+不同步的：
+
+| 不同步 | 为什么 | 想要的话 |
+|---|---|---|
+| **MCP 服务器** | `mcpManager` 的服务器表是每个 Host 自己的 volatile 配置（在设置页里配），没有跨机器下发接口 | 在节点上打开设置页配一次 |
+| **你自己装的 skills** | skill 目录由各 Host 用 `node:fs` 扫自己的 `~/.dsh/skills` | 复制到节点的 `~/.dsh/skills` |
+
+节点自带的是运行时装的那些：`dsh-doc`、office 系列 skills、`tool-web`、subagent、workflow、jobs、schedule。预设里的工具集和桌面端一样（`standard` 预设 33 行），差的只是上表这两类个人配置。
+
+## 插件同步
+
+节点是另一台机器，只组合你发给它的东西。**设置 → Remote nodes → 插件同步** 列出你在这个桌面端装的第三方插件，一行一个 bundle，带版本和它贡献了什么。
+
+默认全部下发：装在这里、连了节点，就是同一个工作环境。关掉一个，它只在这台机器上运行。
+
+四个名字永远不下发，不管在哪个列表里：这个插件自身（它的预设带节点管理工具，一个能管理其他节点的节点是不该存在的形态）、大脑 bundle、中转插件的两个包名（一个自己开了第二个入口的节点是没人要的界面）。
+
+开关会真的在节点上装或复制包，然后重写节点的 bundle 列表并重启常驻宿主。回复里逐个节点报结果。测试验的是开关之后节点仍然答得上话，不只是开关返回成功。
+
+## 节点控制模式
+
+新会话可以选「节点管理」预设。那个会话只能查看、添加、修改、连接、断开节点，别的都不行。
+
+这不是提示词让模型自觉：预设的 `config.plugins` 就是那个会话的工具集，而它只列了 `fleet_nodes` 一个工具。没有 shell、没有文件、没有搜索、没有网络、没有子代理、没有 workflow。让它读文件，它会说这个会话只管理节点，并建议你到对应节点的工作区里新建会话。
+
+密钥只接受引用，拒绝内联粘贴：
+
+```json
+{"kind":"key","path":"~/.ssh/id_ed25519"}
+{"kind":"password","env":"DSH_FLEET_NODE_PW"}
+```
+
+工具参数会写进会话日志，粘一个密码进去就是明文持久化。想直接粘贴就走设置页。
+
+被控节点拿不到这个能力：`NODE_NEVER_SYNC` 把本插件挡在节点之外，所以节点不会变成第二个能管理节点的入口。
+
+## 手机上用
+
+装 `ds-harness-remote`，手机连到这台桌面 Host。远程会话是普通的 `session/list` 行，所以出现在同一个侧栏里。节点的文件系统挤进同一套路径语法：
 
 ```
 /@fleet                       → 节点列表
@@ -367,24 +232,29 @@ plugin_manager(action='install_bundle',
 /@fleet/<nodeId>/root/proj    → 那台机器上的 /root/proj
 ```
 
-`directoryPicker/list` 对两类机器都答，用这种路径调 `workspace/create` 会**在节点上**
-建工作区。这个前缀是节点的保留命名空间，直接拿它建工作区会被拒绝。
+`directoryPicker/list` 对两类机器都答，用这种路径调 `workspace/create` 会在节点上建工作区。这个前缀是节点的保留命名空间，直接拿它建工作区会被拒绝。
 
-手机端的 `harnessRemoteAllowlist` 是一份客户端常量，能发哪些端点由它决定 ——
-Host 侧放宽没有用。已知的一个缺口：它放行 `subagents/interruptByParent`，而
-0.2.2 的真实端点是 `subagents/interruptByUser`（rc.5 实测仍是这个名字），所以手机暂时
-无法中断子代理。
+手机端的 `harnessRemoteAllowlist` 是客户端常量，能发哪些端点由它决定，Host 侧放宽没用。已知缺口：它放行 `subagents/interruptByParent`，而 0.2.2 的真实端点是 `subagents/interruptByUser`（rc.5 实测仍是这个名字），所以手机暂时无法中断子代理。
 
-### 节点控制模式
+## 升级
 
-新会话可以选 `node-control` 预设：那个预设的工具集只有 `fleet_nodes` 一个工具，
-没有文件、shell、搜索、网络、子代理。用它可以增删节点、连接、查状态；
-密钥只接受引用（`{"kind":"key","path":"~/.ssh/id_ed25519"}` 或 `{"kind":"password","env":"NAME"}`），
-不接受内联粘贴 —— 工具参数会写进会话日志。
+DSH 升级时节点侧不需要预先打好制品，所以是这五条命令：
 
-### 跑测试
+```bash
+node packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs          # 从已安装的 release 重新派生组合
+git diff packages/dsh-fleet-brain/cordis.patch.yml                    # 有 diff 就是上游组合变了，读它
+node packages/dsh-fleet-brain/scripts/check-composition.mjs           # 断言结果仍然是个大脑
+node packages/dsh-fleet-brain/scripts/embed-into-fleet.mjs            # 嵌进插件
+node packages/dsh-fleet/test/run-all.mjs --layer offline,contract     # 契约层先炸
+```
 
-测试要自己给节点（源码里**没有默认 IP 和默认密码**，这是公开仓库）：
+实测 rc.3 → rc.5：重新生成的组合逐字节无变化，上游只删了 `authentication-token` 与 `ui-session-status` 两行，都在被丢掉的那一侧；契约层 3 个套件全过。节点在下一次连接时自己 `npm install` 同版本。
+
+想省那次下载就按 [`CONTRIBUTING.md`](CONTRIBUTING.md) 打一份制品发到 Release。三条升级链（DSH / 中转插件 / DSH Go）各自要重跑什么，见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md)。
+
+## 跑测试
+
+测试要自己给节点，源码里没有默认 IP 和密码：
 
 ```bash
 export DSH_FLEET_TEST_HOST=192.0.2.10
@@ -393,51 +263,38 @@ export DSH_FLEET_TEST_PASSWORD=...
 node packages/dsh-fleet/test/run-all.mjs --layer e2e
 ```
 
-### 升级 DSH
+## 仓库结构
 
-节点侧**不需要预先打好制品**，所以升级是这五条命令：
-
-```bash
-node packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs   # 从已安装的 release 重新派生组合
-git diff packages/dsh-fleet-brain/cordis.patch.yml             # 有 diff 就是上游组合变了，读它
-node packages/dsh-fleet-brain/scripts/check-composition.mjs    # 断言结果仍然是个大脑
-node packages/dsh-fleet-brain/scripts/embed-into-fleet.mjs     # 嵌进插件
-node packages/dsh-fleet/test/run-all.mjs --layer offline,contract   # 契约层先炸
+```
+packages/
+  dsh-fleet/        插件：装在桌面端，Host 侧 + 浏览器侧
+  dsh-fleet-brain/  节点侧 bundle：只当远程大脑的 DSH 组合
+docs/
+  ARCHITECTURE.md   设计与取舍：每个决定否决了什么
+reference/          上游源码（只读，不进版本库）
 ```
 
-实测 rc.3 → rc.5：重新生成的组合**逐字节无变化**（上游只删了 `authentication-token` 与
-`ui-session-status` 两行，都在被丢掉的那一侧），契约层 3 个套件全过。节点在下一次连接时
-自己 `npm install` 同版本，不需要等任何人构建 162 MiB 的制品；想省那一次下载就按
-`CONTRIBUTING.md` 打一份制品发到 Release。
-
-`engines.dsh` 现在是 `>=0.2.2-rc.3 <0.3.0`，所以 0.2.2 整个系列内的升级都直接放行，
-0.3.0 会被拒绝安装而不是组合一半。三条升级链（DSH / 中转插件 / DSH Go）各自要重跑什么，
-见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md)。
-
----
-
-## 六、文档
+## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 路线取舍、五处缝隙、身份编码、连接状态机、SSH 包上限、为什么"不做镜像"是功能 |
-| [`docs/adr-0001-node-config-carrier.zh.md`](docs/adr-0001-node-config-carrier.zh.md) | 节点配置走哪个文件：profile patch 而不是 `--patch` overlay（HMR 只 watch 前者） |
-| [`docs/adr-0002-approval-terminal-version-plugins.zh.md`](docs/adr-0002-approval-terminal-version-plugins.zh.md) | 审批、终端、版本闸门与插件开关四件事的取舍 |
-| [`docs/adr-0003-phone-control.zh.md`](docs/adr-0003-phone-control.zh.md) | 手机 → 中转 → 桌面 → 节点这条链路的调研与硬边界 |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 路线取舍、五条缝隙、身份编码、连接状态机、SSH 包上限、为什么"不做镜像"是功能 |
+| [`docs/adr-0001-node-config-carrier.zh.md`](docs/adr-0001-node-config-carrier.zh.md) | 节点配置走 profile patch 而不是 `--patch` overlay |
+| [`docs/adr-0002-approval-terminal-version-plugins.zh.md`](docs/adr-0002-approval-terminal-version-plugins.zh.md) | 审批、终端、版本闸门与插件开关 |
+| [`docs/adr-0003-phone-control.zh.md`](docs/adr-0003-phone-control.zh.md) | 手机 → 中转 → 桌面 → 节点这条链路与它的硬边界 |
 | [`docs/adr-0004-node-control-and-picker.zh.md`](docs/adr-0004-node-control-and-picker.zh.md) | `/@fleet` 命名空间、选择器接管、节点控制、安装形态 |
 | [`docs/adr-0005-release-and-maintenance.zh.md`](docs/adr-0005-release-and-maintenance.zh.md) | 包名依据、发布形态、三条升级链 |
-| [`docs/adr-0006-node-runtime-supply.zh.md`](docs/adr-0006-node-runtime-supply.zh.md) | 节点运行时从哪来：制品优先、节点自建兜底，以及为什么拿不到不等于拿到了坏的 |
-| [`docs/agent-install.zh.md`](docs/agent-install.zh.md) | 只靠 agent 装一遍：会话里说什么、它走哪条路、断点在哪 |
+| [`docs/adr-0006-node-runtime-supply.zh.md`](docs/adr-0006-node-runtime-supply.zh.md) | 节点运行时从哪来：制品优先、节点自建兜底 |
+| [`docs/agent-install.zh.md`](docs/agent-install.zh.md) | 只靠 agent 装一遍：说什么、走哪条路、断点在哪 |
 | [`packages/dsh-fleet/README.md`](packages/dsh-fleet/README.md) | 插件安装、接线、测试矩阵、已知限制 |
-| [`packages/dsh-fleet/docs/ACCEPTANCE.zh.md`](packages/dsh-fleet/docs/ACCEPTANCE.zh.md) | 验收步骤与逐轮实测记录（含 2026-11-20 的 SSH 包上限那一轮） |
+| [`packages/dsh-fleet/docs/ACCEPTANCE.zh.md`](packages/dsh-fleet/docs/ACCEPTANCE.zh.md) | 验收步骤与逐轮实测记录 |
 | [`packages/dsh-fleet-brain/README.md`](packages/dsh-fleet-brain/README.md) | 节点组合：怎么从官方 web-app 减出"只当大脑"的一层 |
-| [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md) | DSH / 中转 / DSH Go 三条升级链各自要重跑什么 |
+| [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md) | 三条升级链各自要重跑什么 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么、谁受影响 |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 怎么跑测试、怎么自己构建节点运行时、改代码时的硬约束 |
-| [`SECURITY.md`](SECURITY.md) | 威胁模型、主机密钥、凭据与日志的处置、发布链，以及明确不做的四件事 |
-| [`AGENTS.md`](AGENTS.md) | 本仓库的协作规则与硬约束 |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 怎么跑测试、怎么构建节点运行时、改代码时的硬约束 |
+| [`SECURITY.md`](SECURITY.md) | 威胁模型、主机密钥、凭据与日志的处置 |
+| [`AGENTS.md`](AGENTS.md) | 本仓库的协作规则 |
 
-## 七、许可
+## 许可
 
-[MIT](LICENSE)，Copyright (c) 2026 zzyyyds88。`reference/` 下的上游源码各归其原作者
-（DSH 是 MIT，ZCode 见其仓库）。
+[MIT](LICENSE)，Copyright (c) 2026 zzyyyds88。`reference/` 下的上游源码各归其原作者（DSH 是 MIT，ZCode 见其仓库）。
