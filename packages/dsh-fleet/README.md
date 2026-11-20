@@ -177,13 +177,13 @@ decision is which machine the folder is on.
 **One route: a published archive.** `dsh-<version>-<platform>.tar.gz` is downloaded from CNB
 (`DEFAULT_SOURCES` in `src/remote/artefact.js`) and unpacked into `~/.dsh-fleet/runtime`. It
 takes no registry, no credential, and no decision on the node. Measured on the reference node:
-91 983 493 bytes in 17.6 s, spread under 1% across repeats. GitHub is **not** a download source
+91 839 618 bytes in 17.6 s, spread under 1% across repeats. GitHub is **not** a download source
 — a node in mainland China cannot reach it — though the same bytes are also uploaded to the
 GitHub release as a backup.
 
 The tree in that archive is **this project's own build**, not the upstream release: it comes
 from a fork of the upstream source with the browser surface, the Office engine and the
-experimental bundles removed (2014.6 MiB → 408.6 MiB unpacked; the archive is 87.7 MiB instead
+experimental bundles removed (2014.6 MiB → 408.6 MiB unpacked; the archive is 87.6 MiB instead
 of 165 MiB). A node runs what this project built and tested. Why, and what it costs, is in
 [`docs/adr-0007-fork-node-runtime.zh.md`](../../docs/adr-0007-fork-node-runtime.zh.md).
 

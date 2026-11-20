@@ -118,7 +118,7 @@ CNB 的发布侧有个坑（ADR-0006 八节已记）：`PUT` 返回 200 **不等
 | fork 能构建 | `pnpm run build:official`：10 个 gate 全过，183 s |
 | fork 能打包 | `release:pack --family dsh`：375 个 tarball；`verify-packed-install` 报 `installed @deepseek-ai/dsh reports 0.2.2-rc.5` |
 | 裁剪后的树能当大脑启动 | 打印 `dsh web: http://127.0.0.1:<port>/?token=…`；`/?token=…` 换 cookie 得 303 + `Set-Cookie`；`POST /api/session/list` 得 200 |
-| 两个平台的产物 | `dsh-0.2.2-rc.5-linux-x64.tar.gz` 87.7 MiB / 41 849 文件；`dsh-0.2.2-rc.5-win32-x64.tar.gz` 85.3 MiB / 41 842 文件 |
+| 两个平台的产物 | `dsh-0.2.2-rc.5-linux-x64.tar.gz` 87.6 MiB / 41 846 文件 / 91 839 618 字节；`dsh-0.2.2-rc.5-win32-x64.tar.gz` 85.2 MiB / 41 839 文件 |
 | 裁剪规则有断言 | `test/fork-runtime-unit.mjs`（19 条） |
 
 **没验的，写在明面上**：没有真节点（本轮没有 `DSH_FLEET_TEST_*`），所以

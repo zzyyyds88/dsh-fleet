@@ -209,7 +209,7 @@ node -e "..."  # 读该包 lib/typert.remote-client.js 里的 <endpoint>_paramet
 - 归档 `dsh-<version>-<platform>.tar.gz` 只有 CNB 一个源
   （`https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/<tag>/<file>`）。
   节点匿名 GET，不需要任何凭据。**GitHub 不作为下载源**：国内节点连不上。
-- 实测 87.7 MiB / 41 849 文件，CNB 约 20 s（旧的上游制品 165 MiB 约 34 s）。
+- 实测 87.6 MiB / 41 846 文件，CNB 约 18 s（旧的上游制品 165 MiB 约 34 s）。
 - 拿不到制品就是**报错**，逐条列出试过的 URL 与节点原文。不会再退到
   `npm install @deepseek-ai/dsh`：那条路装的是**上游发布版**，写同一枚构建戳，
   于是一次网络抖动就会把节点永久钉在上游版本上，而界面显示"已就绪"。

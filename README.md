@@ -157,7 +157,7 @@ dsh plugin --profile desktop add -w <仓库绝对路径>/packages/dsh-fleet   # 
 
 节点要求 Node ≥ 22，以及 `curl`（或 `wget`），其余都由插件准备。
 
-节点的 DSH 只有一条来路：**下载本项目自己构建的归档**（`dsh-<version>-<platform>.tar.gz`，约 87.7 MiB / 41 849 文件），只有 CNB 一个源（实测 91 983 493 字节 17.6 s，重复测量抖动 <1%）。GitHub 不作为下载源——国内节点连不上它，同一份字节仍会传到 GitHub Release 作灾备。
+节点的 DSH 只有一条来路：**下载本项目自己构建的归档**（`dsh-<version>-<platform>.tar.gz`，约 87.6 MiB / 41 846 文件），只有 CNB 一个源（实测 91 839 618 字节 17.6 s，重复测量抖动 <1%）。GitHub 不作为下载源——国内节点连不上它，同一份字节仍会传到 GitHub Release 作灾备。
 
 那棵树不是上游发布版，而是本项目从**上游源码的 fork** 编译出来的：删掉浏览器面、Office 引擎与实验性 bundle（解包 2014.6 MiB → 408.6 MiB）。为什么 fork、代价是什么，见 [`docs/adr-0007-fork-node-runtime.zh.md`](docs/adr-0007-fork-node-runtime.zh.md)。
 
