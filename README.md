@@ -1,4 +1,4 @@
-# DSHpl
+# DSH RemoteNodeHarness
 
 把远程 Linux 机器接进 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)，当成本地工作区用。
 
@@ -10,7 +10,7 @@
 
 ![侧栏里本地工作区与远程节点的工作区并列，右边是节点上真实跑出来的会话记录](docs/screenshots/sidebar.jpg)
 
-这台 Windows 上开着 DSH，左边 `Start Menu`、`DSHpl` 是本机工作区，`验收项目`、`fleet-second`、`SCIdream` 这些是节点上的。右边那个会话跑在节点上：`git log`、`read_image`、`grep` 都是节点自己的工具在 `/root/accept-project-1/git-image` 里执行的，路径是 Linux 路径，输出是那台机器的真实输出。
+这台 Windows 上开着 DSH，左边 `Start Menu`、`DSHpl` 是本机工作区，`验收项目`、`rnh-second`、`SCIdream` 这些是节点上的。右边那个会话跑在节点上：`git log`、`read_image`、`grep` 都是节点自己的工具在 `/root/accept-project-1/git-image` 里执行的，路径是 Linux 路径，输出是那台机器的真实输出。
 
 ## 远程的工作区，本地的用法
 
@@ -41,11 +41,11 @@
 | 接入点 | 做什么 |
 |---|---|
 | 实例上的 own property | Gateway 从类原型读 `@Remote` 描述符，dispatch 用 `Reflect.get`。在实例上覆写方法，端点表不变、实现换掉。 |
-| `workspaceFileScope` lookup | `fleet_…` 不是本地 Session，覆写后本地 id 原样委派，包装 id 合成 scope。 |
+| `workspaceFileScope` lookup | `rnh_…` 不是本地 Session，覆写后本地 id 原样委派，包装 id 合成 scope。 |
 | `lookupStore.resolvers` 的 `agent` 项 | 公开的 `configure` 已被上游占用，直接换 resolver 表那一项。 |
 | Gateway 的待处理事件表 | 自己造一条同形 pending 塞进 `pendingRemoteEvents`，投递与结算交给上游。 |
 | SSH `direct-tcpip` 上的 HTTP 与 RFC 6455 | 节点不开端口，`/api` 调用和 `$events` 流都跑在 SSH channel 上。 |
-| `/fleet/api` 与三个 `*.directoryFlow` 插槽 | 插件的管理面，以及"先选机器、再选目录"的选择器。 |
+| `/rnh/api` 与三个 `*.directoryFlow` 插槽 | 插件的管理面，以及"先选机器、再选目录"的选择器。 |
 
 上游的 `/api`、`/api/remote.mux`、sidebar 槽位一行没改。
 
@@ -62,7 +62,7 @@
 
 ### 身份是一个字符串
 
-远程的东西跨界时变成 `fleet_<nodeId>_<remoteId>`，比如 `fleet_n0123456789ab_session-1dc98667-…`。一个字符串同时回答"是本地的还是远端的""哪台机器""远端是谁"，不需要第二张路由表。
+远程的东西跨界时变成 `rnh_<nodeId>_<remoteId>`，比如 `rnh_n0123456789ab_session-1dc98667-…`。一个字符串同时回答"是本地的还是远端的""哪台机器""远端是谁"，不需要第二张路由表。
 
 只改写完整 Session 身份的字符串。用 `startsWith('session-')` 这种宽松判断会命中 `session-log-deepseek/delivery-accepted` 这类事件类型，把客户端渲染的每个事件都改坏。
 
@@ -76,13 +76,13 @@
 
 节点上装的是独立的 DSH，默认加载 Web 组合，服务器上于是多出一整套浏览器插件：56 个 `dsh-client-ui-*` 包、SPA dist 服务、HMR 链、桌面遥测。没有窗口的机器要么空转，要么因为找不到 dist 直接报错。
 
-上游的 6 个 bundle 里没有"大脑"这个形态。我没有 fork 包，而是定制**组合**：节点 profile 组合 `@deepseek-ai/dsh-base` + `@local/dsh-fleet-brain`，`dsh-web-app` 那层根本不在组合里，那些包连 import 都不会发生。
+上游的 6 个 bundle 里没有"大脑"这个形态。我没有 fork 包，而是定制**组合**：节点 profile 组合 `@deepseek-ai/dsh-base` + `@local/rnh-brain`，`dsh-web-app` 那层根本不在组合里，那些包连 import 都不会发生。
 
-`@local/dsh-fleet-brain` 的 patch 从**已安装的那个 release** 派生，不是从 master：
+`@local/rnh-brain` 的 patch 从**已安装的那个 release** 派生，不是从 master：
 
 ```bash
-node packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs   # 重新派生
-git diff packages/dsh-fleet-brain/cordis.patch.yml             # 有 diff 就读它
+node packages/rnh-brain/scripts/sync-from-upstream.mjs   # 重新派生
+git diff packages/rnh-brain/cordis.patch.yml             # 有 diff 就读它
 ```
 
 第一版从 master 派生，多出一行 `authentication-token`，而 `0.2.2-rc.3` 没发布那个包，节点启动报 `1 entry did not activate`。组合必须描述它要启动进去的那个运行时。
@@ -91,7 +91,7 @@ git diff packages/dsh-fleet-brain/cordis.patch.yml             # 有 diff 就读
 
 组合决定加载哪些插件，不决定用什么模型、用谁的 key。每次连接同步两样：
 
-1. 本机活的 provider 路由、默认模型、权限预设写进节点的 `~/.dsh/profiles/fleet/cordis.patch.yml`。这是节点自有 profile 的配置层，节点宿主会热重载它，所以改完立刻生效，不重启、不断会话。
+1. 本机活的 provider 路由、默认模型、权限预设写进节点的 `~/.dsh/profiles/rnh/cordis.patch.yml`。这是节点自有 profile 的配置层，节点宿主会热重载它，所以改完立刻生效，不重启、不断会话。
 2. 那些行点名的 key 在本机取值，通过节点自己的 `credentials/set` 推进节点凭据库。
 
 本机订阅自己的 `app-boot/config-reload` 与 `credentials/reference-updated`，本地改配置或换 key 就给所有已连接节点重新下发。
@@ -100,7 +100,7 @@ git diff packages/dsh-fleet-brain/cordis.patch.yml             # 有 diff 就读
 
 ## 跑过什么
 
-**工具真的在节点上执行**（`e2e/tool-parity`）：agent 自己调用 `read`×2 / `write` / `edit` / `grep` / `glob` / `bash`，全部打 `/root/fleet-second/…` 真实路径，无路径类失败，整份 transcript 里没有 Windows 路径。当初必坏的三个工具（`e2e/tool-git-image`）：
+**工具真的在节点上执行**（`e2e/tool-parity`）：agent 自己调用 `read`×2 / `write` / `edit` / `grep` / `glob` / `bash`，全部打 `/root/rnh-second/…` 真实路径，无路径类失败，整份 transcript 里没有 Windows 路径。当初必坏的三个工具（`e2e/tool-git-image`）：
 
 ```
 git log     → 2de1061 initial commit
@@ -108,21 +108,21 @@ read_image  → image/png image, 4x4 px, 75 bytes
 grep        → 命中 module.exports
 ```
 
-**节点确实是个大脑**。下面每个数都能从 `packages/dsh-fleet-brain/cordis.patch.yml` 数出来，`check-composition.mjs` 每次重新数：
+**节点确实是个大脑**。下面每个数都能从 `packages/rnh-brain/cordis.patch.yml` 数出来，`check-composition.mjs` 每次重新数：
 
 ```
-profile bundles    : @deepseek-ai/dsh-base + @local/dsh-fleet-brain
+profile bundles    : @deepseek-ai/dsh-base + @local/rnh-brain
 本层贡献的行       : 59   (24 条 config 覆写 + 35 条 insert)
 派生自官方 web-app : 98 行 → keep 33、丢 9 条浏览器专属、丢 56 条 client-ui
 dsh-client-ui-*    : 0
 web-runtime        : 0
 ```
 
-**测试**：35 个套件分三层，`test/run-all.mjs` 一次调度。全量跑在 `fleettest` Host + 真实节点上：**34 passed, 0 failed, 1 skipped in 358.5s**，唯一 SKIP 是 `browser`（没给 Chrome 调试端口）。跑不了的套件带原因记 SKIP，不记成通过；`--layer e2e` 一个都没跑成时非零退出。
+**测试**：35 个套件分三层，`test/run-all.mjs` 一次调度。全量跑在 `rnhtest` Host + 真实节点上：**34 passed, 0 failed, 1 skipped in 358.5s**，唯一 SKIP 是 `browser`（没给 Chrome 调试端口）。跑不了的套件带原因记 SKIP，不记成通过；`--layer e2e` 一个都没跑成时非零退出。
 
 ```bash
-node packages/dsh-fleet/test/run-all.mjs                            # 全部
-node packages/dsh-fleet/test/run-all.mjs --layer offline,contract   # 不需要节点
+node packages/dsh-remote-node-harness/test/run-all.mjs                            # 全部
+node packages/dsh-remote-node-harness/test/run-all.mjs --layer offline,contract   # 不需要节点
 ```
 
 
@@ -132,22 +132,22 @@ node packages/dsh-fleet/test/run-all.mjs --layer offline,contract   # 不需要�
 
 ```
 plugin_manager(action='install_bundle',
-  target='https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v<版本>/greatbaby-dsh-fleet-<版本>.tgz')
+  target='https://cnb.cool/serendipity-archive/dsh-remote-node-harness/-/releases/download/v<版本>/greatbaby-dsh-remote-node-harness-<版本>.tgz')
 ```
 
 也可以自己敲：
 
 ```bash
 dsh plugin --profile desktop add -w <上面那条 URL>    # 推荐
-dsh plugin --profile desktop add -w @greatbaby/dsh-fleet
-dsh plugin --profile desktop add -w <仓库绝对路径>/packages/dsh-fleet   # 开发用
+dsh plugin --profile desktop add -w @greatbaby/dsh-remote-node-harness
+dsh plugin --profile desktop add -w <仓库绝对路径>/packages/dsh-remote-node-harness   # 开发用
 ```
 
 手机端装不了插件：中转插件的 `HARNESS_REMOTE_ALLOWLIST` 里有 `pluginManager/updateBundle`，没有 install。它负责的是装好之后连节点。
 
 装完要重启一次 DSH，新装 bundle 的客户端半边才会被加载。`engines.dsh` 是 `>=0.2.2-rc.3 <0.3.0`，版本不匹配时安装被拒绝，而不是只组合一半。
 
-从 0.5.0 之前的版本升级要换包名：`@local/dsh-fleet` → `@greatbaby/dsh-fleet`。先 remove 旧的，再装新的，最后把 profile 的 `bundles` 里旧名换掉。节点侧不用做任何事。
+从 0.5.0 之前的版本升级要换包名：`@local/dsh-remote-node-harness` → `@greatbaby/dsh-remote-node-harness`。先 remove 旧的，再装新的，最后把 profile 的 `bundles` 里旧名换掉。节点侧不用做任何事。
 
 ## 加节点
 
@@ -169,7 +169,7 @@ SSH 断开之后状态不再是绿色的 `connected`：卡片落 `idle` 并记�
 
 失败会分类成 `{code, message, action, retryable, detail}`，界面把 `action` 翻成按钮。密码错不配重试按钮，因为按了只会得到同一次失败。
 
-每个节点自带最近 100 行日志（`/fleet/api/nodes/<id>/log`），写入时脱敏。桌面端总日志混着所有节点和插件，出了问题的人找不到它。
+每个节点自带最近 100 行日志（`/rnh/api/nodes/<id>/log`），写入时脱敏。桌面端总日志混着所有节点和插件，出了问题的人找不到它。
 
 ## 加工作区：先选机器，再选目录
 
@@ -214,13 +214,13 @@ SSH 断开之后状态不再是绿色的 `connected`：卡片落 `idle` 并记�
 
 新会话可以选「节点管理」预设。那个会话只能查看、添加、修改、连接、断开节点，别的都不行。
 
-这不是提示词让模型自觉：预设的 `config.plugins` 就是那个会话的工具集，而它只列了 `fleet_nodes` 一个工具。没有 shell、没有文件、没有搜索、没有网络、没有子代理、没有 workflow。让它读文件，它会说这个会话只管理节点，并建议你到对应节点的工作区里新建会话。
+这不是提示词让模型自觉：预设的 `config.plugins` 就是那个会话的工具集，而它只列了 `rnh_nodes` 一个工具。没有 shell、没有文件、没有搜索、没有网络、没有子代理、没有 workflow。让它读文件，它会说这个会话只管理节点，并建议你到对应节点的工作区里新建会话。
 
 密钥只接受引用，拒绝内联粘贴：
 
 ```json
 {"kind":"key","path":"~/.ssh/id_ed25519"}
-{"kind":"password","env":"DSH_FLEET_NODE_PW"}
+{"kind":"password","env":"RNH_NODE_PW"}
 ```
 
 工具参数会写进会话日志，粘一个密码进去就是明文持久化。想直接粘贴就走设置页。
@@ -232,9 +232,9 @@ SSH 断开之后状态不再是绿色的 `connected`：卡片落 `idle` 并记�
 装 `ds-harness-remote`，手机连到这台桌面 Host。远程会话是普通的 `session/list` 行，所以出现在同一个侧栏里。节点的文件系统挤进同一套路径语法：
 
 ```
-/@fleet                       → 节点列表
-/@fleet/<nodeId>/             → 那台机器的文件系统根
-/@fleet/<nodeId>/root/proj    → 那台机器上的 /root/proj
+/@rnh                       → 节点列表
+/@rnh/<nodeId>/             → 那台机器的文件系统根
+/@rnh/<nodeId>/root/proj    → 那台机器上的 /root/proj
 ```
 
 `directoryPicker/list` 对两类机器都答，用这种路径调 `workspace/create` 会在节点上建工作区。这个前缀是节点的保留命名空间，直接拿它建工作区会被拒绝。
@@ -251,7 +251,7 @@ cd D:/ProjectHub/dsh-fork/deepseek-harness && git checkout dsh-v<新版本>
 
 # 编译 → 裁剪 → 打包 → 上传（一条命令；只发 linux-x64，见下）
 cd D:/ProjectHub/DSHpl
-CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --publish --cnb
+CNB_TOKEN=… node packages/dsh-remote-node-harness/scripts/build-fork-runtime.mjs --platform linux-x64 --publish --cnb
 ```
 
 **只发 `linux-x64`。** 上传前会查 `src/remote/artefact.js` 的 `PUBLISHED_PLATFORMS`，不在名单里的平台带 `--publish`/`--cnb` 会直接抛错。`win32-x64` 曾经发过，现在撤了：它能构建也能启动，但没有任何节点能向它要 —— 探针读 `uname -s`，Windows 上没有对应拼写，节点侧 21 处 `sh -c` 加 `setsid`、传输只有 SSH。不加 `--publish` 仍可 `--platform win32-x64` 构建（冒烟测试用）。理由见 [ADR-0007](docs/adr-0007-fork-node-runtime.zh.md) §三第 4 条。
@@ -259,34 +259,34 @@ CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform 
 然后是组合层和契约层的五条命令：
 
 ```bash
-node packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs          # 从已安装的 release 重新派生组合
-git diff packages/dsh-fleet-brain/cordis.patch.yml                    # 有 diff 就是上游组合变了，读它
-node packages/dsh-fleet-brain/scripts/check-composition.mjs           # 断言结果仍然是个大脑
-node packages/dsh-fleet-brain/scripts/embed-into-fleet.mjs            # 嵌进插件
-node packages/dsh-fleet/test/run-all.mjs --layer offline,contract     # 契约层先炸
+node packages/rnh-brain/scripts/sync-from-upstream.mjs          # 从已安装的 release 重新派生组合
+git diff packages/rnh-brain/cordis.patch.yml                    # 有 diff 就是上游组合变了，读它
+node packages/rnh-brain/scripts/check-composition.mjs           # 断言结果仍然是个大脑
+node packages/rnh-brain/scripts/embed-into-rnh.mjs            # 嵌进插件
+node packages/dsh-remote-node-harness/test/run-all.mjs --layer offline,contract     # 契约层先炸
 ```
 
 实测 rc.3 → rc.5：重新生成的组合逐字节无变化，上游只删了 `authentication-token` 与 `ui-session-status` 两行，都在被丢掉的那一侧；契约层 3 个套件全过。
 
-**跟着上游从自动变成了手动**：上游发版、桌面升级之后，节点在新制品发出来之前连不上。这是 fork 路线的代价，不是缺陷。完整步骤（切 tag、重放构建侧修复、什么时候要加 `RUNTIME_BUILD`、裁剪规则的两个坑）见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md) 第五、六节。三条升级链（DSH / 中转插件 / DSH Go）各自要重跑什么，同一份文档。
+**跟着上游从自动变成了手动**：上游发版、桌面升级之后，节点在新制品发出来之前连不上。这是 fork 路线的代价，不是缺陷。完整步骤（切 tag、重放构建侧修复、什么时候要加 `RUNTIME_BUILD`、裁剪规则的两个坑）见 [`packages/dsh-remote-node-harness/docs/UPGRADE.zh.md`](packages/dsh-remote-node-harness/docs/UPGRADE.zh.md) 第五、六节。三条升级链（DSH / 中转插件 / DSH Go）各自要重跑什么，同一份文档。
 
 ## 跑测试
 
 测试要自己给节点，源码里没有默认 IP 和密码：
 
 ```bash
-export DSH_FLEET_TEST_HOST=192.0.2.10
-export DSH_FLEET_TEST_USER=root
-export DSH_FLEET_TEST_PASSWORD=...
-node packages/dsh-fleet/test/run-all.mjs --layer e2e
+export RNH_TEST_HOST=192.0.2.10
+export RNH_TEST_USER=root
+export RNH_TEST_PASSWORD=...
+node packages/dsh-remote-node-harness/test/run-all.mjs --layer e2e
 ```
 
 ## 仓库结构
 
 ```
 packages/
-  dsh-fleet/        插件：装在桌面端，Host 侧 + 浏览器侧
-  dsh-fleet-brain/  节点侧 bundle：只当远程大脑的 DSH 组合
+  dsh-remote-node-harness/        插件：装在桌面端，Host 侧 + 浏览器侧
+  rnh-brain/  节点侧 bundle：只当远程大脑的 DSH 组合
 docs/
   ARCHITECTURE.md   设计与取舍：每个决定否决了什么
 reference/          上游源码（只读，不进版本库）
@@ -300,14 +300,14 @@ reference/          上游源码（只读，不进版本库）
 | [`docs/adr-0001-node-config-carrier.zh.md`](docs/adr-0001-node-config-carrier.zh.md) | 节点配置走 profile patch 而不是 `--patch` overlay |
 | [`docs/adr-0002-approval-terminal-version-plugins.zh.md`](docs/adr-0002-approval-terminal-version-plugins.zh.md) | 审批、终端、版本闸门与插件开关 |
 | [`docs/adr-0003-phone-control.zh.md`](docs/adr-0003-phone-control.zh.md) | 手机 → 中转 → 桌面 → 节点这条链路与它的硬边界 |
-| [`docs/adr-0004-node-control-and-picker.zh.md`](docs/adr-0004-node-control-and-picker.zh.md) | `/@fleet` 命名空间、选择器接管、节点控制、安装形态 |
+| [`docs/adr-0004-node-control-and-picker.zh.md`](docs/adr-0004-node-control-and-picker.zh.md) | `/@rnh` 命名空间、选择器接管、节点控制、安装形态 |
 | [`docs/adr-0005-release-and-maintenance.zh.md`](docs/adr-0005-release-and-maintenance.zh.md) | 包名依据、发布形态、三条升级链 |
 | [`docs/adr-0006-node-runtime-supply.zh.md`](docs/adr-0006-node-runtime-supply.zh.md) | 节点运行时从哪来：制品优先、节点自建兜底 |
 | [`docs/agent-install.zh.md`](docs/agent-install.zh.md) | 只靠 agent 装一遍：说什么、走哪条路、断点在哪 |
-| [`packages/dsh-fleet/README.md`](packages/dsh-fleet/README.md) | 插件安装、接线、测试矩阵、已知限制 |
-| [`packages/dsh-fleet/docs/ACCEPTANCE.zh.md`](packages/dsh-fleet/docs/ACCEPTANCE.zh.md) | 验收步骤与逐轮实测记录 |
-| [`packages/dsh-fleet-brain/README.md`](packages/dsh-fleet-brain/README.md) | 节点组合：怎么从官方 web-app 减出"只当大脑"的一层 |
-| [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md) | 三条升级链各自要重跑什么 |
+| [`packages/dsh-remote-node-harness/README.md`](packages/dsh-remote-node-harness/README.md) | 插件安装、接线、测试矩阵、已知限制 |
+| [`packages/dsh-remote-node-harness/docs/ACCEPTANCE.zh.md`](packages/dsh-remote-node-harness/docs/ACCEPTANCE.zh.md) | 验收步骤与逐轮实测记录 |
+| [`packages/rnh-brain/README.md`](packages/rnh-brain/README.md) | 节点组合：怎么从官方 web-app 减出"只当大脑"的一层 |
+| [`packages/dsh-remote-node-harness/docs/UPGRADE.zh.md`](packages/dsh-remote-node-harness/docs/UPGRADE.zh.md) | 三条升级链各自要重跑什么 |
 | [`CHANGELOG.md`](CHANGELOG.md) | 每个版本改了什么、谁受影响 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 怎么跑测试、怎么构建节点运行时、改代码时的硬约束 |
 | [`SECURITY.md`](SECURITY.md) | 威胁模型、主机密钥、凭据与日志的处置 |

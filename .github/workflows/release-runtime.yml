@@ -90,7 +90,7 @@ jobs:
         # `--registry` is what the *packer* can reach. The node later uses whichever registry
         # it is configured with, and the npm route uses the node's own.
         run: |
-          node packages/dsh-fleet/scripts/publish-runtime.mjs \
+          node packages/dsh-remote-node-harness/scripts/publish-runtime.mjs \
             --version "${{ steps.wanted.outputs.version }}" \
             --platform "${{ matrix.platform }}" \
             --out dist \

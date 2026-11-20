@@ -1,7 +1,7 @@
 # ADR 0001：节点配置的载体与同步时机
 
 > 状态：已接受（2026-11-17）
-> 取代：`~/.dsh-fleet/run/brain.patch.yml` + `--patch` 方案
+> 取代：`~/.dsh-remote-node-harness/run/brain.patch.yml` + `--patch` 方案
 > 现在怎么工作：见 [ARCHITECTURE.md](ARCHITECTURE.md) §六之二「模型与凭据」、§六之三「凭据与状态存在哪」
 
 ## 问题
@@ -43,7 +43,7 @@
 ## 后果
 
 - 改模型/换 key 不再需要重连或重启节点宿主。
-- 节点 profile 名从 `web` 变为 `fleet`（其它 root 派生 `fleet-<name>`）。旧 `web` profile 里由本插件
+- 节点 profile 名从 `web` 变为 `rnh`（其它 root 派生 `rnh-<name>`）。旧 `web` profile 里由本插件
   写入的 bundle 列表不再使用；插件不删它（那是用户的目录）。
 - `ensureServing` 的 `patchChanged` 现在只服务 **brain bundle 内容变化**（那需要重启，模块要重新
   import），配置变化不再走重启路径。

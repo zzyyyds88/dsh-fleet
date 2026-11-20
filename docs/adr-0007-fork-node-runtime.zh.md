@@ -5,7 +5,7 @@
 > 节点只从 CNB 拉取（国内连不上 GitHub）。
 > 上承 [ADR-0006](adr-0006-node-runtime-supply.zh.md)（本文推翻其第二、三节与第九节）。
 > 本文只决定「节点的运行时从哪来、由谁构建、怎么发」，不改路由、组合、会话语义。
-> 现在怎么用：构建与发版命令见 `packages/dsh-fleet/docs/UPGRADE.zh.md` 第四节。
+> 现在怎么用：构建与发版命令见 `packages/dsh-remote-node-harness/docs/UPGRADE.zh.md` 第四节。
 
 ## 一、问题：制品路线把「跟着上游走」变成了「等上游发版」
 
@@ -21,7 +21,7 @@ ADR-0006 让节点在拿不到制品时自己 `npm install` 上游发布版。�
 | 换台机器、换次连接，字节完全一样 | 不能，`npm install` 每次在线解析 |
 
 也就是说，只要「节点跑的是上游发布版本身」，这个项目对节点运行时的所有主张都只能停留在
-**组合层**（`@local/dsh-fleet-brain`）。组合层能决定加载哪些行，决定不了那些行里面的代码。
+**组合层**（`@local/rnh-brain`）。组合层能决定加载哪些行，决定不了那些行里面的代码。
 
 ## 二、决定：fork 上游源码，在本地构建节点运行时
 
@@ -52,7 +52,7 @@ ADR-0006 让节点在拿不到制品时自己 `npm install` 上游发布版。�
 
 ### 2. 裁什么：节点是大脑，不渲染
 
-裁剪规则是 `packages/dsh-fleet/scripts/trim-fork-runtime.mjs` 里的 `DROP_RULES`，
+裁剪规则是 `packages/dsh-remote-node-harness/scripts/trim-fork-runtime.mjs` 里的 `DROP_RULES`，
 每条都带理由，因为「删掉一个包」和「猜一个包没用」是两件事：
 
 | 去掉 | 为什么节点不需要 | 实测 |
@@ -129,7 +129,7 @@ CNB 的发布侧有个坑（ADR-0006 八节已记）：`PUT` 返回 200 **不等
 
 **没验的，写在明面上**：
 
-1. **没有真节点**（本轮没有 `DSH_FLEET_TEST_*`），所以「桌面端连上节点、下载这份制品、启动、
+1. **没有真节点**（本轮没有 `RNH_TEST_*`），所以「桌面端连上节点、下载这份制品、启动、
    跑通会话」这条端到端链**未验证**。它是下一轮的第一步，验收命令见 UPGRADE 第四节。
 2. **只有 `linux-x64` 一个平台在发。** `linux-arm64` / `darwin-arm64` / `linux-x64-musl`
    没有发布，也没有机器验证过。`platformTag()` 现在会为 musl 节点请求 `linux-x64-musl`，

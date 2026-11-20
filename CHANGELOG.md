@@ -13,6 +13,29 @@
 
 ### 变更（破坏性）
 
+- **项目改名：`dsh-fleet` → `dsh-remote-node-harness`，显示名 `DSHpl` → `DSH RemoteNodeHarness`。**
+  这一条不是发版元数据，是**已装用户的迁移**：
+
+  | 层 | 旧 | 新 |
+  |---|---|---|
+  | npm 包 | `@greatbaby/dsh-fleet` | `@greatbaby/dsh-remote-node-harness` |
+  | 目录 | `packages/dsh-fleet` | `packages/dsh-remote-node-harness` |
+  | 大脑包 | `@local/dsh-fleet-brain` | `@local/rnh-brain` |
+  | GitHub 仓库 | `zzyyyds88/dsh-fleet` | `zzyyyds88/dsh-remote-node-harness` |
+  | CNB 仓库 | `serendipity-archive/dsh-fleet` | `serendipity-archive/dsh-remote-node-harness` |
+  | 节点安装根 | `~/.dsh-fleet` | `~/.dsh-rnh` |
+  | 节点 profile | `~/.dsh/profiles/fleet` | `~/.dsh/profiles/rnh` |
+  | 会话 id 前缀 | `fleet_<node>_<uuid>` | `rnh_<node>_<uuid>` |
+  | 远端路径命名空间 | `/@fleet` | `/@rnh` |
+  | 本地设置 API | `/fleet/api` | `/rnh/api` |
+  | 本地节点表 | `$DSH_HOME/fleet/nodes.json` | `$DSH_HOME/rnh/nodes.json` |
+  | 环境变量 | `DSH_FLEET_*` | `RNH_*` |
+
+  **受影响：所有人，且不可就地升级。** 旧的 `fleet_` 会话 id、旧 `~/.dsh-fleet` 运行时、
+  旧 `nodes.json` 都不会被读取 —— 节点会在下一次连接时按新根重装运行时并重新生成身份。
+  迁移步骤：`dsh plugin --profile <p> remove @greatbaby/dsh-fleet`，再按
+  [README §安装](README.md) 装新包；节点那边不用手工清，旧目录留着不影响（可以删）。
+  历史 CHANGELOG 段与 ADR-0005 保留旧名，因为它们记录的是当时的事实。
 - **节点运行时改由本项目从 fork 编译，npm 兜底路线删除。** 节点跑的不再是上游 npm 发布版，
   而是本仓库对上游源码 fork 后编译、裁剪出来的树：删掉浏览器面（62 个 `dsh-client-ui-*`）、
   Office 引擎（339.5 MiB）、实验性 bundle 与 CUA，解包 **2014.6 MiB → 408.6 MiB**，归档
@@ -48,9 +71,9 @@
   留着哪个版本。桌面端会话里的 `plugin_manager(action='install_bundle', target=<该 URL>)`
   走同一个安装器，所以「让 agent 装」不需要敲命令。**受影响**：新安装的人。
 - **断线现在看得见，并且会自动重连。** SSH socket 掉了之后 `state` 原来一直是 `connected`：
-  卡片是绿的、侧栏还列着那台机器的工作区，而任何调用都回 `fleet/node-offline` —— 一个界面上
+  卡片是绿的、侧栏还列着那台机器的工作区，而任何调用都回 `rnh/node-offline` —— 一个界面上
   从未出现过的状态。现在 `close` 事件（排除 `invalidate`/`dispose` 这两条主动路径）上报给
-  `Fleet`，状态落 `idle` 并记 `droppedAt`；重连是 2s/4s/8s 三档，之后每 2 分钟，直到成功或
+  `Rnh`，状态落 `idle` 并记 `droppedAt`；重连是 2s/4s/8s 三档，之后每 2 分钟，直到成功或
   用户点断开。**受影响**：所有节点。
 - **失败可归因：稳定错误码 + 一个动作 + 是否可重试。** `core/errors.js` 把每次失败分类成
   `{code, message, action, retryable, detail}`，判定顺序是「显式 code > SSH category > phase
@@ -58,13 +81,13 @@
   清空，所以阶段列表停在出错的那一格。
 - **每个节点自带最近 100 行连接日志**，写入即脱敏（`password=` / `token:` /
   `Authorization: Bearer` / 私钥块 / `ssh://user:pass@host`），路由
-  `/fleet/api/nodes/<id>/log`，卡片上可展开、可复制。
+  `/rnh/api/nodes/<id>/log`，卡片上可展开、可复制。
 - **主机密钥首次记录、之后每次都验。** `hostVerifier` 从写下的第一天起就在读
   `target.hostFingerprint`，但全仓库没有一处给它赋过值 —— 于是每次都走「首次」分支并
   `verify(true)`。这条链是死代码，中间人可以无条件接管连接。现在首次握手写进
   `NodeRecord.hostKey`，之后不符就拒绝并把两侧指纹写进日志。
 - **手机端选择器首屏是设备层。** 手机调用 `directoryPicker/list` 不带 path，原来返回的是
-  **桌面机自己的 home**，手机永远出不去本机；`/@fleet` 只有主动拼路径才到得了，而手机界面上
+  **桌面机自己的 home**，手机永远出不去本机；`/@rnh` 只有主动拼路径才到得了，而手机界面上
   没有入口。现在首屏是「此设备 + 各已连接节点」。
 - **每台设备记住上次用的目录**，设备列表按最近连接排序，超过两台才给搜索框。
 
@@ -100,7 +123,7 @@
   里就把整份 baseline 丢掉 —— 断线那一刻侧栏里整台机器的工作区消失，一分钟重连成功后又回来。
   现在只有**记录被删**才丢行，只是连不上时行留着并标 `offline`。
 - **插件树不再塞进命令行，SSH 连接不再被 sshd 判损坏。** 节点 `auth.log` 里长期刷
-  `Bad packet length 88734736.` + `Connection corrupted`，fleet 随即报节点掉线，端到端
+  `Bad packet length 88734736.` + `Connection corrupted`，插件随即报节点掉线，端到端
   长期停在 `13 passed, 4 failed`。真因不是加密、并发或运行时，而是命令行的长度：ssh2 把一次
   `exec` 请求当成**一个** SSH 包发出去（`Protocol.js:1273`），OpenSSH 的 `PACKET_MAX_SIZE`
   是 256 KiB，超了之后服务端不回错误、而是流位置错乱。`writePluginBundle` 当时把整棵插件树

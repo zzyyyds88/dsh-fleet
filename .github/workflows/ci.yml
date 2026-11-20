@@ -40,11 +40,11 @@ jobs:
           node-version: '24'
 
       - name: Install the one runtime dependency, without build scripts
-        working-directory: packages/dsh-fleet
+        working-directory: packages/dsh-remote-node-harness
         run: npm install --ignore-scripts --no-audit --no-fund
 
       - name: Unit suites
-        working-directory: packages/dsh-fleet
+        working-directory: packages/dsh-remote-node-harness
         run: |
           set -e
           node test/routing-unit.mjs
@@ -55,8 +55,8 @@ jobs:
           node test/fork-runtime-unit.mjs
           node test/picker-paths-unit.mjs
           node test/install-unit.mjs
-          node test/fleet-control-unit.mjs
+          node test/rnh-control-unit.mjs
 
       - name: The manifest still packs
-        working-directory: packages/dsh-fleet
+        working-directory: packages/dsh-remote-node-harness
         run: npm pack --dry-run

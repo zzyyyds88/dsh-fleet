@@ -1,9 +1,9 @@
 # 参与这个项目
 
-本仓库是 DSH 的远程工作区能力：`packages/dsh-fleet`（桌面端插件）与
-`packages/dsh-fleet-brain`（节点侧组合）。**设计取舍的唯一真源是
+本仓库是 DSH 的远程工作区能力：`packages/dsh-remote-node-harness`（桌面端插件）与
+`packages/rnh-brain`（节点侧组合）。**设计取舍的唯一真源是
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**，对外用法在 [`README.md`](README.md)，
-升级流程在 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](packages/dsh-fleet/docs/UPGRADE.zh.md)。
+升级流程在 [`packages/dsh-remote-node-harness/docs/UPGRADE.zh.md`](packages/dsh-remote-node-harness/docs/UPGRADE.zh.md)。
 动手之前先读这三份，尤其是 `AGENTS.md` 里的硬约束。
 
 ## 一、跑起来
@@ -12,7 +12,7 @@
 
 ```bash
 # 唯一一个运行时依赖（只有 src/ssh/connection.js 会 import 它）
-cd packages/dsh-fleet && npm install --ignore-scripts
+cd packages/dsh-remote-node-harness && npm install --ignore-scripts
 
 # 纯逻辑测试，不需要 DSH，也不需要节点
 node test/run-all.mjs --layer offline
@@ -21,9 +21,9 @@ node test/run-all.mjs --layer offline
 需要节点的那两层要先给地址与凭据（**源码里没有默认 IP 和默认密码**，这是公开仓库）：
 
 ```bash
-export DSH_FLEET_TEST_HOST=192.0.2.10      # RFC 5737 文档地址，换成你自己的
-export DSH_FLEET_TEST_USER=root
-export DSH_FLEET_TEST_PASSWORD=...          # 或 DSH_FLEET_TEST_KEY_FILE=<path>
+export RNH_TEST_HOST=192.0.2.10      # RFC 5737 文档地址，换成你自己的
+export RNH_TEST_USER=root
+export RNH_TEST_PASSWORD=...          # 或 RNH_TEST_KEY_FILE=<path>
 node test/run-all.mjs --layer e2e
 ```
 
@@ -44,13 +44,13 @@ ELECTRON_RUN_AS_NODE=1 "DeepSeek Harness.exe" test/dispatch-seam.mjs
 
 ```bash
 # 全流程：编译 fork → 打包 → 按目标平台解析 → 裁剪 → 归档
-node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64
+node packages/dsh-remote-node-harness/scripts/build-fork-runtime.mjs --platform linux-x64
 
 # 只改裁剪规则时复用已解包的树（几十秒而不是十几分钟）
-node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --reuse
+node packages/dsh-remote-node-harness/scripts/build-fork-runtime.mjs --platform linux-x64 --reuse
 
 # 上传（GitHub Release 作灾备，CNB 是节点唯一的下载源）
-CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --publish --cnb
+CNB_TOKEN=… node packages/dsh-remote-node-harness/scripts/build-fork-runtime.mjs --platform linux-x64 --publish --cnb
 ```
 
 `--platform` 认 `linux-x64`、`linux-arm64`、`linux-musl-arm64`、`darwin-arm64`、`win32-x64`。
@@ -78,15 +78,15 @@ CI 的 [`.github/workflows/release-runtime.yml`](.github/workflows/release-runti
 
 - **不 import 任何 `@deepseek-ai/*`，也不从 `app.asar` 里 import。** 唯一运行时依赖是 `ssh2`。
   破坏这条等于把插件绑死在某个版本的内部结构上。
-- **生成物只读不手改**：`packages/dsh-fleet-brain/cordis.patch.yml` 与 `presets/*.yml` 由
+- **生成物只读不手改**：`packages/rnh-brain/cordis.patch.yml` 与 `presets/*.yml` 由
   `scripts/sync-from-upstream.mjs` 生成，`src/host/brain-bundle.generated.js` 由
-  `scripts/embed-into-fleet.mjs` 生成。改源再重新生成。
+  `scripts/embed-into-rnh.mjs` 生成。改源再重新生成。
 - **节点组合必须从已安装的那个 release 派生**，不能从 master 派生。
 - **设计先行**：改动跨越模块、改了公共契约 / schema / 状态机、或新增子系统时，先改
   `docs/ARCHITECTURE.md` 并单独提交 `docs:`，再分派实现。
 - **提交粒度**：一次一件事，前缀 `feat` / `fix` / `docs` / `refactor` / `test` / `chore` /
   `breakdown`。禁止 `git add .`，只 stage 本任务的文件。
-- **公开仓库**：不许提交密钥、令牌、私钥、真实用户数据。测试只从 `DSH_FLEET_TEST_*` 读节点
+- **公开仓库**：不许提交密钥、令牌、私钥、真实用户数据。测试只从 `RNH_TEST_*` 读节点
   地址与凭据。`.scratch/` 与 `reference/` 不进版本管理。
 
 ## 四、提一个改动之前

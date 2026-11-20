@@ -34,7 +34,7 @@ ARCHITECTURE 里记过两条真实上限：远程会话的 `approval/request` / 
 `terminal` 九个端点里六个吃 `Agent` 形参，由 Gateway 在方法体之前解析。公开的
 `lookups.configure('agent', …)` 已被 `@deepseek-ai/dsh-api-session-controller` 占用
 （同一 key 第二次 `configure` 直接抛错），所以只能替换 `lookupStore.resolvers` 里那一项：
-`fleet_` 前缀合成占位 Agent，其余 id 原样委派给被替换掉的 resolver。
+`rnh_` 前缀合成占位 Agent，其余 id 原样委派给被替换掉的 resolver。
 
 `attach` 是 `mode: 'stream'` 且真用 uplink，所以 `RemoteGateway` 补了上行
 （`openStream(…, { uplink })` 的 `send` / `endUplink`，关闭时发 `{type:'cancel'}`），
@@ -59,14 +59,14 @@ sha256 + 解压替换 `runtime/`。闸门比较 `pluginVersion` 与节点 `statu
 
 回滚：替换前把旧树改名 `runtime.previous`，解压失败或宿主起不来则回滚并报告。
 
-**当时写的是「加速地址可配置（`$DSH_FLEET_MIRROR`），失败自动回官方」。这两点后来都被推翻了**：
+**当时写的是「加速地址可配置（`$RNH_MIRROR`），失败自动回官方」。这两点后来都被推翻了**：
 现在只有一个源（CNB），**不回退直连 GitHub、也没有 npm 兜底**（理由与实测见 ARCHITECTURE §六之四
 与 [ADR-0007](adr-0007-fork-node-runtime.zh.md)）。本 ADR 保留这句是为了说明演进，不是当前行为。
 
 ## 决策四：每插件同步开关
 
 节点组合是生成物，开关只能作用在**下发**这一步：开关存在**profile 目录**里
-（`fleet-plugins.json`，不是 `$DSH_HOME` —— 否则 `desktop` 与 `fleettest` 会互相影响），
+（`rnh-plugins.json`，不是 `$DSH_HOME` —— 否则 `desktop` 与 `rnhtest` 会互相影响），
 关掉的行以 `disabled: true` 写进节点 profile patch —— 不是加载后禁用，那行根本不激活。
 
 **默认值后来从「全关」翻成了「全开」**（用户要求：装在这里、连了节点就是同一个工作环境），

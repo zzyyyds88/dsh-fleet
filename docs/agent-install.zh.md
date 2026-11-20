@@ -27,11 +27,11 @@ agent 执行：
 ```
 plugin_manager(
   action = 'install_bundle',
-  target = 'https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v0.5.1/greatbaby-dsh-fleet-0.5.1.tgz'
+  target = 'https://cnb.cool/serendipity-archive/dsh-remote-node-harness/-/releases/download/v0.5.1/greatbaby-dsh-remote-node-harness-0.5.1.tgz'
 )
 ```
 
-成功的标志是返回里 `application: 'applied'`，或者 `application: 'restart-required'` 加一句 `nextStep`（此时要重启 DSH）。之后 `list_bundles` 里能看到 `@greatbaby/dsh-fleet`。
+成功的标志是返回里 `application: 'applied'`，或者 `application: 'restart-required'` 加一句 `nextStep`（此时要重启 DSH）。之后 `list_bundles` 里能看到 `@greatbaby/dsh-remote-node-harness`。
 
 **不再更新的版本没有第二条退路**：CNB 是唯一的目的地。GitHub Release 上不放插件 tarball——节点运行时那边需要灾备是因为它 162 MiB 且经第三方代理，插件本身 200 KB，一个源够用。
 
@@ -54,14 +54,14 @@ plugin_manager(
 
 2026-11-19，在一个新建的 `agentinstall` profile 上：
 
-- `npm pack` 产出 `greatbaby-dsh-fleet-0.5.1.tgz`（45 个文件，209 KiB）
+- `npm pack` 产出 `greatbaby-dsh-remote-node-harness-0.5.1.tgz`（45 个文件，209 KiB）
 - 上传到 CNB Release `v0.5.1`：`POST releases` → 取预签名地址 → `PUT` → `POST verify_url` 确认 →
   assets 里出现该附件，CNB 算出的 sha256 与本地一致
 - 匿名 `curl` 下载：200，214 188 字节，sha256 与本地一致
 - `dsh plugin --profile agentinstall add -w <该 URL>` → `dependencies` 与 `bundles` 都被写上，
-  `node_modules/@greatbaby/dsh-fleet` 里 `src/index.js` 与 `cordis.patch.yml` 都在
-- 同一个 profile 起 Host → 日志出现 `fleet: routing …` 九行，`/fleet/api/nodes` 返回 200，
-  节点记录（`~/.dsh/fleet/nodes.json` 是共享的）里那台机器报 `connected` 且**已经带上主机密钥**
+  `node_modules/@greatbaby/dsh-remote-node-harness` 里 `src/index.js` 与 `cordis.patch.yml` 都在
+- 同一个 profile 起 Host → 日志出现 `rnh: routing …` 九行，`/rnh/api/nodes` 返回 200，
+  节点记录（`~/.dsh/rnh/nodes.json` 是共享的）里那台机器报 `connected` 且**已经带上主机密钥**
 
 ### 一个必须先知道的前置条件
 

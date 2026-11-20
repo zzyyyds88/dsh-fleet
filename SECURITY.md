@@ -37,7 +37,7 @@
 
 - 这是 trust-on-first-use：第一次的密钥没有带外渠道可以证明，**首次连接仍然是可被中间人的**。它买到的是「之后每一次都可证明」。
 - 主机密钥变了要人工确认。插件不会自动接受新密钥，也不提供「忽略」开关。
-- 实现位置：`src/ssh/connection.js` 的 `hostVerifier`，`src/host/fleet.js` 的 `#recordHostKey`。这一条在 2026-11-19 之前是**死代码**（`target.hostFingerprint` 从未被赋值），当时中间人可以无条件接管连接。
+- 实现位置：`src/ssh/connection.js` 的 `hostVerifier`，`src/host/rnh.js` 的 `#recordHostKey`。这一条在 2026-11-19 之前是**死代码**（`target.hostFingerprint` 从未被赋值），当时中间人可以无条件接管连接。
 
 ### 3. 凭据落到不该落的地方
 
@@ -51,7 +51,7 @@
 
 一个节点如果能控制另一个节点，一次失陷就会横向扩散。
 
-- 这个插件**自身**与其 brain bundle 永远不会被下发到节点（`fleet.js` 的 `BRAIN_BUNDLES` 与 `#installPlugins` 的排除项）。
+- 这个插件**自身**与其 brain bundle 永远不会被下发到节点（`rnh.js` 的 `BRAIN_BUNDLES` 与 `#installPlugins` 的排除项）。
 - 节点的组合里没有 `dsh-web-app`，也不加载任何 client-UI 行，所以它不开第二个入口。
 - 中转插件（`ds-harness-remote`）同样永不下发。
 
@@ -67,4 +67,4 @@
 - CI 在匹配平台 runner 上打包（`.github/workflows/release-runtime.yml`），带 `--ignore-scripts`，所以归档里不会有打包机的原生产物。
 - 发布到 CNB 需要 `CNB_TOKEN`，只从环境变量读，从不写盘、从不进日志。没有它时 CI 打 notice 并跳过，GitHub 仍是唯一目的地。
 - CNB 仓库是**公开**的：节点上下载不需要任何凭据。这是刻意的——一台机器要装运行时，不该先拿到一个能写 release 的令牌。
-- 本机凭据（`DSH_FLEET_TEST_*`、`CNB_TOKEN`、`~/.dsh/.credentials.yaml`）从不出现在源码、测试或文档里。测试只从环境变量读节点地址与凭据。
+- 本机凭据（`RNH_TEST_*`、`CNB_TOKEN`、`~/.dsh/.credentials.yaml`）从不出现在源码、测试或文档里。测试只从环境变量读节点地址与凭据。

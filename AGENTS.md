@@ -1,4 +1,4 @@
-# DSHpl 协作规则（AGENTS.md）
+# DSH RemoteNodeHarness 协作规则（AGENTS.md）
 
 > 由 `AGENTS.template.md`（2026-11-16 第 3 版）填充，全部占位符已替换，用不到的适配块已删除。
 > 未替换的 `@@...@@` 视为待决项：先问用户，禁止凭经验填充。任何时候使用中文，除非明确要求英文。
@@ -8,10 +8,10 @@
 
 | 占位符 | 本项目取值 |
 |---|---|
-| `@@PROJECT:<name>@@` | **DSHpl** —— DeepSeek Harness 的远程工作区能力。两个包：`packages/dsh-fleet`（插件，装桌面端）、`packages/dsh-fleet-brain`（节点侧 DSH 组合，只当大脑） |
-| `@@TRUTH:<path>@@` | `docs/ARCHITECTURE.md`（设计与取舍，唯一真源）。对外用法在根 `README.md`；升级流程在 `packages/dsh-fleet/docs/UPGRADE.zh.md` |
+| `@@PROJECT:<name>@@` | **DSH RemoteNodeHarness**（目录与本地工作区仍叫 `DSHpl`）—— DeepSeek Harness 的远程工作区能力。两个包：`packages/dsh-remote-node-harness`（插件，装桌面端）、`packages/rnh-brain`（节点侧 DSH 组合，只当大脑） |
+| `@@TRUTH:<path>@@` | `docs/ARCHITECTURE.md`（设计与取舍，唯一真源）。对外用法在根 `README.md`；升级流程在 `packages/dsh-remote-node-harness/docs/UPGRADE.zh.md` |
 | `@@COMMAND:<command>@@` | §12 各适配块的 `verification` 字段 |
-| `@@OWNER:<module/layer>@@` | 路由与身份语义归 `packages/dsh-fleet/src/host/`；节点组合语义归 `packages/dsh-fleet-brain/cordis.patch.yml`（生成物，源是 `scripts/sync-from-upstream.mjs`） |
+| `@@OWNER:<module/layer>@@` | 路由与身份语义归 `packages/dsh-remote-node-harness/src/host/`；节点组合语义归 `packages/rnh-brain/cordis.patch.yml`（生成物，源是 `scripts/sync-from-upstream.mjs`） |
 | `@@BOUNDARY:<goal/non-goal>@@` | 见 §4 |
 | `@@ADAPTER:<category>/<name>@@` | `framework/deepseek-harness`、`toolchain/node-esm` |
 
@@ -42,7 +42,7 @@
 ## 3. 开工前确认三件事
 
 1. **真源在哪**：按 §14 真源优先级确认；没有指定真源时，当前源码、测试、配置、日志、git 状态就是真源。
-2. **owner 在哪**：归 `packages/dsh-fleet/src/host/`（路由与身份）与 `packages/dsh-fleet-brain/`（节点组合）管；跨入口语义先进共享合同或核心层，不散落在 UI、脚本、prompt。adapter / controller / UI / CLI / worker 只做映射与接线，不拥有业务语义，不私造状态与结论。
+2. **owner 在哪**：归 `packages/dsh-remote-node-harness/src/host/`（路由与身份）与 `packages/rnh-brain/`（节点组合）管；跨入口语义先进共享合同或核心层，不散落在 UI、脚本、prompt。adapter / controller / UI / CLI / worker 只做映射与接线，不拥有业务语义，不私造状态与结论。
 3. **验收怎么算过**：§12 的 `verification`，或哪条证据能证明。
 
 三者拿不到就先审计并说明缺什么，不得边猜边做。
@@ -51,7 +51,7 @@
 
 - **目标**：让桌面端把局域网 Linux 机器当成**本地工作区**用 —— 大脑（agent、模型调用、工具执行、会话日志）跑在节点上，桌面端只做身份编码、请求转发、结果还原；远端会话出现在同一个侧栏，手机端 `ds-harness-remote` 也能读到。
 - **非目标**（用户已明确否定，不许换名保留）：把远端目录镜像/挂载到本地再在本机跑工具；改 Electron 主进程；接管 `/api` 或 `/api/remote.mux`；碰上游 Loader 行；**改上游语义**（fork 只允许构建侧修复，裁剪是打包步骤，不是改源码）；**不发 npm**；**不给 GitHub 留下载源**。
-- **节点的形态**：只当远程大脑。做法是**源码级定制组合层** —— 节点 profile 组合 `dsh-base` + `@local/dsh-fleet-brain`，`dsh-web-app` 那层根本不加载。所有节点共用同一份组合（不做 per-node 定制）。
+- **节点的形态**：只当远程大脑。做法是**源码级定制组合层** —— 节点 profile 组合 `dsh-base` + `@local/rnh-brain`，`dsh-web-app` 那层根本不加载。所有节点共用同一份组合（不做 per-node 定制）。
 - 用户明确否定过的概念必须从代码、文档、命名里删干净，不许换名保留。
 - 无意义兼容先问：旧字段、旧接口、双路径污染当前合同时，按 §11 确认取舍，不许擅自保留。
 
@@ -76,7 +76,7 @@
 - 只改实现、让它符合现有设计，属微/中任务，不必先改设计；暴露设计缺口时走提案回流，不许实现先行、设计后补。
 - 设计一次写完整：无法确定的事项显式列为待决项，写明阻塞范围、可选方向、推荐方向；禁止隐式 TBD 与 MVP 式裁剪。
 - 从合同、schema、模型、核心服务开始，不从 UI、HTTP handler、临时脚本倒推核心。
-- **生成物只读不手改**：`packages/dsh-fleet-brain/cordis.patch.yml` 与 `presets/*.yml` 由 `scripts/sync-from-upstream.mjs` 生成；`packages/dsh-fleet/src/host/brain-bundle.generated.js` 由 `scripts/embed-into-fleet.mjs` 生成。改源再重新生成。
+- **生成物只读不手改**：`packages/rnh-brain/cordis.patch.yml` 与 `presets/*.yml` 由 `scripts/sync-from-upstream.mjs` 生成；`packages/dsh-remote-node-harness/src/host/brain-bundle.generated.js` 由 `scripts/embed-into-rnh.mjs` 生成。改源再重新生成。
 - 抽象只在减少真实复杂度时引入。
 - 提案回流：停下来给问题与证据、影响范围、与设计的冲突、可选方案、推荐方案、待确认问题；确认后先改设计并提交 `docs:`，再继续实现。禁止边写代码边暗改设计。
 
@@ -114,7 +114,7 @@
 - 原子提交，一次一件事；前缀 `feat` / `fix` / `docs` / `refactor` / `test` / `chore` / `breakdown`。
 - 写代码前先看 `git status --short`；不干净先处理，不混入用户未授权的改动。
 - 禁止 `git add .`，只 stage 本任务文件；禁止 force-add ignored 文件。
-- 公开仓库禁止提交密钥、令牌、私钥、真实用户数据、含凭据的 URL；私有仓库可提交，但必须先确认远程仓库确为私有且不会被公开。日志与报告同样不许泄露。**本仓库已公开（github.com/zzyyyds88/dsh-fleet），测试只从 `DSH_FLEET_TEST_*` 环境变量读节点地址与凭据，源码里不许出现默认 IP 或默认密码。**
+- 公开仓库禁止提交密钥、令牌、私钥、真实用户数据、含凭据的 URL；私有仓库可提交，但必须先确认远程仓库确为私有且不会被公开。日志与报告同样不许泄露。**本仓库已公开（github.com/zzyyyds88/dsh-remote-node-harness），测试只从 `RNH_TEST_*` 环境变量读节点地址与凭据，源码里不许出现默认 IP 或默认密码。**
 - 主分支禁止 `reset --hard`、`push --force`、`clean -f`；功能分支允许 force push，但先确认没有他人在用该分支。其余破坏性命令仍需用户明确要求并确认风险。
 - 嵌套仓库统一在根仓库提交，不单独提交子仓库；`reference/` 与 `.scratch/` 不进版本管理，`packages/*` 下不得有独立 `.git`。
 - 对外提 PR / issue 前先读贡献规则与已有讨论，一次只解决一个问题，说明 diff 范围与验证证据后再提交。
@@ -134,13 +134,13 @@
 ### framework/deepseek-harness
 
 applies_when: "项目实际作为 DSH 插件 / bundle 运行"
-verification: "`node packages/dsh-fleet/test/routing-unit.mjs && node packages/dsh-fleet/test/multipart-unit.mjs`；读上游契约的测试必须用 Electron 的 Node：`ELECTRON_RUN_AS_NODE=1 \"DeepSeek Harness.exe\" test/dispatch-seam.mjs`"
+verification: "`node packages/dsh-remote-node-harness/test/routing-unit.mjs && node packages/dsh-remote-node-harness/test/multipart-unit.mjs`；读上游契约的测试必须用 Electron 的 Node：`ELECTRON_RUN_AS_NODE=1 \"DeepSeek Harness.exe\" test/dispatch-seam.mjs`"
 
 - 插件的三条运行时缝隙是**实现细节，不是公开契约**：`@Remote` 描述符写在类原型、Gateway 用 `Reflect.get` dispatch、参数名靠 `Function.prototype.toString` 解析。任何一条被上游改掉，路由整体失效 —— 每次 DSH 升级都要重跑 `dispatch-seam.mjs`。
 - 插件不 import 任何 `@deepseek-ai/*`，也不从 `app.asar` 里 import。唯一运行时依赖是 `ssh2`。破坏这条就等于把插件绑死在某个版本的内部结构上。
 - **Cordis 的 `inject` 必须声明插件读取的每一个服务**。漏了会在插件体里抛 `cannot get property "X" without inject`，若抛出点在 promise 链里则没有任何可见症状 —— 宿主启动、端口在听、一行不打印。
-- 节点组合（`dsh-fleet-brain`）必须从**已安装的那个 release** 派生，不能从 master 派生。master 领先于发布版，会让节点组合出该版本不存在的行（实测踩过：`authentication-token` 行在 `0.2.2-rc.3` 里不存在，节点报 "1 entry did not activate"）。
-- 生成物链：`sync-from-upstream.mjs` → `cordis.patch.yml` + `presets/` → `embed-into-fleet.mjs` → `dsh-fleet/src/host/brain-bundle.generated.js`。改组合只能改脚本或 `src/runtime.js`。
+- 节点组合（`rnh-brain`）必须从**已安装的那个 release** 派生，不能从 master 派生。master 领先于发布版，会让节点组合出该版本不存在的行（实测踩过：`authentication-token` 行在 `0.2.2-rc.3` 里不存在，节点报 "1 entry did not activate"）。
+- 生成物链：`sync-from-upstream.mjs` → `cordis.patch.yml` + `presets/` → `embed-into-rnh.mjs` → `dsh-remote-node-harness/src/host/brain-bundle.generated.js`。改组合只能改脚本或 `src/runtime.js`。
 - 节点上的 DSH 是**独立安装**（版本与桌面完全相等），有自己的 `~/.dsh`。它没有 provider、没有 API key，所以 provisioning 是连接流程的一部分，不是可选优化。
 - 节点运行时有**一条路**：下载本项目从 fork 编译的制品（`scripts/build-fork-runtime.mjs` →
   `scripts/publish-runtime.mjs`）。npm 兜底路线**已删除**，不是关掉开关 —— 它装的是上游发布版、

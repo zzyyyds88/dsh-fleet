@@ -1,0 +1,87 @@
+{
+  "name": "@greatbaby/dsh-remote-node-harness",
+  "version": "0.6.0",
+  "type": "module",
+  "description": "Remote Linux machines as first-class DeepSeek Harness workspaces: the brain runs on the node (so bash, grep, git and read_image are native there), while its sessions and workspaces are merged into the local sidebar and the local Remote API, so the desktop app and ds-harness-remote both see one node set.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-bundle",
+    "remote",
+    "ssh",
+    "workspace"
+  ],
+  "homepage": "https://github.com/zzyyyds88/dsh-remote-node-harness#readme",
+  "bugs": {
+    "url": "https://github.com/zzyyyds88/dsh-remote-node-harness/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zzyyyds88/dsh-remote-node-harness.git",
+    "directory": "packages/dsh-remote-node-harness"
+  },
+  "license": "MIT",
+  "author": "zzyyyds88",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client/client.js",
+    "./node-control": "./src/node-control/index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "src",
+    "presets/*.patch.yml",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "README.md",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/node-control.patch.yml"
+      ]
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node test/routing-unit.mjs && node test/multipart-unit.mjs && node test/picker-paths-unit.mjs && node test/install-unit.mjs",
+    "test:gateway": "node test/gateway-smoke.mjs",
+    "test:host": "node test/host-routing.mjs",
+    "test:flow": "node test/workspace-flow.mjs",
+    "test:tools": "node test/tool-parity.mjs && node test/tool-git-image.mjs",
+    "test:client": "node test/client-bundle.mjs",
+    "pack": "npm pack --pack-destination dist"
+  },
+  "dependencies": {
+    "ssh2": "^1.17.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.2-rc.3 <0.3.0"
+  }
+}

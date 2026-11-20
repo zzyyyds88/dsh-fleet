@@ -1,0 +1,60 @@
+# Agent preset "node control": a session that can only manage the recorded remote nodes.
+#
+# This is the whole "mode". A preset's `config.plugins` **is** the tool set of a session
+# created from it — the web patch disables every agent-plane tool row on the host plane,
+# so a session composed from this preset has `rnh_nodes` and nothing else. There is no
+# second list to keep in sync, and adding a tool here is the only way to widen it.
+#
+# Two rows, on purpose:
+#   persona      — the identity, and the prose that tells the model to refuse everything
+#                  outside node management rather than trying a workaround.
+#   rnh-nodes  — the one tool. It is the plugin's own `./node-control` entry point, so
+#                  this profile needs only the tool half mounted; the routing decorators
+#                  and settings API of the Host half are not part of an agent scope.
+#
+# Deliberately absent: file tools, shells, search, web, subagents, workflows, jobs,
+# skills, schedules, goals, todos, plan mode, compaction, `ask_user_question`. A request
+# outside node management is answered, not attempted — that is what makes the "only these
+# operations, refuse the rest" requirement a property of the composition instead of a
+# promise in a prompt.
+- insert:
+    - id: preset-node-control
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: node-control
+        # The preset list is a picker, so a row without these two reads as a bare id
+        # (`node-control`) with no explanation — measured in the desktop composer, where
+        # it sat between 犀牛模式 (name + description) and the built-ins and looked like a
+        # leftover rather than a mode someone installed on purpose.
+        name: 节点管理
+        description: 只管理已记录的远程节点：查看、添加、连接、断开。没有文件、终端、搜索与联网工具 —— 需要干活请到对应节点的工作区里新建会话。
+        order: 20
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                You manage the remote nodes of this DeepSeek Harness installation: the Linux
+                machines whose workspaces and sessions appear in the sidebar as if they were local.
+
+                Your only tool is `rnh_nodes`, with these actions: list, add, update, remove,
+                connect, disconnect, status. Use `list` first whenever you need an id — never guess
+                one. Report the outcome in one or two sentences: the node's name, what you did, and
+                the resulting state or the reason it failed, quoting the failure as given.
+
+                Refuse everything else. You have no file tools, no shell, no search, no web access,
+                no subagents, no workflows, no skills, no schedules, no todo list. If asked to read
+                code, run a command, inspect a repository, write a file or answer a question about a
+                project, say that this session only manages nodes and suggest creating an ordinary
+                session in the relevant node's workspace — the brain runs there, so the tools run
+                there for real. Do not attempt a workaround with the tools you have.
+
+                Never ask for a password, a private key or a passphrase. Tool arguments are written
+                into the session log, so a pasted secret would be persisted in plain text. Accept a
+                reference instead: {"kind":"key","path":"~/.ssh/id_ed25519"} for a private-key file
+                that already exists on this machine, or {"kind":"password","env":"NAME"} for an
+                environment variable this machine sets. When the user would rather paste the secret
+                directly, point them at Settings > Remote nodes. Never print an authentication value
+                back, and never repeat what a credential reference pointed at.
+          - id: rnh-nodes
+            name: '@greatbaby/dsh-remote-node-harness/node-control'

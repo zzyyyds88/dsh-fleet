@@ -9,7 +9,7 @@
 > 上承 [ADR-0005](adr-0005-release-and-maintenance.zh.md)。
 > 本文只决定「节点的运行时从哪来」，不改路由、组合、会话语义。
 > 现在怎么用：安装与升级步骤见根 [README.md](../README.md) 与
-> [`packages/dsh-fleet/docs/UPGRADE.zh.md`](../packages/dsh-fleet/docs/UPGRADE.zh.md)；
+> [`packages/dsh-remote-node-harness/docs/UPGRADE.zh.md`](../packages/dsh-remote-node-harness/docs/UPGRADE.zh.md)；
 > 设计与实测数据见 [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) 六之四。
 
 ## 一、问题：一个本可以在节点上完成的工作，变成了所有人的等待
@@ -75,7 +75,7 @@ npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/
 
 ### 1. 安装写同一枚构建戳
 
-`BUILD_STAMP`（`.fleet-artefact.json`）的内容是 `stampJson()` 的
+`BUILD_STAMP`（`.rnh-artefact.json`）的内容是 `stampJson()` 的
 `{"build":N,"via":"artefact"|"npm"}`：
 
 - `build` 参与判定，必须等于 `RUNTIME_BUILD`；
@@ -114,7 +114,7 @@ npm install --os=<目标os> --cpu=<目标cpu> --libc=<目标libc> '@deepseek-ai/
 > | `dsh` 的 `engines.node` | `>=24.9.0`，但只在 npm 路线上被读到，且已 `--engine-strict=false` |
 > | 305 个依赖包里真正的 Node 24 API（`Promise.try` / `RegExp.escape` / `Float16Array` / `node:sqlite`） | **0 处** |
 > | 唯一的 `await using` 命中 | `dsh-ptc-runtime-node/lib/process.js` 里 acorn 的**解析器字符串字面量**，不是语法；`node --check` 在 22 上通过 |
-> | `workflow-ptc` 会不会加载 | brain 组合里 `disabled: true`，节点组合是 `dsh-base + rhino-mode + fleet-brain`，加载不到 |
+> | `workflow-ptc` 会不会加载 | brain 组合里 `disabled: true`，节点组合是 `dsh-base + rhino-mode + rnh-brain`，加载不到 |
 >
 > 也就是说 `engines` 这条声明在今天**只是建议**：没有任何一条被实际执行的代码路径需要 24。
 > 抬高门槛的唯一后果是一部分现场机器连不上，而换不来任何东西。什么时候该重开这个决定：
@@ -141,7 +141,7 @@ per-package 的 test 目录都不进制品。只影响节点磁盘占用，不�
 **当时的真机验收证据**：`test/npm-install-acceptance.mjs` 在参考节点上两次通过（22 项断言，
 含戳、原生包、`koffi/build` 缺席、`spawn-helper` 可执行）；`run-all.mjs --layer e2e --only
 session,node-control` 在一个真 Host 上跑了 112.4 s 全绿，之后节点上的
-`~/.dsh-fleet/runtime/.fleet-artefact.json` 是 `{"build":3,"via":"npm"}`、版本 `0.2.2-rc.5` ——
+`~/.dsh-remote-node-harness/runtime/.rnh-artefact.json` 是 `{"build":3,"via":"npm"}`、版本 `0.2.2-rc.5` ——
 也就是说那次连走的就是兜底路线，并且没有触发第二次安装。
 
 > 那个套件已随路线一起删除。它证明的是「上游发布版能在这台节点上装起来」，而这个前提在
@@ -202,7 +202,7 @@ pack 不 `fail-fast`：某个平台没成，其余平台的节点照样能走快
 
 ```js
 DEFAULT_SOURCES = [
-  { kind: 'template', template: 'https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/{tag}/{file}' },
+  { kind: 'template', template: 'https://cnb.cool/serendipity-archive/dsh-remote-node-harness/-/releases/download/{tag}/{file}' },
   { kind: 'prefix', prefix: 'https://git.yylx.win/' },   // 以下四项仍拼接 GitHub 官方 URL
   { kind: 'prefix', prefix: 'https://gh.inkchills.cn/' },
   { kind: 'prefix', prefix: 'https://tvv.tw/' },
@@ -240,7 +240,7 @@ DEFAULT_SOURCES = [
 
 - **~~不 fork 官方 DSH 包。~~** 现在 **fork 了**：节点运行时来自本仓库对上游源码的 fork，
   只留大脑需要的包。理由、裁剪规则与实测数字见 [ADR-0007](adr-0007-fork-node-runtime.zh.md)。
-  「定制走 `@local/dsh-fleet-brain` 与 profile patch」这条仍然成立，只是不再是**唯一**的定制层。
+  「定制走 `@local/rnh-brain` 与 profile patch」这条仍然成立，只是不再是**唯一**的定制层。
 - **不出锁文件。** 一份 `package-lock.json` 的 `resolved` 写死 registry 域名；实测 npm 11 的
   `replace-registry-host` 默认只对 `registry.npmjs.org` 开头的 URL 生效，把锁绑到 npmmirror 就
   在别的节点上失效。保持每次在线解析，代价可接受。

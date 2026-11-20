@@ -4,7 +4,7 @@
 >
 > 参考实现：`zai-org/ZCode`。它远控好用的根本原因是**远端有大脑**：本地不发每条指令，只连过去用。本插件走同一条路。
 >
-> 两个包：`packages/dsh-fleet`（插件，装在桌面端）与 `packages/dsh-fleet-brain`（节点侧的 DSH 组合，只当大脑）。
+> 两个包：`packages/dsh-remote-node-harness`（插件，装在桌面端）与 `packages/rnh-brain`（节点侧的 DSH 组合，只当大脑）。
 
 ---
 
@@ -28,17 +28,17 @@
 1. 这样桌面端的侧栏、会话视图、文件查看器、审批、终端、job、goal 全部照常工作，因为它们看的本来就是这两个接口；
 2. `ds-harness-remote`（P2P 端到端加密远控）的白名单里有 `session/list` / `session/follow` / `session/prompt` / `session/page` / `workspace/follow` / `workspaceFiles/*`（0.6.5 与 0.6.6 都一样，后者只多放行 5 个端点）。本地网关多返回远程行，手机端就自然读得到这些**会话行**，**它一行都不用改**。
 
-   这句话要限定在「会话行」上，不能推广到「节点上的文件」。手机对**远端会话**调 `workspaceFiles/{read,readBytes,readAll,stat,search}` 会被中转自己挡下：它在 dispatch 前先 `resolveWorkspaceRootForSession(sessionId)`，做法是让 Host 派发 `session/list`、取该行 `cwd`、再在 **Host 本机** `realpath()`。而 fleet 合并进来的远端行，`cwd` 是节点上的路径（`/root/proj`），本机 `realpath` 得 `ENOENT`，于是回 `WORKSPACE_UNAVAILABLE`（`authority-unavailable`）。这道闸门 0.6.5 就有（`WORKSPACE_FILE_READ_ENDPOINTS` 与 `resolveWorkspaceRootForSession` 两版逐字节相同），不是哪次升级引入的；`search` 只是又多了一个撞同一堵墙的端点。桌面端点开远端文件不受影响 —— 那条路走 fleet 的 `workspaceFileScope` lookup，不经过中转。见 [UPGRADE](../packages/dsh-fleet/docs/UPGRADE.zh.md) §九的漂移表。
+   这句话要限定在「会话行」上，不能推广到「节点上的文件」。手机对**远端会话**调 `workspaceFiles/{read,readBytes,readAll,stat,search}` 会被中转自己挡下：它在 dispatch 前先 `resolveWorkspaceRootForSession(sessionId)`，做法是让 Host 派发 `session/list`、取该行 `cwd`、再在 **Host 本机** `realpath()`。而 rnh 合并进来的远端行，`cwd` 是节点上的路径（`/root/proj`），本机 `realpath` 得 `ENOENT`，于是回 `WORKSPACE_UNAVAILABLE`（`authority-unavailable`）。这道闸门 0.6.5 就有（`WORKSPACE_FILE_READ_ENDPOINTS` 与 `resolveWorkspaceRootForSession` 两版逐字节相同），不是哪次升级引入的；`search` 只是又多了一个撞同一堵墙的端点。桌面端点开远端文件不受影响 —— 那条路走 rnh 的 `workspaceFileScope` lookup，不经过中转。见 [UPGRADE](../packages/dsh-remote-node-harness/docs/UPGRADE.zh.md) §九的漂移表。
 
 手机那条路（DSH Go → 中转 → 桌面 Host → 节点）的形态、边界与实施顺序见
 [ADR-0003](adr-0003-phone-control.zh.md)。一句话结论：中转的每一次调用走
-`gateway.dispatch`，而 fleet 把 override 装在同一批 service 实例上，所以**混排与路由对手机
+`gateway.dispatch`，而 rnh 把 override 装在同一批 service 实例上，所以**混排与路由对手机
 自动生效**，两个插件不需要互相知道对方存在。
 
-手机入口需要 fleet 额外做四件事，设计与取舍见 [ADR-0004](adr-0004-node-control-and-picker.zh.md)：
-节点路径用 `/@fleet/<nodeId>/…` 命名空间（于是中转 dispatch 前的 `mkdir` 落点被限制在一个可精确
-清理的位置）、`directoryPicker` 的 `list`/`createDirectory` 由 fleet **整体接管**（原生后端在桌面
-上是 `native`，装饰根本调不到）、一个只有 `fleet_nodes` 工具的「节点控制」预设、以及符合官方
+手机入口需要 rnh 额外做四件事，设计与取舍见 [ADR-0004](adr-0004-node-control-and-picker.zh.md)：
+节点路径用 `/@rnh/<nodeId>/…` 命名空间（于是中转 dispatch 前的 `mkdir` 落点被限制在一个可精确
+清理的位置）、`directoryPicker` 的 `list`/`createDirectory` 由 rnh **整体接管**（原生后端在桌面
+上是 `native`，装饰根本调不到）、一个只有 `rnh_nodes` 工具的「节点控制」预设、以及符合官方
 `install_bundle` 的清单形态。
 
 ---
@@ -54,18 +54,18 @@
 │         │        session/list、workspace/follow、session/follow …      │
 │         │        → 本地行 + 每个已连接节点的行                          │
 │         ├─ typert.lookups('workspaceFileScope')  ← 覆写，保留 delegate  │
-│         └─ /fleet/api                    ← 节点管理 + 按路径加工作区    │
+│         └─ /rnh/api                    ← 节点管理 + 按路径加工作区    │
 └────────────────────────────────────────────────────────────────────────┘
                               │ SSH :22（唯一入口，不开放端口）
                               ▼
 ┌──────────────────── 远端 Linux · 常驻大脑 ─────────────────────────────┐
-│  ~/.dsh-fleet/runtime/node_modules/@deepseek-ai/dsh                    │
-│    └─ dsh --profile fleet --host 127.0.0.1 --port 0 --no-open          │
-│         （profile 名按 remoteRoot 派生：~/.dsh-fleet → fleet，          │
-│           ~/.dsh-fleet-b → fleet-b；见 §六之四「每节点一份路径」）        │
+│  ~/.dsh-remote-node-harness/runtime/node_modules/@deepseek-ai/dsh                    │
+│    └─ dsh --profile rnh --host 127.0.0.1 --port 0 --no-open          │
+│         （profile 名按 remoteRoot 派生：~/.dsh-remote-node-harness → rnh，          │
+│           ~/.dsh-remote-node-harness-b → rnh-b；见 §六之四「每节点一份路径」）        │
 │         ├─ 完整 DSH Host：rg / git / read_image / bash / PTY 原生执行   │
 │         └─ 会话、工作区、审批、终端全部在远端，本地不复制                │
-│  ~/.dsh-fleet/run/{status.json, pid, host.log}                         │
+│  ~/.dsh-remote-node-harness/run/{status.json, pid, host.log}                         │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -89,9 +89,9 @@
 
 ### 缝隙二：`typert.lookups.configure('workspaceFileScope', …)`
 
-`workspaceFiles/*` 的第一个参数是 `workspaceFileScopeId`，Host 先用 lookup 把它解析成 `{sessionId, workspaceRoot}`。而 `fleet_<node>_<id>` 不是本地 Session，上游 lookups 会先返回 `not-found`，**根本轮不到装饰器**。
+`workspaceFiles/*` 的第一个参数是 `workspaceFileScopeId`，Host 先用 lookup 把它解析成 `{sessionId, workspaceRoot}`。而 `rnh_<node>_<id>` 不是本地 Session，上游 lookups 会先返回 `not-found`，**根本轮不到装饰器**。
 
-所以覆写这个 lookup：先取回上游 provider 的 resolve 做 delegate，本地 id 原样委托，`fleet_` id 合成 `{sessionId, workspaceRoot:'/'}`。`test/host-routing.mjs` 同时验证了**远程读到节点磁盘**和**本地仍然读到本地磁盘**。
+所以覆写这个 lookup：先取回上游 provider 的 resolve 做 delegate，本地 id 原样委托，`rnh_` id 合成 `{sessionId, workspaceRoot:'/'}`。`test/host-routing.mjs` 同时验证了**远程读到节点磁盘**和**本地仍然读到本地磁盘**。
 
 ### 缝隙三：SSH `direct-tcpip` 上的 HTTP 与 RFC 6455
 
@@ -104,7 +104,7 @@
 
 `agent: Agent` 形参在**方法体之前**就被 Gateway 解析掉，所以装饰器看到的已经是占位对象 —— 想换掉解析结果，只能换 resolver 本身。而公开的 `typert.lookups.configure('agent', …)` 已被 `@deepseek-ai/dsh-api-session-controller` 占用（`configure` 对同一 key 第二次调用直接抛错）。
 
-所以 `host/lookups.js` 直接替换 `typert.lookupStore.resolvers` 这个 `Map` 里的 `'agent'` 项：`fleet_` 前缀合成占位 Agent（`{ id, ctx }`，`ctx` 用插件自己的长命 Context），其余 id 原样委派给被替换掉的那个 resolver；`dispose` 时只在自己仍是当前项的情况下还原（否则会把别人的覆盖删掉）。
+所以 `host/lookups.js` 直接替换 `typert.lookupStore.resolvers` 这个 `Map` 里的 `'agent'` 项：`rnh_` 前缀合成占位 Agent（`{ id, ctx }`，`ctx` 用插件自己的长命 Context），其余 id 原样委派给被替换掉的那个 resolver；`dispose` 时只在自己仍是当前项的情况下还原（否则会把别人的覆盖删掉）。
 
 为什么必须走到这一层：`terminal/*` 九个端点里六个吃 `Agent`，`goals/*`、`userQuestions/*`、`subagents/*` 同样。占位对象不是注册过的 Agent，`ctx.agents.get(id)` 拿不到它 —— 所以装饰器不能指望它，只能拿它的 `id` 去解节点，再用**节点自己的**形参转发（见 §五「形参里是 `Agent` 的两个例外」）。
 
@@ -118,7 +118,7 @@
 
 三条硬约束：
 
-1. `agentId` 必须 `Router.toLocal` 包成 `fleet_…`，否则浏览器合成的 scope 用裸 id，卡片进不了那张会话；
+1. `agentId` 必须 `Router.toLocal` 包成 `rnh_…`，否则浏览器合成的 scope 用裸 id，卡片进不了那张会话；
 2. `frame.request` 里不能有 `agent` / `signal` / 显式 `undefined` —— 浏览器自己补前两个；
 3. 没有活的 owner 客户端（`gateway.hasLiveClient()` 为假）时立刻答 `next`，否则 pending 永挂、把远程回合吊死。超过 10 分钟没人答同样答 `next`（上游 approval 的默认值本来就是 `'unavailable'`，所以这是**降级回原状**，不是新增失败模式）。
 
@@ -128,10 +128,10 @@
 
 ## 四、身份：一个字符串回答三个问题
 
-远程身份过边界时是 `fleet_<nodeId>_<remoteId>`，例如
+远程身份过边界时是 `rnh_<nodeId>_<remoteId>`，例如
 
 ```
-fleet_n0123456789ab_session-1dc98667-3f1e-4f47-9d5b-2a4e2b3d3f6a
+rnh_n0123456789ab_session-1dc98667-3f1e-4f47-9d5b-2a4e2b3d3f6a
 └─ 5+13 字符 ──┘└─ 节点上原本的 session-<uuid> ──────────────┘
 ```
 
@@ -141,7 +141,7 @@ fleet_n0123456789ab_session-1dc98667-3f1e-4f47-9d5b-2a4e2b3d3f6a
 
 **子代理的 Session 没有 `session-` 前缀**：节点用裸 uuid 铸造它（`sessionId: "026e33cb-…"`，父 Session 才是 `session-<uuid>`）。所以「按值匹配形状」不够，方向反过来的 `toLocal` 还得**按字段名**包装：`sessionId`、`childSessionId`、`parentSessionId` 里出现裸 uuid 一律包。只按值匹配的后果实测过一次：侧栏列出的子代理 id 是裸 uuid，浏览器按目录行拼出 `{kind:'subagent', parentSessionId, childSessionId}` 地址，本机 `decodeRemoteId` 解不出来，`session/page` 落到本地实现，本机没有那段日志，于是「历史加载失败：subagent is unavailable（subagent/not-found）」。字段名是这里唯一的判据，因为一个裸 uuid 只可能是子代理 Session，而只有 Session 字段能装它。
 
-Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不同（`workspaceId` / `workspaceIds` / `beforeWorkspaceId`）。
+Workspace 身份同理（`rnh_<nodeId>_<workspaceId>`），只是包装点不同（`workspaceId` / `workspaceIds` / `beforeWorkspaceId`）。
 
 ---
 
@@ -156,7 +156,7 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 | `session/control` | **合并** | Host 级、每连接一条，不是按 Session 路由：本地流 + 每个节点的投影块，并成一帧 baseline 再串增量 |
 | `$events`（网关自有端点） | **中继** | 节点的 `api-session/*` 事件重新在本机 emit，身份包成本地形式；同一流上的 waterfall 用 `next` 答掉 |
 | `workspace/follow` | **合并** | 一条流里同时推送本地 baseline 与每个节点 baseline；之后再串各自增量 |
-| `workspace/create` | **按路径路由** | `/@fleet/<nodeId>/…` 直接定节点（见下）；裸 POSIX 路径逐节点尝试（节点侧 `realpath` 校验必须通过）。成功后清理中转 dispatch 前 `mkdir` 出来的幽灵目录 |
+| `workspace/create` | **按路径路由** | `/@rnh/<nodeId>/…` 直接定节点（见下）；裸 POSIX 路径逐节点尝试（节点侧 `realpath` 校验必须通过）。成功后清理中转 dispatch 前 `mkdir` 出来的幽灵目录 |
 | `directoryPicker/list`、`createDirectory` | **整体替换，不是装饰** | 原生后端在桌面上解析成 `native`，`list` 会 `requireCapability("browse")` 抛错，中转随即改用自己那份实现 —— 只做装饰永远调不到。见下 |
 | `workspace/rename` 等变更 | **按 owner 转发** | 按 workspaceId 找节点 |
 | `workspaceFiles/{list,stat,read,…}` | **路由** | 靠缝隙二解析出节点，payload 用 `workspaceFileScopeId` |
@@ -172,7 +172,7 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 | `messageFeedback/{list,put,delete}` | **路由** | 身份在 `request.sessionId`；不路由时点赞要么找不到会话，要么落到本机同形状的另一个会话上 |
 | `sessionReferenceResolver/candidates` | **路由** | `@` 提及的会话列表该是节点的 |
 | `fileReferences/list` | **路由** | 路径补全，答错最直观：远程会话里出现本机的 Windows 路径 |
-| `schedule/catalog`、`list` | **合并** | 条目是 Host 级的，只能合并：本机的行 + 每个节点的行，节点行的 `id` 包成 `fleet_<nodeId>_<id>`。分页在合并后的行上算 |
+| `schedule/catalog`、`list` | **合并** | 条目是 Host 级的，只能合并：本机的行 + 每个节点的行，节点行的 `id` 包成 `rnh_<nodeId>_<id>`。分页在合并后的行上算 |
 | `schedule/{view,edit,run,history}` | **路由** | 按那个包裹 id 解回节点与它自己的条目 id |
 | `schedule/create` | **路由** | 身份在 `request.target.sessionId`：给远程会话建的任务必须建在节点上 |
 | `schedule/deleteInactive` | **本机 + 广播** | 无身份；不在节点上也清一遍，否则下次合并会显示「删不掉」的任务 |
@@ -201,25 +201,25 @@ Workspace 身份同理（`fleet_<nodeId>_<workspaceId>`），只是包装点不�
 `sessionController` 那个回调里 `scope.get(name)`。后者在服务晚挂载时永远看不到它，
 而且失败是静默的 —— 那个命名空间一直回答本机。
 
-`workspace/create` 的按路径路由有个现实理由：**本地目录选择器只能浏览本机**，永远选不到节点上的 `/root/project`。所以远程工作区从 `/fleet/api/workspaces` 加入（设置页节点行展开后的输入框），它在节点上 `workspace/create`，再把结果包装成本地身份还回来。
+`workspace/create` 的按路径路由有个现实理由：**本地目录选择器只能浏览本机**，永远选不到节点上的 `/root/project`。所以远程工作区从 `/rnh/api/workspaces` 加入（设置页节点行展开后的输入框），它在节点上 `workspace/create`，再把结果包装成本地身份还回来。
 
-### 节点路径的语法位置：`/@fleet/<nodeId>/…`
+### 节点路径的语法位置：`/@rnh/<nodeId>/…`
 
 `ds-harness-remote` 的手机端只会说「本机绝对路径」，节点路径必须挤进同一套语法。用
-`/@fleet` 前缀（细节与取舍见 [ADR-0004](adr-0004-node-control-and-picker.zh.md) §二）：
+`/@rnh` 前缀（细节与取舍见 [ADR-0004](adr-0004-node-control-and-picker.zh.md) §二）：
 
 ```
-/@fleet                       → 节点列表
-/@fleet/<nodeId>/             → 那台节点的文件系统根
-/@fleet/<nodeId>/root/proj    → 那台节点上的 /root/proj
+/@rnh                       → 节点列表
+/@rnh/<nodeId>/             → 那台节点的文件系统根
+/@rnh/<nodeId>/root/proj    → 那台节点上的 /root/proj
 ```
 
 三条理由，每条都能被否证：
 
-- `fleet://x` **不行**：win32 上 `isAbsolute` 为 false，中转 dispatch 之前的
-  `ensureHostWorkspaceDirectory` 会先抛 `INVALID_MESSAGE`，fleet 收不到请求；
+- `rnh://x` **不行**：win32 上 `isAbsolute` 为 false，中转 dispatch 之前的
+  `ensureHostWorkspaceDirectory` 会先抛 `INVALID_MESSAGE`，rnh 收不到请求；
 - 只做「逐节点试」不行：只能选已存在的目录，多台同名路径谁先谁得；
-- `/@fleet` 让中转那次 `mkdir` 的落点被限制在 `<盘>:\@fleet\` 之下 —— 于是清理是**精确的**
+- `/@rnh` 让中转那次 `mkdir` 的落点被限制在 `<盘>:\@rnh\` 之下 —— 于是清理是**精确的**
   （自底向上 `rmdir`，`ENOTEMPTY` 就停），不是靠 mtime 或「目录为空」猜出来的。
 
 `browse.js` 的 `listLocal` 因此补了 `crumbs` 字段：手机端的面包屑要能读成「主目录 / 节点名 / root / proj」，
@@ -273,22 +273,22 @@ D:\ProjectHub\DSHpl\
   AGENTS.md             协作规则（本项目的硬约束）
   docs/ARCHITECTURE.md  本文档：设计与取舍
   packages/
-    dsh-fleet/          插件：Host 侧 + 浏览器侧
-    dsh-fleet-brain/    节点侧 bundle：只当大脑的 DSH 组合（生成物 + 生成脚本）
+    dsh-remote-node-harness/          插件：Host 侧 + 浏览器侧
+    rnh-brain/    节点侧 bundle：只当大脑的 DSH 组合（生成物 + 生成脚本）
   reference/            上游源码（DSH / ZCode），独立克隆，不进版本库
 ```
 
 ```
-packages/dsh-fleet/
+packages/dsh-remote-node-harness/
   package.json          dsh.bundle.patch（数组：插件行 + 预设行）+ dsh.client + engines.dsh
-  cordis.patch.yml      insert: dsh-fleet（单行；不禁用任何上游行）
+  cordis.patch.yml      insert: dsh-remote-node-harness（单行；不禁用任何上游行）
   presets/
-    node-control.patch.yml  preset-node-control：persona + 一个 fleet_nodes 工具
+    node-control.patch.yml  preset-node-control：persona + 一个 rnh_nodes 工具
   src/
     core/               nodes.json 注册表、凭据、HTTP 错误、每插件同步开关的语义
     ssh/                ssh2 连接池、exec、forwardOut、错误分类
     remote/             远端守护：probe / install / 节点 profile / 配置 / start / verify
-    node-control/       `./node-control` 入口：只注册 `fleet_nodes` 一个工具（预设挂它，不挂整个插件）
+    node-control/       `./node-control` 入口：只注册 `rnh_nodes` 一个工具（预设挂它，不挂整个插件）
     host/
       ssh-http.js       把 SSH channel 当 socket 用，手写 HTTP/1.1
       ws.js             手写 RFC 6455 客户端（应答 ping、帧重组）
@@ -296,10 +296,10 @@ packages/dsh-fleet/
       multipart.js      Gateway 的 multipart 应答解码（字节附件还原）
       provision.js      模型行复制、凭据下发、配置渲染
       browse.js         选工作区时的目录浏览：本机 readdir / 节点 find，同一返回形状（含 crumbs）
-      picker-paths.js   `/@fleet/<nodeId>/…` 命名空间：编解码、影子路径、精确清理
-      fleet-control.js  `fleetControl` 服务：节点增删改连断，工具唯一可及的面
+      picker-paths.js   `/@rnh/<nodeId>/…` 命名空间：编解码、影子路径、精确清理
+      rnh-control.js  `rnhControl` 服务：节点增删改连断，工具唯一可及的面
       sync-switches.js  每插件开关：读本机 profile manifest、记住选择、算节点 bundle 列表
-      brain-bundle.generated.js  节点组合（生成物，来自 dsh-fleet-brain）
+      brain-bundle.generated.js  节点组合（生成物，来自 rnh-brain）
       routing.js        身份编解码、AsyncQueue、ChangeSignal、own-property 覆写
       router.js         toRemote / toLocal / toLocalWorkspace / call / 流
       remote-workspaces.js  每节点一条 workspace/follow，baseline 缓存与合并
@@ -308,7 +308,7 @@ packages/dsh-fleet/
       decorators.js     五个命名空间的路由装饰器（session / workspace / workspaceFiles / job / terminal）
                         + 合并后的 control 流 + directoryPicker 的**整体替换**
       lookups.js        workspaceFileScope lookup 覆写
-      fleet.js          节点运行时状态机
+      rnh.js          节点运行时状态机
     client/client.js    设置页 + 侧栏面板 + 主区页面 + 加工作区的目录选择对话框
   locale/{en,zh}.json  含 meta.detail 指向 docs/DETAIL*.md
   docs/DETAIL.md  docs/DETAIL.zh.md  docs/preview.svg   插件详情页（会被安装清单检查）
@@ -317,7 +317,7 @@ packages/dsh-fleet/
 ```
 
 ```
-packages/dsh-fleet-brain/
+packages/rnh-brain/
   package.json          dsh.bundle.patch（含 4 个 preset 层）
   cordis.patch.yml      生成物：98 行 upstream → 60 行大脑组合
   presets/*.yml         原样复制自 upstream
@@ -325,7 +325,7 @@ packages/dsh-fleet-brain/
   scripts/
     sync-from-upstream.mjs   从已安装 release 派生组合
     check-composition.mjs    断言结果仍然是个大脑
-    embed-into-fleet.mjs     把整包嵌进插件
+    embed-into-rnh.mjs     把整包嵌进插件
 ```
 
 ### 连接状态机
@@ -341,7 +341,7 @@ provision 阶段内部顺序也是语义的：**组合先于启动**（profile �
 
 ### 断线要看得见，重连要成阶梯
 
-在 2026-11-19 之前，SSH socket 掉了之后 `state` **一直是 `connected`**：`SshConnection` 清掉自己的 client 就完事，没有任何人被告知。后果是卡片一直是绿的、侧栏还列着那台机器的工作区，而任何调用都回 `fleet/node-offline` —— 一个界面上从未出现过的状态。`disconnect()` 和 `invalidate()` 也会触发 `close`，所以「主动断开」和「掉线」必须分开：`#ending` 这个 WeakSet 记下自己主动结束的 client，只有不在其中的 `close` 才算掉线。
+在 2026-11-19 之前，SSH socket 掉了之后 `state` **一直是 `connected`**：`SshConnection` 清掉自己的 client 就完事，没有任何人被告知。后果是卡片一直是绿的、侧栏还列着那台机器的工作区，而任何调用都回 `rnh/node-offline` —— 一个界面上从未出现过的状态。`disconnect()` 和 `invalidate()` 也会触发 `close`，所以「主动断开」和「掉线」必须分开：`#ending` 这个 WeakSet 记下自己主动结束的 client，只有不在其中的 `close` 才算掉线。
 
 掉线后的阶梯是 `2s / 4s / 8s` 三次，之后每 **2 分钟**，直到成功或用户点「断开」。实测：`systemctl restart ssh` 两秒回来（第一档就成），整机重启 21 s 回来（落在第三或第四档）。阶梯期间**不报错**：状态是 `idle` + `droppedAt`，卡片写「已断线，正在重连」。用户点断开是唯一「别试了」的表达，所以 `disconnect()` 先取消定时器。
 
@@ -351,13 +351,13 @@ provision 阶段内部顺序也是语义的：**组合先于启动**（profile �
 
 `SshConnection` 的 `hostVerifier` 从写下的第一天起就在读 `target.hostFingerprint`，但**全仓库没有任何地方给它赋过值** —— 于是 `expected` 永远是 `undefined`，每次都走「首次」分支并 `verify(true)`。也就是说这条链是死代码，中间人可以无条件接管连接。
 
-现在：`NodeRecord.hostKey`（`SHA256:…`，OpenSSH 形式）在首次握手时由 `Fleet.#recordHostKey` 写进注册表，`#runtimeOf` 每次把记录里的值同步给已有的 `SshConnection`（否则重连时还在看 `undefined`，每次都是「首次」）。之后每握手比对一次，不符则拒绝并把两侧指纹写进该节点的日志。
+现在：`NodeRecord.hostKey`（`SHA256:…`，OpenSSH 形式）在首次握手时由 `Rnh.#recordHostKey` 写进注册表，`#runtimeOf` 每次把记录里的值同步给已有的 `SshConnection`（否则重连时还在看 `undefined`，每次都是「首次」）。之后每握手比对一次，不符则拒绝并把两侧指纹写进该节点的日志。
 
 这是 **trust-on-first-use**，不是完整的主机身份验证：首次连接仍然可能被中间人。它买到的是「之后每一次都可证明」，以及「密钥变了要人来确认」——插件不会自动接受新密钥，也没有忽略开关。`SECURITY.md` 里写明了这个局限。
 
 ### 节点自带日志
 
-`ctx.logger` 写的是桌面端的总日志，出了问题的人找不到它，找到了也被别的节点和插件混在一起。所以每个 `NodeRuntime` 还有一个 `NodeLog`（`src/host/node-log.js`）：最近 100 行，带 ISO 时间戳与级别，**写入时脱敏**（不是读取时——已经存下来的东西已经泄露了），路由是 `/fleet/api/nodes/<id>/log`，卡片上可展开、可复制。
+`ctx.logger` 写的是桌面端的总日志，出了问题的人找不到它，找到了也被别的节点和插件混在一起。所以每个 `NodeRuntime` 还有一个 `NodeLog`（`src/host/node-log.js`）：最近 100 行，带 ISO 时间戳与级别，**写入时脱敏**（不是读取时——已经存下来的东西已经泄露了），路由是 `/rnh/api/nodes/<id>/log`，卡片上可展开、可复制。
 
 脱敏规则有顺序要求：`Bearer` 那条必须在 `key=value` 那条**之前**。反过来会让 `Authorization: Bearer abc.def` 被 `authorization` 规则吃掉前一半、把 token 本身留在行里 —— 实测就是这个结果，`offline/errors` 里有一条断言守着它。
 
@@ -411,10 +411,10 @@ ssh2 发一次 exec 请求时**不切包**：`Protocol.js:1273` 的 `alloc(1 + 4
 
 关键认识：**"删掉"不等于"物理删代码"**。DSH 是 Cordis 组合式架构，一个插件是否存在于运行时完全由 profile 的组合层决定。组合层里没有 `@deepseek-ai/dsh-client-ui-*` 这些行，那些包连 `import` 都不会发生 —— 效果等价于删除，但可逆、可跟随升级。
 
-所以节点侧是一个新包 **`@local/dsh-fleet-brain`**，它是一个合法的 DSH bundle（声明 `dsh.bundle.patch`），内容是 `dsh-web-app` 减去浏览器面。节点 profile 组合：
+所以节点侧是一个新包 **`@local/rnh-brain`**，它是一个合法的 DSH bundle（声明 `dsh.bundle.patch`），内容是 `dsh-web-app` 减去浏览器面。节点 profile 组合：
 
 ```
-@deepseek-ai/dsh-base + @local/dsh-fleet-brain      ← 现在是这个
+@deepseek-ai/dsh-base + @local/rnh-brain      ← 现在是这个
 @deepseek-ai/dsh-base + @deepseek-ai/dsh-web-app    ← 之前是这个
 ```
 
@@ -433,7 +433,7 @@ ssh2 发一次 exec 请求时**不切包**：`Protocol.js:1273` 的 `alloc(1 + 4
 
 ### 怎么减：从**已安装的 release** 派生，不是从 master
 
-`web-app` 的 patch 是 **621 行 / 123 行 insert**（实测 `0.2.2-rc.3` 的 `cordis.patch.yml`），手抄会腐。所以 `packages/dsh-fleet-brain/scripts/sync-from-upstream.mjs` 做这个减法并生成 patch：
+`web-app` 的 patch 是 **621 行 / 123 行 insert**（实测 `0.2.2-rc.3` 的 `cordis.patch.yml`），手抄会腐。所以 `packages/rnh-brain/scripts/sync-from-upstream.mjs` 做这个减法并生成 patch：
 
 - **keep**：全部 host-plane 行 —— Remote 控制器（session/workspace/workspaceFiles/job/terminal/settings）、传输层（webserver、`/api`、launch token）、服务（workspace、schedule、mcp-manager、agent-preset-registry）、`web-startup`。
 - **drop**：全部 `@deepseek-ai/dsh-client-ui-*` 包的行（节点没有窗口；按**包名**判断，实测 56 行 —— 其中 `entry-customization` 的 id 不以 `ui-` 开头，只按 id 前缀过滤会漏掉它），加 9 个浏览器专属行，每个在脚本里写明理由：
@@ -462,7 +462,7 @@ ssh2 发一次 exec 请求时**不切包**：`Protocol.js:1273` 的 `alloc(1 + 4
 
 第 2 条是这块最容易被漏掉的一环，因为它失败的样子极具误导性：`/api` 本身完全正常，但任何一个"先拿 URL 再换 cookie"的客户端都会在第一步就拿到 404，看起来像"节点没有 Remote API"。
 
-所以 `@local/dsh-fleet-brain/runtime` 做三件事：
+所以 `@local/rnh-brain/runtime` 做三件事：
 
 - 提供 `webApp` 服务（Host 契约的一部分，其它行会读）；
 - 等 Loader 组合完成后，用 `connection.authenticatedUrl()` 打印 `dsh web: <url>`，格式与本机桌面端解析的那一行完全一致；
@@ -474,20 +474,20 @@ ssh2 发一次 exec 请求时**不切包**：`Protocol.js:1273` 的 `alloc(1 + 4
 ### 传送链路：生成物，不手改
 
 ```
-packages/dsh-fleet-brain/
+packages/rnh-brain/
   cordis.patch.yml            ← 生成物（98 行上游 → 60 行大脑）
   presets/*.patch.yml         ← 原样复制（大脑的 Session 也要有 standard preset）
   src/runtime.js              ← 手写：唯一的大脑专属代码
   scripts/sync-from-upstream.mjs   ← 做减法并生成上面两者
   scripts/check-composition.mjs    ← 断言结果"仍然是个大脑"
-  scripts/embed-into-fleet.mjs     ← 把整包嵌进插件
+  scripts/embed-into-rnh.mjs     ← 把整包嵌进插件
         ↓
-packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符串常量）
+packages/dsh-remote-node-harness/src/host/brain-bundle.generated.js   ← 生成物（字符串常量）
 ```
 
-**为什么嵌进插件而不是运行时读路径**：插件跑在 DSH 自己的安装里（桌面构建里是 `app.asar` 内部），不能假设 `dsh-fleet-brain` 这个包在同一块盘上。嵌入后没有运行时路径假设。
+**为什么嵌进插件而不是运行时读路径**：插件跑在 DSH 自己的安装里（桌面构建里是 `app.asar` 内部），不能假设 `rnh-brain` 这个包在同一块盘上。嵌入后没有运行时路径假设。
 
-节点上落到 `~/.dsh/profiles/fleet/node_modules/@local/dsh-fleet-brain/` —— **profile 自己的 `node_modules`**，因为 Loader 解析一行 `name` 时的 profile 拦截层就是它。
+节点上落到 `~/.dsh/profiles/rnh/node_modules/@local/rnh-brain/` —— **profile 自己的 `node_modules`**，因为 Loader 解析一行 `name` 时的 profile 拦截层就是它。
 
 ### 幂等与顺序
 
@@ -504,7 +504,7 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 | 关注点 | 唯一拥有者 | 载体 |
 |---|---|---|
-| 节点跑哪些插件 | `packages/dsh-fleet-brain` | profile 的 `dsh.profile.bundles` |
+| 节点跑哪些插件 | `packages/rnh-brain` | profile 的 `dsh.profile.bundles` |
 | 节点的模型名册与权限预设 | `host/provision.js` | `~/.dsh/profiles/<profile>/cordis.patch.yml` |
 | 节点的 API key | `host/provision.js` | 节点凭据库（经节点 `credentials/set`） |
 | 节点上的 DSH 版本 | `remote/daemon.js` | 下载 Release 制品（`dsh-<ver>-<platform>.tar.gz`）替换 `runtime/`，见 §六之四 |
@@ -517,7 +517,7 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 组合层决定"有哪些插件"，但不决定"模型是什么、key 是哪把"。这两件事由本机驱动，并且**不只是连接那一刻**：
 
-1. **配置**（`~/.dsh/profiles/fleet/cordis.patch.yml`）：从活的 `configEditor.configuration()` 复制 provider 路由、默认模型、权限预设。账号登录型 provider 不复制（那是本机的登录态）。这是**插件自有 profile** 的配置层，节点宿主会热重载它 —— 改配置不需要重启宿主。
+1. **配置**（`~/.dsh/profiles/rnh/cordis.patch.yml`）：从活的 `configEditor.configuration()` 复制 provider 路由、默认模型、权限预设。账号登录型 provider 不复制（那是本机的登录态）。这是**插件自有 profile** 的配置层，节点宿主会热重载它 —— 改配置不需要重启宿主。
 2. **凭据**：那些行点名的 `apiKeyEnv` 在本机 `credentials.resolve()` 取值，通过节点自己的 `credentials/set` 写入节点凭据库。key 的 ref 不只从 `apiKeyEnv` 取 —— 那字段只有显式设置过才在组合后的 patch 里；没设时用 adapter 默认值（`llm-deepseek-api-key` → `DEEPSEEK_API_KEY`），否则会得到"provider 加载成功但没有 key"的节点。
 3. **跟随**：本机订阅自己的 `app-boot/config-reload`（`configEditor` 每次写配置后 emit）与 `credentials/reference-updated`，把 `syncConfig()` 派给所有已连接节点。两次事件可能连续来，所以合并到 250ms 的定时器上，避免读到只应用了一半的组合。
 
@@ -532,10 +532,10 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 | 实验 | 结果 |
 |---|---|
 | 往 overlay 里加一行指向不存在包的行 | 进程不变、日志零新增 —— 确认不被 watch |
-| 往 `profiles/fleet/cordis.patch.yml` 写 3 个模型（原子 `mv`） | 8 秒后 `session/modelCatalog` 返回它们，**PID 不变** |
+| 往 `profiles/rnh/cordis.patch.yml` 写 3 个模型（原子 `mv`） | 8 秒后 `session/modelCatalog` 返回它们，**PID 不变** |
 | 用 `>` 原地改写同一个文件 | 同样生效（chokidar + `awaitWriteFinish` 两种写法都收得到） |
 
-换到自有 profile 还顺手解决了一个所有权问题：`web` 是上游的 profile，插件不该和别的东西抢同一个 `cordis.patch.yml`。现在 `~/.dsh/profiles/fleet` 完全属于这个插件。
+换到自有 profile 还顺手解决了一个所有权问题：`web` 是上游的 profile，插件不该和别的东西抢同一个 `cordis.patch.yml`。现在 `~/.dsh/profiles/rnh` 完全属于这个插件。
 
 同期验证了真实链路：本地把 `reasoningEffort: high` 改成 `max` → 8 秒内节点 profile patch 里就是 `max`，节点 PID 不变；改回 `high` 同样跟着回来。
 
@@ -558,9 +558,9 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 ## 六之三、运行时契约与失败形态
 
-### `/fleet/api` 的鉴权边界
+### `/rnh/api` 的鉴权边界
 
-`/fleet/api` 用 `kind: 'prefix'` 注册，**没有写 `auth` 字段** —— 而 webserver 的默认策略是 `auth ?? 'required'`，`required` 又要求 `webserver/authorize` 的 bail 给出 `allow` + 一个 Peer。这个 bail 由 `dsh-client-connection` 的 Host 半边实现：它检查 Host/Origin fence，再验 cookie。
+`/rnh/api` 用 `kind: 'prefix'` 注册，**没有写 `auth` 字段** —— 而 webserver 的默认策略是 `auth ?? 'required'`，`required` 又要求 `webserver/authorize` 的 bail 给出 `allow` + 一个 Peer。这个 bail 由 `dsh-client-connection` 的 Host 半边实现：它检查 Host/Origin fence，再验 cookie。
 
 所以这组管理端点和 `/api` **同一把锁**：没有 `?token=` 换来的 cookie 就是 401/403。这一点必须写下来，因为"我自己注册的 prefix 默认是不是开放的"是那种想当然就会错的问题。
 
@@ -568,14 +568,14 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 
 | 数据 | 位置 | 说明 |
 |---|---|---|
-| 节点记录（host/port/user/名） | `$DSH_HOME/fleet/nodes.json` | 插件自己的目录，不动 desktop profile 的任何文件 |
-| 节点密码/私钥 | DSH 凭据库的 record：`dsh-fleet/n<id>` | 走 `ctx.credentials.modifyRecord`，序列化的读-改-写，所以"只换密码、保留私钥"是安全的 |
-| 节点的模型配置 | 节点 `~/.dsh/profiles/fleet/cordis.patch.yml` | 插件拥有；每次连接重写，本地一改就重新下发（宿主热重载，不重启） |
-| 节点的 brain bundle | 节点 `~/.dsh/profiles/fleet/node_modules/@local/dsh-fleet-brain/` | profile 自己的 `node_modules`（Loader 的 profile 拦截层） |
+| 节点记录（host/port/user/名） | `$DSH_HOME/rnh/nodes.json` | 插件自己的目录，不动 desktop profile 的任何文件 |
+| 节点密码/私钥 | DSH 凭据库的 record：`dsh-remote-node-harness/n<id>` | 走 `ctx.credentials.modifyRecord`，序列化的读-改-写，所以"只换密码、保留私钥"是安全的 |
+| 节点的模型配置 | 节点 `~/.dsh/profiles/rnh/cordis.patch.yml` | 插件拥有；每次连接重写，本地一改就重新下发（宿主热重载，不重启） |
+| 节点的 brain bundle | 节点 `~/.dsh/profiles/rnh/node_modules/@local/rnh-brain/` | profile 自己的 `node_modules`（Loader 的 profile 拦截层） |
 
 ### 并发、超时、失败
 
-- **每节点串行**：`Fleet.serial(runtime, action)` 把同一台机器的所有生命周期动作排在一条 promise 链上。两个并发 `connect` 不会各起一个宿主。
+- **每节点串行**：`Rnh.serial(runtime, action)` 把同一台机器的所有生命周期动作排在一条 promise 链上。两个并发 `connect` 不会各起一个宿主。
 - **SSH 重试**：`MAX_RETRIES = 3`，指数退避从 `BASE_DELAY_MS = 400` 起；只对可重试分类重试（连接类），认证失败直接抛。
 - **握手超时**：`READY_TIMEOUT_MS = 20 000`。
 - **Gateway 401**：`RemoteGateway.call` 捕获一次 401 → 丢掉缓存的 cookie、重新铸造 → 重试一次。之后再 401 就报 `GATEWAY_FAILURE.AUTH`，不再循环。
@@ -607,7 +607,7 @@ packages/dsh-fleet/src/host/brain-bundle.generated.js   ← 生成物（字符�
 从那个制品装出来的节点启动即 `MODULE_NOT_FOUND`，而版本闸门说"已是最新"，没有任何东西会来
 修它。
 
-所以安装时在树里写 `.fleet-artefact.json`（`RUNTIME_BUILD` 常量），连接时连同版本一起读；
+所以安装时在树里写 `.rnh-artefact.json`（`RUNTIME_BUILD` 常量），连接时连同版本一起读；
 stamp 不符或缺席就**重装**。改 `STRIPPED`、改归档布局、或改由谁来解析（见下节），都必须同时
 bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在下节展开。
 
@@ -615,7 +615,7 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 
 节点拿到运行时**只有一条路**：下载本项目自己构建的制品。制品由
 `scripts/build-fork-runtime.mjs` 从本仓库对上游源码的 fork 编译、裁剪、打包，再由
-`scripts/publish-runtime.mjs` 发到 CNB 与 GitHub Release。节点下它，解到 `~/.dsh-fleet/runtime`。
+`scripts/publish-runtime.mjs` 发到 CNB 与 GitHub Release。节点下它，解到 `~/.dsh-remote-node-harness/runtime`。
 
 **为什么从「上游发布版 + 两条路」改成「自建 + 一条路」。** ADR-0006 的两条路线解决的是**等待**：
 上游发版之后没人打制品，节点就卡住。它没有解决**控制**：节点上跑的那棵树内容由上游决定，
@@ -672,7 +672,7 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 否则 musl 节点会去下一个从没人构建过的 `linux-x64`，装起来「成功」，用起来崩。
 **只发 `linux-x64` 时，Alpine 节点会明确报「没有这个平台的制品」**，那是正确行为。
 
-**装完要留痕，否则每次连接都重装。** 安装写 `BUILD_STAMP`（`.fleet-artefact.json`），
+**装完要留痕，否则每次连接都重装。** 安装写 `BUILD_STAMP`（`.rnh-artefact.json`），
 内容是 `stampJson()` 的 `{"build":N,"via":"artefact"}`。`via` 只上报、不参与判定，
 `build` 参与判定：`inspectRuntime` 要求它等于 `RUNTIME_BUILD`。没有这一枚戳，`inspectRuntime`
 会把树读成「早于构建戳」→ `decideGate` 返回 `node-runtime-repack` → **每次连接重装一次**。
@@ -746,7 +746,7 @@ fork 路线的构建要在有 fork checkout 的机器上跑 `build-fork-runtime.
 
 两个节点记录可以指向同一台机器的不同 `remoteRoot` —— 这是测试第二个节点最方便的方式，也是真
 实用法（主大脑旁边放一个实验性的）。所以 `REMOTE_LAYOUT` 从常量改成 `remoteLayout(root)`，
-profile 名也按 root 派生（`~/.dsh-fleet` 仍是 `fleet`，`~/.dsh-fleet-b` 是 `fleet-b`）。用
+profile 名也按 root 派生（`~/.dsh-remote-node-harness` 仍是 `rnh`，`~/.dsh-remote-node-harness-b` 是 `rnh-b`）。用
 常量时第二个节点会静默复用第一个的 runtime、常驻进程和状态文件，"连了两个节点"其实是一个节点
 数了两遍 —— 实测过。Session 日志仍共用 `~/.dsh`：同一台机器上的两个 root 是两副大脑，不是
 两台机器。
@@ -756,7 +756,7 @@ profile 名也按 root 派生（`~/.dsh-fleet` 仍是 `fleet`，`~/.dsh-fleet-b`
 开关的单位是**插件（bundle）**，不是内部行。第一版把本机组合里的每一行都列成一行开关，实测 **207 行**：
 那描述的是组合，不是选择 —— 没人「安装」`tool-result-pruner`，人装的是一个插件。现在一行一个
 bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，`@deepseek-ai/*`、
-`@greatbaby/dsh-fleet`、`@local/dsh-fleet-brain` 排除（前两类是产品本身，后一个正是「节点成为大脑」）。
+`@greatbaby/dsh-remote-node-harness`、`@local/rnh-brain` 排除（前两类是产品本身，后一个正是「节点成为大脑」）。
 
 ### 默认全开，另有一份硬排除清单
 
@@ -766,9 +766,9 @@ bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，
 
 | 名字 | 为什么 |
 |---|---|
-| `@greatbaby/dsh-fleet` | 桌面端插件；而且它的「节点控制」预设里是增删节点的工具 —— 被控节点能控制别的节点，正是明确否定过的形态 |
-| `@local/dsh-fleet` | 同一个包在 0.5.0 之前的名字。就地升级过的 profile 仍然列着它，「这是我自己的旧拼法」不是把它送去节点的理由 |
-| `@local/dsh-fleet-brain` | 节点侧的减法本身，已经在列表里 |
+| `@greatbaby/dsh-remote-node-harness` | 桌面端插件；而且它的「节点控制」预设里是增删节点的工具 —— 被控节点能控制别的节点，正是明确否定过的形态 |
+| `@local/dsh-remote-node-harness` | 同一个包在 0.5.0 之前的名字。就地升级过的 profile 仍然列着它，「这是我自己的旧拼法」不是把它送去节点的理由 |
+| `@local/rnh-brain` | 节点侧的减法本身，已经在列表里 |
 | `ds-harness-remote` | 会让节点变成第二个中转 Host，多开一个入口 |
 | `@dsh-remote/plugin` | 同上，旧包名 |
 
@@ -785,8 +785,8 @@ bundle，取自 profile manifest 的 `dependencies` 与 `dsh.profile.bundles`，
 ### 三个踩过的坑
 
 **顺序**：`npm install` 会剪掉 profile `dependencies` 里没有的包，而大脑 bundle 是**拷进去**的
-（不是 npm 装的），所以它当时算「多余」。实测：打开一个插件后 `node_modules/@local/dsh-fleet-brain`
-被删，节点报 `cannot resolve profile bundle "@local/dsh-fleet-brain"`，常驻 host 起不来。因此
+（不是 npm 装的），所以它当时算「多余」。实测：打开一个插件后 `node_modules/@local/rnh-brain`
+被删，节点报 `cannot resolve profile bundle "@local/rnh-brain"`，常驻 host 起不来。因此
 `writeBrainBundle` 必须排在 npm **之后**，connect 与 sync 两条路径都一样。
 
 **peer 会把 DSH 自己拉进节点**：第三方 bundle 的 `peerDependencies` 写的是
@@ -799,14 +799,14 @@ peer 的办法是**把那个包装进当前 profile**，而 profile 的 `node_mo
 DSH 一起带来。这条不是可选的兼容开关 —— 去掉它，任何节点只要打开过一个插件就起不来。
 
 **报告**：`npm install` 对一个列表是原子的，失败时无法安全地指认某一个包，所以失败就报「这一批都
-没确认装上 + npm 最后四行」，不编造单包诊断。`POST /fleet/api/plugins/:bundle` 同步执行完再返回
+没确认装上 + npm 最后四行」，不编造单包诊断。`POST /rnh/api/plugins/:bundle` 同步执行完再返回
 每个节点做了什么；任何节点没接受就带上 `warning`，页面把节点原文显示出来 —— 一个显示「已保存」
 而节点什么都没组合的复选框，正是这个界面要防的 bug。
 
 ### 状态存哪
 
-存**profile 目录**里的 `fleet-plugins.json`，不是 `$DSH_HOME/fleet/plugins.json`：同一个 home 下
-`desktop` 与 `fleettest` 的插件集不同，存在 home 里会让一个 profile 的选择决定另一个 profile 的节点。
+存**profile 目录**里的 `rnh-plugins.json`，不是 `$DSH_HOME/rnh/plugins.json`：同一个 home 下
+`desktop` 与 `rnhtest` 的插件集不同，存在 home 里会让一个 profile 的选择决定另一个 profile 的节点。
 把开关拨回默认值**删掉那条记录**而不是存同值，这样升级改了默认值还能到达从没碰过它的用户。
 
 ### 节点的 profile patch 只管配置
@@ -827,7 +827,7 @@ DSH 一起带来。这条不是可选的兼容开关 —— 去掉它，任何�
 `props.onPicked(path)` 之后仍然是壳去建工作区，所以本地路径走原路，远程路径由 Host 半边的
 `workspace/create` 装饰器按「绝对 POSIX 路径」路由到能看见它的节点。
 
-浏览走 `GET /fleet/api/browse?node=&path=`：不带 `node` 读本机（`readdir`），带 `node` 读那台机器
+浏览走 `GET /rnh/api/browse?node=&path=`：不带 `node` 读本机（`readdir`），带 `node` 读那台机器
 （复用插件已有的 SSH 连接跑 `find -maxdepth 1`）。两边返回同一形状，页面只有一条渲染路径 —— 这
 才是「和本地一样」的具体含义。不经过节点的 Harness，因为浏览目录是文件系统问题，而且那样会要求
 节点先起来才能选它自己的目录。
@@ -857,7 +857,7 @@ DSH 一起带来。这条不是可选的兼容开关 —— 去掉它，任何�
 塞进 props（`origin`），因为组件本身拿不到自己被哪个洞注册。
 
 设备页里，选了节点就多出一行「这台设备上已有项目？添加到侧栏 ›」，点开列出**那台机器上已有的
-工作区**（按 `fleet_<nodeId>_` 前缀筛合并后的 baseline），点一条直接交接路径 —— 已存在的目录不必
+工作区**（按 `rnh_<nodeId>_` 前缀筛合并后的 baseline），点一条直接交接路径 —— 已存在的目录不必
 再浏览一遍去找。这是 zcode 表单里那一行的等价物。
 
 **每台设备记住上次用的目录。** 入口页在盘符/根之上多一行「上次使用 · `<path>`」，点一条直接带着
@@ -913,7 +913,7 @@ profile 里有意义的小便利，写进注册表会让每条节点记录都带
    会让滚动条跑到文字列里面。
 
 节点上新建的目录、填的名称、选定的文件夹在交接前都还只是本页状态：**名称非空时先 `POST
-/fleet/api/workspaces` 再交接路径**，因为目录选择洞只回传 `path`，标题没有别的地方可放；`create`
+/rnh/api/workspaces` 再交接路径**，因为目录选择洞只回传 `path`，标题没有别的地方可放；`create`
 是幂等的，壳随后解析到的就是刚建的那一行。名称为空则走壳的廉价路径（标题由壳从文件夹名派生）。
 
 ## 六之七、节点控制：一个只有一种能力的会话
@@ -923,9 +923,9 @@ profile 里有意义的小便利，写进注册表会让每条节点记录都带
 
 | 部件 | 是什么 | 为什么这样切 |
 |---|---|---|
-| `fleetControl` 服务 | `ctx.provide('fleetControl', …)`，方法 `list / add / update / remove / connect / disconnect / status` | 注册表本来就存在，只是以前只挂在 `/fleet/api` 上；工具不该去摸 HTTP |
-| `fleet_nodes` 工具 | 新入口 `@greatbaby/dsh-fleet/node-control`，只注册这一个工具 | 预设的 `config.plugins` 会整包挂载，挂整个插件等于把装饰器、看门狗、设置 API 拖进 agent 作用域 |
-| `preset-node-control` | `config.plugins` 只有 `persona` + `fleet-nodes` | 见下 |
+| `rnhControl` 服务 | `ctx.provide('rnhControl', …)`，方法 `list / add / update / remove / connect / disconnect / status` | 注册表本来就存在，只是以前只挂在 `/rnh/api` 上；工具不该去摸 HTTP |
+| `rnh_nodes` 工具 | 新入口 `@greatbaby/dsh-remote-node-harness/node-control`，只注册这一个工具 | 预设的 `config.plugins` 会整包挂载，挂整个插件等于把装饰器、看门狗、设置 API 拖进 agent 作用域 |
+| `preset-node-control` | `config.plugins` 只有 `persona` + `rnh-nodes` | 见下 |
 
 ### 「其他一律拒绝」为什么是构造保证
 
@@ -954,7 +954,7 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
 | 形式 | 含义 |
 |---|---|
 | `{ kind: 'key', path: '~/.ssh/id_ed25519' }` | 本机已存在的私钥文件 |
-| `{ kind: 'password', env: 'DSH_FLEET_NODE_PW' }` | 本机已设置的环境变量名 |
+| `{ kind: 'password', env: 'RNH_NODE_PW' }` | 本机已设置的环境变量名 |
 | `{ kind: 'agent' }` | 本机 SSH agent（默认） |
 
 内联 `password` / `privateKey` 被显式拒绝（`auth-inline-refused`），并在错误里指出该去「设置 › 远程节点」。
@@ -962,7 +962,7 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
 
 ### 被控节点永远不装这套
 
-`@greatbaby/dsh-fleet` 在 `NODE_NEVER_SYNC` 里（见 §六之五）：它带的就是这个预设，节点装上就等于「被控节点能
+`@greatbaby/dsh-remote-node-harness` 在 `NODE_NEVER_SYNC` 里（见 §六之五）：它带的就是这个预设，节点装上就等于「被控节点能
 控制别的节点」，正好是要避免的形态。`version-unit` 与 `plugin-switch` 各有一条断言守着。
 
 ## 七、测试
@@ -973,8 +973,8 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
 
 | 脚本 | 验证什么 | 依赖 |
 |---|---|---|
-| `routing-unit.mjs` | 身份往返、流扇出、工作区合并、本地调用直达上游、job 三个端点、control 只发一帧 baseline | 无（假 fleet） |
-| `routing-extra-unit.mjs` | 其余带身份的命名空间按各自形状路由：goals/userQuestions 按 `Agent`、feedback 按 request 字段、subagents 按裸 uuid、schedule 合并 + 逐条路由 | 无（假 fleet） |
+| `routing-unit.mjs` | 身份往返、流扇出、工作区合并、本地调用直达上游、job 三个端点、control 只发一帧 baseline | 无（假 rnh） |
+| `routing-extra-unit.mjs` | 其余带身份的命名空间按各自形状路由：goals/userQuestions 按 `Agent`、feedback 按 request 字段、subagents 按裸 uuid、schedule 合并 + 逐条路由 | 无（假 rnh） |
 | `gateway-smoke.mjs` | SSH 上的 cookie、unary RPC、流载体 upgrade | 真实节点 |
 | `descriptor-smoke.mjs` | 上游包的 descriptor 与 `static inject` 可从 `app.asar` 读到 | Electron Node |
 | `dispatch-seam.mjs` | Gateway 的 view 会读取实例 own property；声明端点集不变 | Electron Node |
@@ -985,8 +985,8 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
 | `tool-git-image.mjs` | `git` 打真仓库、`read_image` 开真 PNG、`grep` 搜真文件 —— 三个在"工具在本地跑、只是对着镜像"时必然坏掉的工具 | 同上 |
 | `multipart-unit.mjs` | Gateway 的 `multipart/form-data` 应答能解：字节附件在正确的 JSON 路径上还原成 `Uint8Array`，畸形分片被拒绝而不是静默读成 `null` | 无 |
 | `provision-unit.mjs` | 下发给节点的东西是对的：provider 行复制而账号行不复制、行里没写 `apiKeyEnv` 时也能推断出 key ref、配置能过真 YAML 解析器 | Electron Node（解析器在 `app.asar` 里） |
-| `dsh-fleet-brain/scripts/check-composition.mjs` | 节点组合仍然是个**大脑**：7 个 Remote 控制器行在、4 个传输行在（`webserver` / `connection` / `api-remotes` / `web-startup`）、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、preset 文件齐全且已声明、YAML 可解析 | Electron Node（借用安装里的 YAML 解析器） |
-| `dsh-fleet-brain/scripts/sync-from-upstream.mjs` | 组合可重新生成（幂等；生成后与已提交版本一致即说明没有手改生成物） | 已安装的 DSH release |
+| `rnh-brain/scripts/check-composition.mjs` | 节点组合仍然是个**大脑**：7 个 Remote 控制器行在、4 个传输行在（`webserver` / `connection` / `api-remotes` / `web-startup`）、`web-runtime` 不在、没有任何 `dsh-client-ui-*`、6 条 agent-plane disable 在、preset 文件齐全且已声明、YAML 可解析 | Electron Node（借用安装里的 YAML 解析器） |
+| `rnh-brain/scripts/sync-from-upstream.mjs` | 组合可重新生成（幂等；生成后与已提交版本一致即说明没有手改生成物） | 已安装的 DSH release |
 | `client-bundle.mjs` | 桌面端真的 serve 了这份客户端代码；三个槽位注册且能渲染 | 运行中的 Host |
 | `event-relay.mjs` | 在**节点上直接建**的 Session 能到达浏览器：`api-session/*` 列表事件与 `session/control` 投影帧都带着包裹后的身份到达；baseline 里有远程投影块；没有任何裸的节点 Session id 泄漏 | 运行中的 Host + 已连接节点 |
 | `session-acceptance.mjs` | **像用户一样**：在远程工作区真实建 Session、真实下一条要让 agent 用 write/bash/grep 干活的指令、读回 `session/follow` 核对三条工具调用与结果、`turn/end` 是 `completed`、助手说 DONE；再用**独立 SSH 连接**读节点上的产物字节 | 运行中的 Host + 已连接节点 |
@@ -998,12 +998,12 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
 | `version-unit.mjs` | 版本闸门的每个分支（含 rc 排序）、制品 URL、安装脚本内容、每节点 layout 派生、插件开关语义（哪些 bundle 算第三方、**默认全开**、硬排除清单、节点列表顺序、状态文件容错） | 无 |
 | `waterfall-unit.mjs` | 审批/提问中继：允许的 waterfall 才发到浏览器、拒绝与超时各自结算、节点断开时卡片被取消、问题按自己的名字转发 | 无 |
 | `workspace-browse.mjs` | 加工作区对话框背后的两个接口：本机与节点用同一形状回答、节点列的是节点的盘（`/` 没有上级、隐藏目录不列、不存在的目录报 shell 的原因）、选中的节点目录变成带包裹身份的工区 | 运行中的 Host + 已连接节点 |
-| `picker-flow.mjs` | **手机**看节点这条路由：`/@fleet` 列出节点、`/@fleet/<id>/` 列出那台机器真实的根、每个 entry 都拼回命名空间、面包屑不越界、没记过的 id 报 `fleet/node-unknown`；`workspace/create` 用这种路径把工区建在节点上，而中转 dispatch 前建在桌面盘上的那个目录被清掉，且同目录下别人放的文件不动 | 同上 |
-| `picker-paths-unit.mjs` | `/@fleet` 命名空间的编解码（两种路径规范化器都能过、大小写、盘符、重复分隔符、完整 segment 才匹配）；影子目录清理**删不掉**任何有内容的目录，也拒绝命名空间之外的路径 | 无 |
+| `picker-flow.mjs` | **手机**看节点这条路由：`/@rnh` 列出节点、`/@rnh/<id>/` 列出那台机器真实的根、每个 entry 都拼回命名空间、面包屑不越界、没记过的 id 报 `rnh/node-unknown`；`workspace/create` 用这种路径把工区建在节点上，而中转 dispatch 前建在桌面盘上的那个目录被清掉，且同目录下别人放的文件不动 | 同上 |
+| `picker-paths-unit.mjs` | `/@rnh` 命名空间的编解码（两种路径规范化器都能过、大小写、盘符、重复分隔符、完整 segment 才匹配）；影子目录清理**删不掉**任何有内容的目录，也拒绝命名空间之外的路径 | 无 |
 | `install-unit.mjs` | 安装清单自洽：`dsh.bundle.patch` 每个文件都存在且已声明、`engines.dsh` 是合法范围、`files` 覆盖所有运行物、`meta.detail` 指向真实文件、打包文件里没有内网地址与私钥 | 无 |
 | `autoconnect-unit.mjs` | 重启后不点「连接」也能连上：`autoConnect` 先取凭据再判断，有凭据就连、没凭据/被禁用的不连、凭据库抛错只记日志不外泄 | 无（内存注册表 + 内存凭据库） |
-| `fleet-control-unit.mjs` | 节点控制面：贴进对话的密钥被拒绝、引用在本机读取、任何返回值都不带认证材料 | 无（假 fleet） |
-| `node-control.mjs` | 「节点管理模式」是个**组合**而不是一句提示：预设注册且只声明两行、会话能建、真跑一轮只调 `fleet_nodes` 一个工具、答案是真实节点名册 | 运行中的 Host + 已连接节点 |
+| `rnh-control-unit.mjs` | 节点控制面：贴进对话的密钥被拒绝、引用在本机读取、任何返回值都不带认证材料 | 无（假 rnh） |
+| `node-control.mjs` | 「节点管理模式」是个**组合**而不是一句提示：预设注册且只声明两行、会话能建、真跑一轮只调 `rnh_nodes` 一个工具、答案是真实节点名册 | 运行中的 Host + 已连接节点 |
 | `plugin-switch.mjs` | 单个插件的开关真的落到节点：包被安装或复制上去、节点自己的 bundle 列表里排在脑 bundle **之前**、常驻 host 重启后仍答得出、远程工区数量不变；关回去同样干净，异常退出也恢复开关 | 同上 |
 | 手工 §2b / §7c | 脚本走协议、用户走界面，两者都要过：真实 Chrome 里新建远程会话、敲字、发送、看到「已完成」；再看智能体协作开关、子代理历史、产物卡片的原生打开 | 运行中的 Host + 真实 Chrome |
 
@@ -1022,7 +1022,7 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
   "the layer that proves a user can work was not exercised"。缺 Chrome 端口、缺 Release 制品、
   节点不会发审批请求这类局部条件则记 SKIP 并给出原因 —— 套件可以退出码 3 声明"这台部署跑不了"。
 
-升级 DSH 之后该按什么顺序重跑、每个测试守的是哪条上游契约，见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](../packages/dsh-fleet/docs/UPGRADE.zh.md)。
+升级 DSH 之后该按什么顺序重跑、每个测试守的是哪条上游契约，见 [`packages/dsh-remote-node-harness/docs/UPGRADE.zh.md`](../packages/dsh-remote-node-harness/docs/UPGRADE.zh.md)。
 
 `test/carrier.mjs` 是被后五个共用的最小测试客户端，含一条硬要求：**必须应答 Gateway 的 2 秒 ping**，否则两秒后流被静默关闭 —— 这会让路由 bug 伪装成传输 bug。
 
@@ -1042,7 +1042,7 @@ preset 的 `persona` 行只负责把这件事说清楚（拒绝什么、怎么�
   验证方式。见 [`adr-0007`](adr-0007-fork-node-runtime.zh.md) §五。
 - **不发 npm**。节点不经过 registry：拿的是归档。往 npm 发 375 个包只会多一条版本线。
 - **不给 GitHub 留下载源**。GitHub Release 收到同一份字节作灾备与留档，但节点只从 CNB 取。
-- **不做 per-node 组合定制**：所有节点共用同一份 `@local/dsh-fleet-brain`，也共用同一份构建产物。某台机器要不同插件集时再讨论，不预留空壳配置。
+- **不做 per-node 组合定制**：所有节点共用同一份 `@local/rnh-brain`，也共用同一份构建产物。某台机器要不同插件集时再讨论，不预留空壳配置。
 
 ---
 

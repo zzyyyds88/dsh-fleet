@@ -2,7 +2,7 @@
 
 > 状态：已采纳（2026-11-18）。
 > 现在怎么工作：见 [ARCHITECTURE.md](ARCHITECTURE.md) §一（结论先行）、§三（五条缝隙）、§五（路由表）。
-> 升级要看什么：见 [`packages/dsh-fleet/docs/UPGRADE.zh.md`](../packages/dsh-fleet/docs/UPGRADE.zh.md) §七、§八。
+> 升级要看什么：见 [`packages/dsh-remote-node-harness/docs/UPGRADE.zh.md`](../packages/dsh-remote-node-harness/docs/UPGRADE.zh.md) §七、§八。
 > 本文只记**路线锚点、调研证据、被否方案**。
 
 ## 一、路线锚点
@@ -13,7 +13,7 @@
 要在 DSH 上搬同一套流程，等价形态是：
 
 ```
-DSH Go（安卓） ──中转──> 桌面 DSH Host（装 dsh-fleet） ──SSH──> 节点大脑（Linux）
+DSH Go（安卓） ──中转──> 桌面 DSH Host（装 dsh-remote-node-harness） ──SSH──> 节点大脑（Linux）
 ```
 
 三条不可让步的约束，**后续任何设计都要能对上它们，对不上就是偏离**：
@@ -58,15 +58,15 @@ allowlist 是客户端里的 `const Set`，强制点只有两处：unary `call` 
 ### 2.4 终端那条四跳接力是最强证据
 
 0.2.2-rc.3 的 terminal 控制器**只有** `terminal/attach`（duplex），没有 `follow`/`write`/`resize`；
-手机要后三个。中转用 `TerminalCarrierCompat` 把它们合成 `attach`，而 fleet 的 `terminal/attach`
+手机要后三个。中转用 `TerminalCarrierCompat` 把它们合成 `attach`，而 rnh 的 `terminal/attach`
 已经把 duplex 流的 uplink 一并转给节点。于是：
 
 ```
 手机 terminal/follow → 中转 TerminalCarrierCompat → 本机 terminal/attach
-                    → fleet 装饰器 → 节点 terminal/attach
+                    → rnh 装饰器 → 节点 terminal/attach
 ```
 
-中转的兼容层**正好落在 fleet 的 attach 上**，这是整条链路能成立的最强证据。
+中转的兼容层**正好落在 rnh 的 attach 上**，这是整条链路能成立的最强证据。
 
 ### 2.5 中转服务端部署（2026-11-18 实测）
 
@@ -107,7 +107,7 @@ allowlist 是客户端里的 `const Set`，强制点只有两处：unary `call` 
 ### B. 中转插件 fork 与否
 
 **用户已定：fork，只做研究用途。** 但当前**不需要 fork**：原本以为只能在 fork 里修的那处
-（幽灵目录），换一个路径形式（`/@fleet` 命名空间）就落进了 fleet 能管的位置。
+（幽灵目录），换一个路径形式（`/@rnh` 命名空间）就落进了 rnh 能管的位置。
 只 fork 插件、不动服务端（服务端用官方镜像 + 钉版本）。
 
 ### C. 是否同时支持「手机直连节点」
@@ -128,13 +128,13 @@ allowlist 边界，**拆一份自己的客户端才有意义**，而不是为了
 
 | 序 | 事项 | 验收 |
 |---|---|---|
-| P0-1 | 验证地基：中转 host 与 fleet 共存于同一个 profile | 中转 dispatch 的 `session/list` 经过 fleet 装饰器 |
+| P0-1 | 验证地基：中转 host 与 rnh 共存于同一个 profile | 中转 dispatch 的 `session/list` 经过 rnh 装饰器 |
 | P0-2 | DSH Go 真机连到这台 Host，读侧栏 | 手机同时看到桌面本地工区与节点工区 |
 | P0-3 | 手机在节点会话下发一条真指令 | 节点真执行；独立 SSH 读到产物字节 |
 | P0-4 | 手机的审批卡从节点到达 | 节点触发审批 → 手机弹卡 → 答复 → 节点继续 |
 | P0-5 | 手机的终端连到节点 PTY | 四跳接力 → 在节点 shell 里 `hostname` 得到节点名字 |
-| P1-1 | 在 fleet 里消掉 `ensureHostWorkspaceDirectory` 的 Windows 误伤 | 手机建工区后桌面 `\@fleet` 不存在；节点上出现该工区 |
-| P1-2 | fleet 路由 A 类端点 | 每条一个断言；离线层 `routing-extra-unit.mjs`，端到端 `host-routing.mjs` |
+| P1-1 | 在 rnh 里消掉 `ensureHostWorkspaceDirectory` 的 Windows 误伤 | 手机建工区后桌面 `\@rnh` 不存在；节点上出现该工区 |
+| P1-2 | rnh 路由 A 类端点 | 每条一个断言；离线层 `routing-extra-unit.mjs`，端到端 `host-routing.mjs` |
 | P2-1 | 中转服务端版本钉住 | 镜像 tag 不再是 `latest`；重启后 DSH Go 仍能连 |
 | P2-2 | 失败可解释 | 停掉节点时手机得到的文案指向「节点离线」而不是协议错误 |
 
