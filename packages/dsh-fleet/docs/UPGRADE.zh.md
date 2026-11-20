@@ -28,7 +28,6 @@
 cd D:/ProjectHub/dsh-fork/deepseek-harness && git checkout dsh-v<新版本>
 cd D:/ProjectHub/DSHpl
 CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --publish --cnb
-CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform win32-x64 --publish --cnb
 ```
 
 完整步骤（含切 tag、重放构建侧修复、什么时候要加 `RUNTIME_BUILD`）见第五节。
@@ -245,12 +244,17 @@ git checkout -b dshpl-node-runtime-<新版本>
 cd D:/ProjectHub/DSHpl
 CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs \
   --platform linux-x64 --publish --cnb
-CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs \
-  --platform win32-x64 --publish --cnb
 
 # 3. 只改裁剪规则时不用重编上游（几十秒而不是十几分钟）
 node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --reuse
 ```
+
+**只发 `linux-x64`，而且上传器会替你守着。** 名单是 `src/remote/artefact.js` 的
+`PUBLISHED_PLATFORMS`；带 `--publish`/`--cnb` 而平台不在名单里，`publish-runtime.mjs`
+直接抛错。`win32-x64` 就在名单外 —— 它曾经发过，后来撤掉了，因为**没有任何节点能向它要**
+（探针读 `uname -s`，Windows 上没有对应拼写；节点侧 21 处 `sh -c` 加 `setsid`、只有 SSH 传输）。
+不加 `--publish` 时仍能 `--platform win32-x64` 构建，那是冒烟测试的路。理由与实测见
+[ADR-0007](../../../docs/adr-0007-fork-node-runtime.zh.md) §三第 4 条。
 
 **顺序不能反**：`RUNTIME_BUILD`（`src/remote/artefact.js`）必须在制品内容变化时加一。
 裁剪规则、`ARTEFACT_RESIDUE`、归档布局任一改动都要加，否则老节点读到的戳是"当前"，
@@ -411,6 +415,23 @@ in allowlist, not served here : 11
 served here, phone may not call : 135
 ```
 
+**0.6.6 上的重跑（2026-11-20）**：放行集合 100 → **105**，只增不减，新增
+`cotTranslation/limits`、`cotTranslation/translate`、`speech/catalog`、`speech/transcribe`、
+`workspaceFiles/search`。被守卫的四个端点（`workspaceFiles/{read,readBytes,readAll,stat}`）、
+`resolveWorkspaceRootForSession`、`assertNativeWorkspaceFileCall`、`filterSessionListProjections`、
+`cordis.patch.yml`、peer/依赖区间两版**逐字节相同**，所以这次升级对本项目零影响。差分结果：
+
+```
+relay allowlist : 105
+served here     : 224
+in allowlist, not served here : 11   （与 0.6.5 完全同一份名单）
+served here, phone may not call : 130
+```
+
+新增的 5 个里，`speech/*` 与 `cotTranslation/*` 属 `dsh-experimental-*`，节点组合里被裁掉
+（`trim-fork-runtime.mjs` 的 `/^dsh-experimental-/u`），但手机从不直连节点，调到的是桌面自己的
+答案，与本项目无交集。
+
 **已知的真实漂移（第一条记录，2026-11-18）：**
 
 | 端点 | 情况 |
@@ -420,6 +441,22 @@ served here, phone may not call : 135
 | `schedule/update`、`schedule/delete` | 本安装不存在。手机在 0.2.2 上也不走它们（`usesTargetProtocol => target != null`），属无害遗留 |
 | `workspaceFiles/readAll`、`readRelated`、`officeToPdf/*`、`claudeCodeMods/*` | 本 profile 未组合对应包，非缺陷 |
 | `$events/result` | Gateway 内部端点，不对应任何 descriptor，应从此清单排除（脚本目前会列出它，读时忽略） |
+
+**第二条漂移（2026-11-20 记，不是升级带来的）：手机读不了节点上的文件。** 放行集合与端点集
+对得上，卡的是中转自己的闸门：`workspaceFiles/{read,readBytes,readAll,stat}` 与 0.6.6 新增的
+`search` 在 dispatch 前都要先过 `assertNativeWorkspaceFileCall` → `resolveWorkspaceRootForSession`，
+而后者是让 Host 派发 `session/list`、取那一行的 `cwd`、再在 **Host 本机** `realpath()`。
+fleet 合并进来的远端行 `cwd` 是节点上的路径（`/root/proj`），本机 `realpath` 得 `ENOENT`，
+于是回 `WORKSPACE_UNAVAILABLE` / `authority-unavailable`。0.6.5 与 0.6.6 的这道闸门逐字节相同，
+所以它**不是这次升级引入的**，`search` 只是又一个撞同一堵墙的端点。
+
+- 影响面：只有**手机 + 远端会话 + 文件读**这一格。桌面端读节点文件走 fleet 的
+  `workspaceFileScope` lookup（`src/host/lookups.js`），不经过中转，不受影响。
+- 不是 fleet 能修的：`cwd` 必须保持节点路径（`host-routing.mjs:46` 的断言就是「远端行保留它
+  自己的 `cwd`」），而中转只接受能在本机 `realpath` 通过的根。
+- **未真机验证**：本轮没有 `DSH_FLEET_TEST_*`，结论来自代码路径分析加本机
+  `realpath('/root/project') → ENOENT`。下次有节点时第一步就验它：手机打开一个远程会话、
+  点一个文件，看是不是 `WORKSPACE_UNAVAILABLE`。
 
 **发现新的漂移时**：先判断它是「上游改了名」还是「本 profile 没组合」，前者要评估
 是否能换用手机的另一个端点承载，后者在表里加一行即可。两条都写进上面这张表。与手机相关的

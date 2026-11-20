@@ -26,7 +26,9 @@
 **然后是混排。** 远程 Host 的会话与工作区必须作为**真实的行**出现在本地 Host 的 `session/list` 与 `workspace/follow` 里 —— 不是新开一个面板、也不是 iframe 另一个页面。理由有二：
 
 1. 这样桌面端的侧栏、会话视图、文件查看器、审批、终端、job、goal 全部照常工作，因为它们看的本来就是这两个接口；
-2. `ds-harness-remote` v0.6.5（P2P 端到端加密远控）的白名单里就是 `session/list` / `session/follow` / `session/prompt` / `session/page` / `workspace/follow` / `workspaceFiles/*`。本地网关多返回远程行，手机端就自然读得到，**它一行都不用改**。
+2. `ds-harness-remote`（P2P 端到端加密远控）的白名单里有 `session/list` / `session/follow` / `session/prompt` / `session/page` / `workspace/follow` / `workspaceFiles/*`（0.6.5 与 0.6.6 都一样，后者只多放行 5 个端点）。本地网关多返回远程行，手机端就自然读得到这些**会话行**，**它一行都不用改**。
+
+   这句话要限定在「会话行」上，不能推广到「节点上的文件」。手机对**远端会话**调 `workspaceFiles/{read,readBytes,readAll,stat,search}` 会被中转自己挡下：它在 dispatch 前先 `resolveWorkspaceRootForSession(sessionId)`，做法是让 Host 派发 `session/list`、取该行 `cwd`、再在 **Host 本机** `realpath()`。而 fleet 合并进来的远端行，`cwd` 是节点上的路径（`/root/proj`），本机 `realpath` 得 `ENOENT`，于是回 `WORKSPACE_UNAVAILABLE`（`authority-unavailable`）。这道闸门 0.6.5 就有（`WORKSPACE_FILE_READ_ENDPOINTS` 与 `resolveWorkspaceRootForSession` 两版逐字节相同），不是哪次升级引入的；`search` 只是又多了一个撞同一堵墙的端点。桌面端点开远端文件不受影响 —— 那条路走 fleet 的 `workspaceFileScope` lookup，不经过中转。见 [UPGRADE](../packages/dsh-fleet/docs/UPGRADE.zh.md) §九的漂移表。
 
 手机那条路（DSH Go → 中转 → 桌面 Host → 节点）的形态、边界与实施顺序见
 [ADR-0003](adr-0003-phone-control.zh.md)。一句话结论：中转的每一次调用走
@@ -649,13 +651,26 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 `--os/--cpu/--libc` **为目标平台解析**，按 `--platform` 的目标值给（`linux-x64`、
 `win32-x64`、`linux-x64-musl` 等）。
 
+**但「能打标签」和「会发布」是两件事，只有 `linux-x64` 属于后者。** 名单在
+`src/remote/artefact.js` 的 `PUBLISHED_PLATFORMS`，`publish-runtime.mjs` 在动手上传前先查它，
+不在名单里就直接抛错 —— 两个入口（fork 构建与 CI）共用一个上传器，所以这条闸门只有一处。
+
+- **`win32-x64` 是删掉的那个，删得有理。** 它能构建、也能启动（实测：解包后打印
+  `dsh web: <url>`、换 cookie、`POST /api/session/list` 200），但**没有任何节点能向它要**：
+  `platformTag()` 没有 Windows 拼写（探针读 `uname -s`，Windows 上是 `MINGW64_NT-…` 或什么都没有）；
+  节点侧 21 处 `sh -c`（探针、安装、启停、写 profile、读状态）、`setsid nohup` 拉常驻进程、
+  `/lib/ld-musl-*` 探 libc；传输只有 SSH。留着它就是 85 MiB 没人取的资产加一行让人以为
+  「Windows 也能当节点」的 release 说明。本地不加 `--publish` 仍可构建，那是冒烟测试的路。
+- **`linux-arm64` / `darwin-arm64` 从来没发过**，也没机器验过。它们能打标签，节点会得到一个
+  诚实的 `ARTEFACT_UNAVAILABLE` 并列出击过的 URL —— 那是正确行为，不是缺口。
+
 **Linux 还要按 C 库分，而且这件事现在由节点的 `uname` 决定。** `koffi` 与 `sharp` 同一个包名
 下同时发布 glibc 与 musl 两套二进制，加载器按它运行的那个 libc 挑 —— 把 glibc 树给 Alpine 节点，
 失败落在第一个用到它的工具上，而不是安装时。所以 `platformTag()` 对 Linux 的 musl 机器返回
 `linux-x64-musl`（探测两路：`ldd --version` 与 `/lib/ld-musl-*`，任一命中即 musl）。
 这条以前是 npm 路线的 `--libc=musl` 顺手保证的，路线删掉之后必须由制品名承担 ——
 否则 musl 节点会去下一个从没人构建过的 `linux-x64`，装起来「成功」，用起来崩。
-**只发 `linux-x64` 与 `win32-x64` 时，Alpine 节点会明确报「没有这个平台的制品」**，那是正确行为。
+**只发 `linux-x64` 时，Alpine 节点会明确报「没有这个平台的制品」**，那是正确行为。
 
 **装完要留痕，否则每次连接都重装。** 安装写 `BUILD_STAMP`（`.fleet-artefact.json`），
 内容是 `stampJson()` 的 `{"build":N,"via":"artefact"}`。`via` 只上报、不参与判定，

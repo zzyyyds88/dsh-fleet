@@ -121,7 +121,7 @@ CNB 的发布侧有个坑（ADR-0006 八节已记）：`PUT` 返回 200 **不等
 | fork 能构建 | `pnpm run build:official`：10 个 gate 全过，183 s |
 | fork 能打包 | `release:pack --family dsh`：375 个 tarball；`verify-packed-install` 报 `installed @deepseek-ai/dsh reports 0.2.2-rc.5` |
 | 裁剪后的树能当大脑启动 | 打印 `dsh web: http://127.0.0.1:<port>/?token=…`；`/?token=…` 换 cookie 得 303 + `Set-Cookie`；`POST /api/session/list` 得 200 |
-| 两个平台的产物 | `dsh-0.2.2-rc.5-linux-x64.tar.gz` 87.6 MiB / 41 846 文件 / 91 839 618 字节，sha256 `7ba9124f…`；`dsh-0.2.2-rc.5-win32-x64.tar.gz` 85.2 MiB / 41 839 文件，sha256 `809223fb…` |
+| 两个平台的产物 | `dsh-0.2.2-rc.5-linux-x64.tar.gz` 87.6 MiB / 41 846 文件 / 91 839 618 字节，sha256 `7ba9124f…`；`dsh-0.2.2-rc.5-win32-x64.tar.gz` 85.2 MiB / 41 839 文件，sha256 `809223fb…`。**win32 这份已从两个 release 上撤掉，见下面第 4 条** |
 | 发到了两个地方 | CNB 与 GitHub Release `v0.2.2-rc.5` 各一份；CNB 匿名 `GET` 回 200（`Content-Length: 91839618`），下载 17.6 s，本地重算 sha256 与 sidecar 一致 |
 | 归档里没有 staging 清单 | 顶层只有 `node_modules/`；`./package.json`、`./package-lock.json`、`./node_modules/.package-lock.json` 计数为 0（第一版带了，见下面「没验的」） |
 | 裁剪规则有断言 | `test/fork-runtime-unit.mjs`（25 条） |
@@ -131,13 +131,32 @@ CNB 的发布侧有个坑（ADR-0006 八节已记）：`PUT` 返回 200 **不等
 
 1. **没有真节点**（本轮没有 `DSH_FLEET_TEST_*`），所以「桌面端连上节点、下载这份制品、启动、
    跑通会话」这条端到端链**未验证**。它是下一轮的第一步，验收命令见 UPGRADE 第四节。
-2. **只有两个平台。** `linux-arm64` / `darwin-arm64` / `linux-x64-musl` 没有发布，也没有机器
-   验证过。`platformTag()` 现在会为 musl 节点请求 `linux-x64-musl`，所以 Alpine 节点会得到
-   明确的「没有这个平台的制品」而不是一棵用不了的树 —— 那是正确行为，不是缺口。
+2. **只有 `linux-x64` 一个平台在发。** `linux-arm64` / `darwin-arm64` / `linux-x64-musl`
+   没有发布，也没有机器验证过。`platformTag()` 现在会为 musl 节点请求 `linux-x64-musl`，
+   所以 Alpine 节点会得到明确的「没有这个平台的制品」而不是一棵用不了的树 —— 那是正确行为，
+   不是缺口。名单是 `src/remote/artefact.js` 的 `PUBLISHED_PLATFORMS`，上传前会查。
 3. **第一次发布出去的归档带着 staging 清单**（`package.json` 里是打包机的绝对路径，
    `package-lock.json` 里是同样的路径），几分钟后修掉并重发。没有 bump `RUNTIME_BUILD`：
    带 4 的插件版本从未发布，不可能有节点读到过第一版。理由与断言都在
    `build-fork-runtime.mjs` 与 `test/fork-runtime-unit.mjs` 里。
+4. **`win32-x64` 曾经发过，现已撤掉，而且它从来取不到。** 第一版发版按「两个平台各跑一次」
+   发了两份，其中 win32 那份能构建、也能启动（实测：解包后打印 `dsh web: <url>`、换 cookie、
+   `POST /api/session/list` 200），但**没有任何节点能向它要**：
+   - `platformTag()` 的别名表里没有 Windows 的任何拼写，因为探针读的是 `uname -s`，而 Windows
+     回 `MINGW64_NT-10.0-19045`（Git Bash）或干脆没有 `uname`。实测：
+     `platformTag({os:'Windows_NT'})` 与 `platformTag({os:'MINGW64_NT-10.0-19045'})` 都是
+     `undefined`，节点侧会报「这台机器报的 os/arch 没有平台标签」。
+   - 节点侧是纯 POSIX：`src/remote/daemon.js` 里 21 处 `argv: ['sh','-c',…]`（探针、安装、
+     启停、写 profile、读状态），启动用 `setsid nohup`，libc 探测读 `/lib/ld-musl-*`；
+     `src/remote/*.js` 里没有一处 Windows 分支。
+   - 传输只有 SSH：`core/registry.js` 把 `transport` 类型写成 `'ssh'`，`ssh/connection.js` 只有
+     `ssh2`。
+
+   所以那 85.2 MiB 是一份没人取的资产，release 说明里还多一行让人以为 Windows 能当节点。
+   处置：从 CNB 与 GitHub 的 `v0.2.2-rc.5` 上删掉该资产与它的 `.sha256`，`PUBLISHED_PLATFORMS`
+   只留 `linux-x64`，`publish-runtime.mjs` 在上传前拒绝未发布的平台。**本地仍可构建**
+   （`--platform win32-x64` 不带 `--publish`/`--cnb`），那是这棵树做冒烟测试的路，也是它当初
+   证明「能启动」的方式 —— 被否掉的是「发出去」，不是「构建」。
 
 ## 四、代价与什么时候该重开
 

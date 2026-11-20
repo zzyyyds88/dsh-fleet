@@ -249,11 +249,12 @@ DSH 升级之后**第一件事是重建节点运行时**，不是跑测试：桌
 # fork 切到同一个 tag（版本必须完全相等）
 cd D:/ProjectHub/dsh-fork/deepseek-harness && git checkout dsh-v<新版本>
 
-# 编译 → 裁剪 → 打包 → 上传（一条命令，两个平台各跑一次）
+# 编译 → 裁剪 → 打包 → 上传（一条命令；只发 linux-x64，见下）
 cd D:/ProjectHub/DSHpl
 CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform linux-x64 --publish --cnb
-CNB_TOKEN=… node packages/dsh-fleet/scripts/build-fork-runtime.mjs --platform win32-x64 --publish --cnb
 ```
+
+**只发 `linux-x64`。** 上传前会查 `src/remote/artefact.js` 的 `PUBLISHED_PLATFORMS`，不在名单里的平台带 `--publish`/`--cnb` 会直接抛错。`win32-x64` 曾经发过，现在撤了：它能构建也能启动，但没有任何节点能向它要 —— 探针读 `uname -s`，Windows 上没有对应拼写，节点侧 21 处 `sh -c` 加 `setsid`、传输只有 SSH。不加 `--publish` 仍可 `--platform win32-x64` 构建（冒烟测试用）。理由见 [ADR-0007](docs/adr-0007-fork-node-runtime.zh.md) §三第 4 条。
 
 然后是组合层和契约层的五条命令：
 
