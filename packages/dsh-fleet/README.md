@@ -36,6 +36,22 @@ things that make proxied remote tool calls return `code=127`.
   viewer, image preview and resource system work unchanged.
 - **The phone sees the same fleet.** Because the sessions are real rows in
   `session/list`, `ds-harness-remote` forwards them; nothing needs patching.
+- **A dropped connection is visible, and it comes back by itself.** The node card goes
+  to *disconnected, reconnecting* with a timestamp instead of staying green over a dead
+  socket; the ladder is 2s / 4s / 8s, then every 2 minutes until it succeeds or you
+  press *Disconnect*. The workspace rows stay listed (marked offline) rather than
+  vanishing and reappearing.
+- **A failure names one thing to do.** Every failed connect is classified into
+  `{code, message, action, retryable, detail}`; the card turns `action` into a button.
+  A wrong password gets no retry button, because pressing it would produce the same
+  failure again.
+- **Each node keeps its own last 100 log lines**, redacted on write, readable from its
+  card or `GET /fleet/api/nodes/<id>/log` — the desktop-wide log mixes every node and
+  plugin together and is not where someone with a red card looks.
+- **Per-plugin switches decide what runs on the node.** Every third-party bundle you
+  installed here is sent there by default; switch one off and it stays local. A switch
+  really installs or copies the package on the node, rewrites the node's bundle list and
+  restarts its resident host — and the reply says what each node did.
 
 ## Why this is not a proxy (and what that buys)
 
@@ -117,8 +133,9 @@ every event the client renders.
 
 ## Requirements
 
-- DSH 0.2.2-rc.3 (the node is installed at exactly the version this profile runs, so
-  the Session format cannot skew).
+- DSH 0.2.2 (the node is installed at exactly the version this profile runs, so the
+  Session format cannot skew). `engines.dsh` is `>=0.2.2-rc.3 <0.3.0`: anything in the
+  0.2.2 line installs, 0.3.0 is refused rather than half-composed.
 - SSH access to each node, with Node 22 or newer. `curl` (or `wget`) *or* `npm` — the
   runtime arrives one of two ways: a published artefact is downloaded if an accelerator
   can serve it, and otherwise the node resolves the exact same release itself with
@@ -126,6 +143,7 @@ every event the client renders.
 - `@deepseek-ai/dsh` declares `engines.node: ">=24.9.0"` for every 0.2.2 release, while
   this plugin's floor is Node 22. A node below the declared engines still installs and
   runs (the artefact route never read that field either) — the settings page just says so.
+  The measurement behind keeping 22 is in `docs/adr-0006-node-runtime-supply.zh.md` §四-2.
 - The node needs no open port: everything rides SSH `direct-tcpip` channels, and the
   resident host listens on the node's loopback only.
 
@@ -195,6 +213,24 @@ Switching really installs it there, and the reply reports what each node did:
 
 Nothing else changes: local sessions, local workspaces and local tools behave
 exactly as before.
+
+### How a bundle's files travel to the node
+
+Both tree writers (`writeBrainBundle`, `writePluginBundle`) put the payload on **stdin**,
+and that is a hard requirement rather than a preference. `ssh2` writes an `exec` request as
+one SSH packet however long the command is, and OpenSSH's `PACKET_MAX_SIZE` is 256 KiB; a
+plugin tree on the command line therefore crosses the ceiling, and the server does not
+answer with an error — it loses packet alignment and drops the connection
+(`Bad packet length …` / `Connection corrupted`).
+
+Measured on the reference node with a single connection: a 262,200-byte command line
+produced six corrupted connections, while the same 7.9 MB on stdin produced none. The
+`7923616` that filled that log was `writePluginBundle`'s command line for
+`dsh-whale-widget`, to within the script's own tail.
+
+`SshConnection.exec` also refuses a command line over `MAX_COMMAND_BYTES` (128 KiB) locally,
+because a local error is the only outcome a caller can act on. `test/packet-unit.mjs`
+pins all of this.
 
 ### Node control: a session that can only do one thing
 
@@ -310,35 +346,79 @@ switch the artefact route off entirely, and it does *not* leave CNB as a lone so
 
 ## Tests
 
-| Script | What it proves |
+One command runs everything, picking the right interpreter per suite (the contract layer
+must run under the harness's Electron Node to read `app.asar`):
+
+```bash
+node test/run-all.mjs                    # all 35
+node test/run-all.mjs --layer offline,contract   # the two layers that need no node
+node test/run-all.mjs --list             # the matrix, without running
+```
+
+A suite that cannot run here exits 3 and is reported **SKIP with a reason**, never as a
+pass. `--layer e2e` that could not run a single suite exits non-zero: the layer that
+proves a user can work is not exercised by skipping it.
+
+### offline — pure logic, no Host, no node
+
+| Suite | What it proves |
 |---|---|
-| `node test/routing-unit.mjs` | Identity round-trips, stream fan-out, workspace merging, and the rule that a local call reaches the upstream method untouched. Fake fleet, no network. |
-| `node test/multipart-unit.mjs` | The Gateway's `multipart/form-data` answers decode: byte attachments become `Uint8Array` at the right JSON path, and malformed parts are refused instead of silently read as `null`. |
-| `node test/provision-unit.mjs` | What a node is given: provider rows copied but account routes not, the credential ref inferred even when a row omits `apiKeyEnv`, no browser row ever reaches the overlay (the composition owns that), and the rendered patch round-trips through a real YAML parser. Run it under the harness's Electron Node to get the round-trip half — the parser lives in `app.asar`. |
-| `node test/gateway-smoke.mjs` | The SSH transport: cookie minting, unary RPC, and the stream carrier upgrade against a real node. |
-| `node test/upstream-smoke.mjs` | The upstream controllers import and expose `static inject` from inside `app.asar`. Run under the local Electron Node. |
-| `node test/dispatch-seam.mjs` | The Gateway's view of a Service resolves an own property defined on the instance. Run under the local Electron Node. |
-| `node test/host-routing.mjs <base> <token>` | Every routed endpoint through the local `/api`, plus the ones that must stay local — including a **binary** read (what a remote image preview depends on) and the job roster (whose node-side `job/not-found` is the only way to tell routing from a silent local answer). |
-| `node test/workspace-flow.mjs <base> <token>` | The end-to-end gesture: add a remote workspace, create a Session in it, prompt it, watch the node's `bash` output arrive, and confirm the file it wrote exists on the node. |
-| `node test/workspace-browse.mjs <base> <token>` | Choosing a workspace folder the way the dialog does: this machine and a node answer in the same shape, the node listing is really the node's (`/` is not this machine's home, hidden folders are hidden, a missing folder reports the shell's reason), and a picked node folder becomes a workspace with the node wrapped into its id. |
-| `node test/plugin-switch.mjs <base> <token>` | A per-plugin switch really lands on the node: the package is installed or copied there, the node names it in its own bundle list **before** the brain bundle, the resident host restarts, and the node still lists the same remote workspaces. Switching it off removes it again, switching it back restores the default, and the switch is restored on every exit path. |
-| `node test/picker-flow.mjs <base> <token>` | The phone's view of a node: `/@fleet` lists the nodes, `/@fleet/<id>/` lists that machine's real folders with every entry spelled back inside the namespace, the breadcrumbs never go above it, and an identity this Host does not record fails by name instead of answering an empty level. Then `workspace/create` by such a path creates the workspace **on the node**, and the directory the relay made on this machine before dispatching is gone — while a file somebody put there survives. |
-| `node test/picker-paths-unit.mjs` | The `/@fleet` namespace round-trips through both path normalisers (drive letter, backslashes, repeated separators, case), a malformed identity never half-matches, and the shadow cleanup cannot remove a directory with anything in it. |
-| `node test/node-control.mjs <base> <token>` | The node-control preset: two declared rows, a Session created from it reports that preset, and a real turn calls `fleet_nodes` and **no other tool at all** — the observable form of "this session can only manage nodes". |
-| `node test/fleet-control-unit.mjs` | The surface behind that tool: a pasted password or private key is refused (tool arguments are logged; the refusal is the feature), a reference is read on this machine, a result can never carry authentication material, and an unknown identity is a named failure rather than an empty list. |
-| `node test/install-unit.mjs` | The manifest a bundle is installed from is self-consistent: every `dsh.bundle.patch` file exists and is declared, `engines.dsh` is a range npm understands, `files` covers every runtime artefact, `locale.meta.detail` names a file that is really there, and no shipped file carries a LAN address or a private key. |
-| `node test/tool-parity.mjs <base> <token>` | The check the mirror-based approach could not pass: the agent's own `read` / `write` / `edit` / `grep` / `glob` run against the node's real paths, with no path failure and no Windows path anywhere in the transcript. |
-| `node test/tool-git-image.mjs <base> <token>` | `git` on a real repository, `read_image` on a real PNG, and `grep` over real files — the three tools that returned `code=127` or `ENOENT` when the tools ran locally against a mirror. |
-| `node test/client-bundle.mjs <base> <token>` | The shell serves this plugin's client module; its three own slots plus the three folder-picker slots register and render. |
-| `node test/event-relay.mjs <base> <token>` | A Session created **on the node** reaches the browser: its `api-session/*` list events and its `session/control` projections both arrive under the wrapped identity. This is what makes a remote row's title, spinner and new-Session insertion happen live instead of on the next full list pull. |
+| `routing` | Identity round-trips, stream fan-out, workspace merging, and the rule that a local call reaches the upstream method untouched. Fake fleet, no network. |
+| `routing-extra` | The remaining identity-carrying namespaces route by their own shape: goals/userQuestions by `Agent`, feedback by request field, subagents by child uuid, and schedule merges while its per-entry verbs route. |
+| `multipart` | The Gateway's `multipart/form-data` answers decode: byte attachments become `Uint8Array` at the right JSON path, and malformed parts are refused instead of silently read as `null`. |
+| `provision` | What a node is given: provider rows copied but account routes not, the credential ref inferred even when a row omits `apiKeyEnv`, no browser row ever reaches the overlay, and the rendered patch round-trips through a real YAML parser. |
+| `waterfall` | Approval/question relay: only allowed waterfalls cross, and refusal and timeout each settle exactly once. |
+| `version` | Version-gate branches, artefact URLs, the install script, per-node layout, and switch semantics. |
+| `fleet-lifecycle` | A dropped socket becomes `idle` with a timestamp, the reconnect ladder arms and a deliberate disconnect cancels it, the first host key is recorded and handed back, a failed connect keeps its phase, and an unreachable node keeps its workspace rows. |
+| `errors` | A connect failure becomes a code with one action and a retryable flag; a node's own log redacts secrets before storing them and stays bounded. |
+| `picker-paths` | The `/@fleet` namespace round-trips through both path normalisers (drive letter, backslashes, repeated separators, case), a malformed identity never half-matches, and the shadow cleanup cannot remove a directory with anything in it. |
+| `install` | The manifest a bundle is installed from is self-consistent: every `dsh.bundle.patch` file exists and is declared, `engines.dsh` is a range npm understands, `files` covers every runtime artefact, `locale.meta.detail` names a file that is really there, and no shipped file carries a LAN address or a private key. |
+| `autoconnect` | A restarted Host connects its nodes without a click: `autoConnect` adopts the stored credential *before* testing `credentialsReady`, and still skips a node that has none. |
+| `fleet-control` | The surface behind the node-control tool: a pasted password or private key is refused (tool arguments are logged; the refusal is the feature), a reference is read on this machine, a result can never carry authentication material, and an unknown identity is a named failure rather than an empty list. |
+| `composition` | The node composition is still a brain: Remote controllers in, no `dsh-client-ui-*` row, no `web-runtime`, and it parses as YAML. |
+| `packet` | No payload rides a command line. One `exec` request is one SSH packet, OpenSSH drops the connection over 256 KiB, and the two tree-writing functions ship their payload on stdin. |
 
-The last six need a running Host; `host-routing`, `workspace-flow`, `tool-parity`,
-`tool-git-image` and `event-relay` also need at least one connected node. Set
-`DSH_FLEET_TEST_HOST` / `DSH_FLEET_TEST_USER` / `DSH_FLEET_TEST_PASSWORD` to point
-them at a different machine.
+### contract — the upstream seams, must run under Electron's Node
 
-Upgrading DSH? [docs/UPGRADE.zh.md](docs/UPGRADE.zh.md) lists what to re-run and
-which upstream contract each test defends.
+| Suite | What it proves |
+|---|---|
+| `descriptor` | The upstream `@Remote` descriptors and `static inject` are readable from the installed release. |
+| `dispatch` | The Gateway still dispatches to an own property on the instance, and the endpoint set is unchanged. |
+| `upstream` | The upstream controllers the decorators wrap still export what the wrappers expect. |
+
+These three are what to run first after a DSH upgrade: they fail before a user notices that
+every remote Session has stopped opening.
+
+### e2e — a running Host and a real node
+
+| Suite | What it proves |
+|---|---|
+| `gateway` | Cookie minting, unary RPC, and the stream carrier upgrade over SSH against a resident node. |
+| `host-routing` | Every routed endpoint through the local `/api`, plus the ones that must stay local — including a **binary** read (what a remote image preview depends on) and the job roster (whose node-side `job/not-found` is the only way to tell routing from a silent local answer). |
+| `workspace-flow` | The end-to-end gesture: add a remote workspace, create a Session in it, prompt it, watch the node's `bash` output arrive, and confirm the file it wrote exists on the node. |
+| `workspace-browse` | Choosing a workspace folder the way the dialog does: this machine and a node answer in the same shape, the node listing is really the node's, and a picked node folder becomes a workspace with the node wrapped into its id. |
+| `picker-flow` | The phone's view of a node: `/@fleet` lists the nodes, `/@fleet/<id>/` lists that machine's real folders with every entry spelled back inside the namespace, the breadcrumbs never go above it, `workspace/create` by such a path creates the workspace **on the node**, and the directory the relay made on this machine before dispatching is gone. |
+| `plugin-switch` | A per-plugin switch really lands on the node: the package is installed or copied there, the node names it in its own bundle list **before** the brain bundle, the resident host restarts, and the node still lists the same remote workspaces. Switching it off removes it again, switching it back restores the default, and the switch is restored on every exit path. |
+| `tool-parity` | The check the mirror-based approach could not pass: the agent's own `read` / `write` / `edit` / `grep` / `glob` run against the node's real paths, with no path failure and no Windows path anywhere in the transcript. |
+| `tool-git-image` | `git` on a real repository, `read_image` on a real PNG, and `grep` over real files — the three tools that returned `code=127` or `ENOENT` when the tools ran locally against a mirror. |
+| `client-bundle` | The shell serves this plugin's client module; its three own slots plus the three folder-picker slots register and render. |
+| `event-relay` | A Session created **on the node** reaches the browser: its `api-session/*` list events and its `session/control` projections both arrive under the wrapped identity. |
+| `session` | A real remote turn (write/bash/grep), `session/follow` over the carrier, and the bytes witnessed over a separate SSH connection. |
+| `terminal` | A real PTY on the node: environment, shells, create, attach snapshot, echo round-trip, close. |
+| `multi-node` | Two nodes at once: distinct ids, sessions land on the right one, removing one leaves the other intact. |
+| `artefact` | The real install script on the real node: download, checksum, unpack, replace, version, rollback. |
+| `npm-install` | The fallback route on the real node: npm resolves the exact release, writes the stamp, picks the node's natives, and leaves the PTY helper executable. |
+| `approval` | A node approval reaches this Host as a waterfall, the answer resumes the remote turn, and a refusal is honoured. |
+| `node-control` | The node-control preset is registered with two rows, a Session from it can call `fleet_nodes` and no other tool at all, and the answer is the real roster. |
+| `browser` | A real Chrome renders the remote workspaces in the ordinary sidebar, and the plugin entry is reachable. Needs `DSH_BROWSER_DEBUG_PORT`. |
+
+Set `DSH_FLEET_TEST_HOST` / `DSH_FLEET_TEST_USER` / `DSH_FLEET_TEST_PASSWORD` (or
+`DSH_FLEET_TEST_KEY_FILE`) to point them at a machine. There are no defaults in the source:
+this repository is public.
+
+Upgrading DSH? [docs/UPGRADE.zh.md](docs/UPGRADE.zh.md) lists what to re-run and which
+upstream contract each test defends. The per-round record of what actually passed, with
+the numbers, is in [docs/ACCEPTANCE.zh.md](docs/ACCEPTANCE.zh.md).
 
 ## Known limits
 
@@ -354,3 +434,11 @@ which upstream contract each test defends.
   node's own `credentials/set` refuses the push and provisioning reports the
   failure instead of silently leaving the node without a key. Fix the file there
   once; later connects keep it in step.
+- **A `MaxSessions` budget is per connection, and it is finite.** `sshd` allows ten
+  session channels per connection by default, and every `exec` and every forwarded HTTP
+  exchange is one. A burst on a healthy connection hits the ceiling and ssh2 reports
+  `Channel open failure: open failed`. The plugin retries on the same connection with a
+  short backoff first, and only when that fails drops and re-handshakes for a fresh
+  budget — measured: filling the budget with ten long execs left that connection refusing
+  channels for the whole 40 s window, because closing a channel whose remote command is
+  still alive does not free its slot.

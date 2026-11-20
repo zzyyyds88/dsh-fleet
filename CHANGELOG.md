@@ -78,6 +78,30 @@
 - **节点掉线时工作区行不再消失。** `RemoteWorkspaces.sync()` 原来只要节点不在 `routable()`
   里就把整份 baseline 丢掉 —— 断线那一刻侧栏里整台机器的工作区消失，一分钟重连成功后又回来。
   现在只有**记录被删**才丢行，只是连不上时行留着并标 `offline`。
+- **插件树不再塞进命令行，SSH 连接不再被 sshd 判损坏。** 节点 `auth.log` 里长期刷
+  `Bad packet length 88734736.` + `Connection corrupted`，fleet 随即报节点掉线，端到端
+  长期停在 `13 passed, 4 failed`。真因不是加密、并发或运行时，而是命令行的长度：ssh2 把一次
+  `exec` 请求当成**一个** SSH 包发出去（`Protocol.js:1273`），OpenSSH 的 `PACKET_MAX_SIZE`
+  是 256 KiB，超了之后服务端不回错误、而是流位置错乱。`writePluginBundle` 当时把整棵插件树
+  base64 拼进命令行，`dsh-whale-widget` 在磁盘上 5.9 MB，拼出来 **7,923,386 字节**，与日志里
+  那个 `7923616` 差 230 字节（脚本尾部）。单连接量出来的边界：命令行 262,000 字节干净、
+  262,200 字节六条连接全坏，而同样内容走 stdin 不论多大都干净。两个 writer 的 payload 改走
+  stdin，`SshConnection.exec` 另加 `MAX_COMMAND_BYTES = 128 KiB` 的本地闸门。
+  **受影响**：所有在节点上开过插件的安装（本地 `link:` 插件尤其重，因为它的整棵树都要复制）。
+  新增 `offline/packet` 套件守着。实测修完：全量 **34 passed, 0 failed, 1 skipped**，
+  节点侧损坏计数跑前跑后都是 2024（+0）。
+- **通道预算满时重连，而不是一直等。** 十次长 exec 会把一条连接的 `MaxSessions` 用满，而
+  `channel.close()` 在远端命令还活着时并不归还名额 —— 实测那条连接在整个 40 s 观察窗口里
+  一直拒绝新通道。现在先在同一条连接上短退避重试，仍不行才丢连接重新握手换一份空预算；
+  后者不报掉线、不走重连阶梯，节点保持 `connected`。
+- **凭据没变就不重建连接。** `NodeRuntime.adopt()` 原来每次把记录读回来都 `invalidate()`，
+  于是刚连上的节点立刻被自己踢掉。现在只有 host / port / username / 认证方式真的变了才重置。
+- **兜底的 `pkill` 不再杀掉自己。** `RemoteHost.stop()` 在没有 status 文件时跑
+  `pkill -f '…/lib/bin.js'`，而执行它的 `sh -c` 自己的 argv 里就带着这个模式，于是把自己杀掉、
+  channel 无退出码。实测普通模式 `{"out":"","code":null}`、`bin[.]js` 这种方括号写法
+  `{"out":"SURVIVED","code":0}`，且仍然杀到了真正的 resident host（节点上 2 个变 1 个）。
+- **空补丁写成 `[]` 而不是空文件。** 一个没有行的 patch 文件会让 Loader 报语法错，看起来像
+  插件没装好。
 
 ### 说明
 
@@ -101,6 +125,14 @@
   `package.json` + `cordis.patch.yml` + `pnpm-workspace.yaml` 三件套；手搓一个只有
   `package.json` 的目录会得到一个看起来像 profile 的空壳，`pnpm add -w` 报
   `--workspace-root may only be used inside a workspace`，DSH 把它当成安装失败。实测撞过。
+- **DSH 0.2.2-rc.3 → rc.5 已核实，零改动。** 从已安装的 rc.5 重新派生节点组合后
+  `git diff` 为空（上游只删了 `authentication-token` 与 `ui-session-status` 两行，都在被丢掉的
+  那一侧），契约层 3 个套件全过，手机端那个端点名 `subagents/interruptByUser` 在 rc.5 里也
+  没变。**受影响**：无需动作，节点在下一次连接时自己装 rc.5。
+- **测试矩阵从 31 个套件变成 35 个**（`offline` 11 → 14，新增 `fleet-lifecycle`、`errors`、
+  `packet`）。`e2e/gateway` 的依赖声明从 `needs: 'node'` 改成 `'host'`：它读的
+  `status.json` 只在**本机 Host 连上节点**之后才指向一个活着的进程，声明成 `'node'` 会让它
+  在冷启动时第一个跑、读到上一轮留下的死 pid。
 
 ## [0.5.1] — 2026-11-18
 
