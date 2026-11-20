@@ -138,6 +138,13 @@ function packageIn(root, name) {
   // they carried `package.json`, `package-lock.json` and `node_modules/.package-lock.json`.
   check(/package-lock\.json/u.test(build) && /rmSync\(join\(staging, scratch\)/u.test(build),
     'the fork build removes its staging manifests before packing')
+  // The release body is written once per release and publishing happens one archive at a time,
+  // so a body built from "this archive" is wrong as soon as a second platform lands. Measured on
+  // rc.5: the body named linux-x64 and a sha256 that no archive in the release had any more.
+  check(/function releaseNotes\(/u.test(publish) && /readdirSync\(outDir\)/u.test(publish),
+    'the release body is built from every archive in --out, not from the one being uploaded')
+  check(/release', 'edit'/u.test(publish), 'and a re-publish rewrites an existing release body')
+  check(/method: 'PATCH'/u.test(publish), 'on CNB too, which keeps its own copy of the body')
 }
 
 if (failures.length > 0) {

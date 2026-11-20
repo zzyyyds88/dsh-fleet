@@ -288,14 +288,44 @@ if (!shouldPublish && !shouldPublishCnb) {
 }
 
 const releaseTag = tag ?? `v${version}`
-const notes = [
-  `Node runtime for DSH ${version} on ${platform}.`,
-  '',
-  'A node downloads this instead of running an npm install:',
-  '`~/.dsh-fleet/runtime` becomes exactly this tree.',
-  '',
-  `sha256: ${sha256}`,
-].join('\n')
+
+/**
+ * The release description, built from the archives that are actually in `--out`.
+ *
+ * **Not from "this platform's sha256", which is what it used to say.** The body is one per
+ * release while publishing is one archive at a time, so a body naming a single platform is
+ * wrong the moment a second one is uploaded — and a body naming a single `sha256` is worse
+ * than wrong: measured on the rc.5 release, the body carried the hash of an archive that had
+ * since been replaced, so the only place a person could read a checksum disagreed with both
+ * the sidecar and the bytes. Each archive's `.sha256` is authoritative; the body lists them
+ * so a reader can see which platforms exist at all.
+ */
+function releaseNotes() {
+  const rows = []
+  for (const file of readdirSync(outDir).sort()) {
+    const match = /^dsh-(.+)-([a-z0-9]+-[a-z0-9]+(?:-musl)?)\.tar\.gz$/u.exec(file)
+    if (match === null) continue
+    const sidecar = join(outDir, `${file}.sha256`)
+    const sha = existsSync(sidecar) ? readFileSync(sidecar, 'utf8').trim().split(/\s+/u)[0] : '(no sidecar)'
+    const bytes = statSync(join(outDir, file)).size
+    rows.push(`| \`${match[2]}\` | ${(bytes / 1048576).toFixed(1)} MiB | \`${sha}\` |`)
+  }
+  return [
+    `Node runtime for DSH ${version}, built by this project from its fork of the upstream source.`,
+    '',
+    'A node downloads one of these instead of resolving a release: `~/.dsh-fleet/runtime`',
+    'becomes exactly the unpacked tree. The `.sha256` beside each archive is what the node',
+    'verifies, and what `installScript` refuses to unpack on a mismatch.',
+    '',
+    '| platform | archive | sha256 |',
+    '|---|---|---|',
+    ...rows,
+    '',
+    'Archives are downloaded from CNB; the GitHub release holds the same bytes as a backup.',
+  ].join('\n')
+}
+
+const notes = releaseNotes()
 
 /**
  * Upload the archive and its checksum to CNB, the primary source.
@@ -376,6 +406,18 @@ async function publishToCnb() {
   if (asset.hash_value !== sha256) {
     throw new Error(`CNB reports sha256 ${asset.hash_value} for ${name}, the archive is ${sha256}`)
   }
+  // The body is one per release and is written when the *first* archive is published, so a
+  // second platform has to rewrite it or the release keeps describing one platform (and the
+  // old hash of an archive that has since been replaced). Measured on rc.5: the body still
+  // named linux-x64 and a sha256 nothing in the release had any more.
+  const patched = await fetch(`${base}/-/releases/${id}`, {
+    method: 'PATCH',
+    headers: json,
+    body: JSON.stringify({ body: notes }),
+  })
+  if (!patched.ok) {
+    process.stdout.write(`  could not update the release body: ${patched.status}\n`)
+  }
   process.stdout.write(
     `published ${name} to CNB ${releaseTag}\n`
     + `  ${asset.browser_download_url}\n`,
@@ -396,7 +438,13 @@ const made = spawnSync('gh', [
 ], { stdio: 'inherit' })
 // A pre-existing release is the normal case after publishing a second platform; a
 // failed *upload* is the one that must stop this script.
-if (made.status !== 0) process.stdout.write(`release ${releaseTag} already exists; uploading into it\n`)
+if (made.status !== 0) {
+  process.stdout.write(`release ${releaseTag} already exists; uploading into it\n`)
+  // `gh release create` failing means "the tag is there", and its notes are then whatever the
+  // first platform wrote. Rewriting them is what keeps the body describing the archives the
+  // release actually has — the same reason the CNB path patches its body.
+  spawnSync('gh', ['release', 'edit', releaseTag, '--notes', notes], { stdio: 'inherit' })
+}
 const uploaded = spawnSync('gh', [
   'release', 'upload', releaseTag, archive, `${archive}.sha256`, '--clobber',
 ], { stdio: 'inherit' })
