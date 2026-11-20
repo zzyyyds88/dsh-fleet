@@ -138,13 +138,17 @@ registry 指向 `npmmirror`（metadata 0.148 s）。
 两条树差 289 MiB（+43.1%），差在 `STRIPPED`：`.map` 9 933 个、`.d.ts` 16 144 个、`.md` 与
 per-package 的 test 目录都不进制品。只影响节点磁盘占用，不影响可用性。
 
-**真机验收证据**：`test/npm-install-acceptance.mjs` 在参考节点上两次通过（22 项断言，含戳、
-原生包、`koffi/build` 缺席、`spawn-helper` 可执行）；`run-all.mjs --layer e2e --only
+**当时的真机验收证据**：`test/npm-install-acceptance.mjs` 在参考节点上两次通过（22 项断言，
+含戳、原生包、`koffi/build` 缺席、`spawn-helper` 可执行）；`run-all.mjs --layer e2e --only
 session,node-control` 在一个真 Host 上跑了 112.4 s 全绿，之后节点上的
 `~/.dsh-fleet/runtime/.fleet-artefact.json` 是 `{"build":3,"via":"npm"}`、版本 `0.2.2-rc.5` ——
-也就是说这次连走的就是兜底路线，并且没有触发第二次安装。
+也就是说那次连走的就是兜底路线，并且没有触发第二次安装。
 
-结论：**路线顺序不该反过来**。npm 慢一点、多一个依赖，但它换来的是「不等任何人」。
+> 那个套件已随路线一起删除。它证明的是「上游发布版能在这台节点上装起来」，而这个前提在
+> ADR-0007 之后不成立了 —— 节点现在要的是 fork 的树，registry 上根本没有那份字节。
+
+结论（**已被 ADR-0007 推翻**）：**路线顺序不该反过来**。npm 慢一点、多一个依赖，但它换来的
+是「不等任何人」。代价是它对节点上跑的是**哪一棵树**没有任何话语权，而后者比等待更重要。
 
 ## 六、顺手修掉的两个制品缺陷
 
