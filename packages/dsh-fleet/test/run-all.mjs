@@ -136,6 +136,14 @@ const SUITES = [
     proves: 'version gate branches, artefact URLs, install script, per-node layout, switch semantics',
   },
   {
+    name: 'fork-runtime',
+    layer: 'offline',
+    file: ['packages', 'dsh-fleet', 'test', 'fork-runtime-unit.mjs'],
+    runtime: 'node',
+    timeoutMs: 60_000,
+    proves: 'the fork trim rules: what a node keeps, what it drops and why, and that the build and the publisher strip the same residue list',
+  },
+  {
     name: 'fleet-lifecycle',
     layer: 'offline',
     file: ['packages', 'dsh-fleet', 'test', 'fleet-lifecycle-unit.mjs'],
@@ -365,20 +373,6 @@ const SUITES = [
     timeoutMs: 2_700_000,
     needs: 'release',
     proves: 'the real install script on the real node: download, checksum, unpack, replace, version, rollback',
-  },
-  {
-    name: 'npm-install',
-    layer: 'e2e',
-    file: ['packages', 'dsh-fleet', 'test', 'npm-install-acceptance.mjs'],
-    runtime: 'node',
-    // One resolve of the full dependency tree: 673 packages. Measured — 83 s cold on a Linux
-    // desktop-class machine with a 275.7 MiB npm cache, 53 s warm; the node's own npm adds a
-    // slower registry round. It installs twice, so this budget is the script's own 20-minute
-    // ceiling plus room, and exit 3 (no registry reachable) is recorded as SKIP rather than a
-    // failure — that is the deployment's network, not this code.
-    timeoutMs: 2_400_000,
-    needs: 'node',
-    proves: 'the fallback route on the real node: npm resolves the exact release, writes the stamp, picks the node\'s natives, and leaves the PTY helper executable',
   },
   {
     name: 'approval',

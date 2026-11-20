@@ -95,7 +95,7 @@ window.__ModuleLoader__.load({
           /** How a node's runtime arrived. Shown only when the Host reported it. */
           runtimeVia: {
             artefact: '运行时来源：下载的制品',
-            npm: '运行时来源：节点自行构建',
+            npm: '运行时来源：旧版节点自建（重连会换成制品）',
           },
           missingSecret: '还没有保存密码或私钥。',
           /** Why a connect failed, as one sentence plus the one action worth offering. */
@@ -240,7 +240,7 @@ window.__ModuleLoader__.load({
           /** How a node's runtime arrived. Shown only when the Host reported it. */
           runtimeVia: {
             artefact: 'Runtime: downloaded artefact',
-            npm: 'Runtime: built on the node',
+            npm: 'Runtime: built on the node by an older plugin (a reconnect replaces it)',
           },
           missingSecret: 'No password or private key is stored yet.',
           /** Why a connect failed, as one sentence plus the one action worth offering. */
@@ -664,10 +664,10 @@ window.__ModuleLoader__.load({
     /**
      * One phase timeline while a node connects.
      *
-     * There is no separate "build" row: whether the runtime arrives as a download or as a
-     * resolve on the node is decided inside `install`, and a row that never lights up reads
-     * as a step that was skipped. What changes instead is the **label** of the install row,
-     * once the Host knows which route it took (`runtimeVia`) — the same slot, the true name.
+     * There is no separate "build" row and no per-route label any more: the runtime arrives
+     * one way (a downloaded artefact), so the row that installs it is always the same row.
+     * The `runtimeVia` prop is still read, because a node connected before build 4 carries a
+     * stamp from the removed route and the settings page should name it rather than hide it.
      */
     function PhaseList({ phase, runtimeVia }) {
       const order = ['probe', 'install', 'provision', 'start', 'verify']

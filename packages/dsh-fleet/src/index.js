@@ -118,26 +118,11 @@ function localDshVersion() {
 }
 
 /**
- * Which runtime routes one config value asks for.
- *
- * One string, not an array: `auto` is the only setting that needs two routes, and an
- * ordered array in a settings file invites an ordering argument nobody can see the effect
- * of. The order lives in `RUNTIME_ROUTES`.
- * @param {{ runtime?: 'auto' | 'artefact' | 'npm' }} config
- * @returns {readonly string[] | undefined} `undefined` means the default order.
- */
-export function routesOf(config) {
-  if (config.runtime === 'artefact') return ['artefact']
-  if (config.runtime === 'npm') return ['npm']
-  return undefined
-}
-
-/**
  * Register the fleet: durable node records, live connections, the routing
  * decorators, and the management API a settings surface reads.
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
- * @param {{ enabled?: boolean, autoConnect?: boolean, mirrors?: string[], sources?: Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}>, runtime?: 'auto' | 'artefact' | 'npm', registry?: string }} [config]
+ * @param {{ enabled?: boolean, autoConnect?: boolean, sources?: Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}> }} [config]
  */
 export function apply(ctx, config = {}) {
   if (config.enabled === false) return
@@ -160,11 +145,6 @@ export function apply(ctx, config = {}) {
     version,
     brainVersion,
     sources: config.sources,
-    mirrors: config.mirrors,
-    // Read on every connect and every reinstall: forcing a route in the settings surface
-    // has to reach the next install, not the next desktop restart.
-    routes: () => routesOf(config),
-    npmRegistry: () => config.registry,
     configEditor: () => configEditor,
     // Read on every connect and every sync: a switch flipped in the settings surface has
     // to reach a running node now, not on the next connect.
@@ -295,9 +275,6 @@ export function apply(ctx, config = {}) {
             }
             const reinstalled = await runtime.host.install(runtime.facts, {
               sources: config.sources,
-              mirrors: config.mirrors,
-              routes: routesOf(config),
-              registry: config.registry,
             })
             runtime.runtimeVia = reinstalled.via
           } finally {

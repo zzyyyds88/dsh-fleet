@@ -29,8 +29,6 @@ import {
   artefactUrls,
   inspectRuntime,
   installScript,
-  npmInstallScript,
-  npmPlatformFlags,
   platformTag,
   rollbackScript,
 } from './artefact.js'
@@ -43,14 +41,11 @@ import {
  * service runs Node v22.20.0 with a working rc.3 on it. The desktop's own runtime is
  * Electron's Node 24, so this floor is only about the *node*.
  *
- * The artefact route never consults `engines` at all — it unpacks a tree — so raising this
- * to 24 would newly reject machines that work today. The npm route reports a mismatch
- * (`engineWarning`) instead of refusing, which keeps the two routes interchangeable.
+ * The runtime arrives as an unpacked tree, which never consults `engines`, so raising this
+ * to 24 would newly reject machines that work today. The floor stays where a real node has
+ * been measured running.
  */
 export const MINIMUM_NODE_MAJOR = 22
-
-/** The two ways a runtime can arrive on a node, in the order they are tried. */
-export const RUNTIME_ROUTES = Object.freeze(['artefact', 'npm'])
 
 /**
  * The bundle list an untouched `web` profile has.
@@ -310,41 +305,37 @@ export class RemoteHost {
   /**
    * Install or upgrade the resident DSH under the node's root.
    *
-   * **Two routes, tried in order** ({@link RUNTIME_ROUTES}): a published artefact first,
-   * and a resolve on the node itself when the artefact cannot be had.
+   * **One route: the published artefact.** One download, no registry, no resolution: the node
+   * ends up on bytes this project built and tested. Downloads go through the **source list**
+   * (`DEFAULT_SOURCES`: CNB, and only CNB) and nowhere else — `artefactUrls()` has no
+   * direct-GitHub candidate, because GitHub direct measures ~27 KB/s here and a 165 MiB
+   * archive at that speed is 1.8 hours, which is the "connecting hangs" report this came from.
    *
-   * 1. **The artefact.** One download, no registry, no resolution: the node ends up on bytes
-   *    somebody built and tested. Downloads go through the ordered **source list**
-   *    (`DEFAULT_SOURCES`: CNB first, then the GitHub accelerators) and nowhere else —
-   *    `artefactUrls()` has no direct-GitHub candidate, because GitHub direct measures
-   *    ~27 KB/s here and 165 MiB at that speed is 1.8 hours, which is the "connecting hangs"
-   *    report this came from. Dropping straight to GitHub would turn a decidable failure into
-   *    an apparent hang.
-   * 2. **npm, on the node, for the exact same release.** This is the route that makes an
-   *    upstream DSH bump something this project can follow without anyone pre-building a
-   *    tree first. It is slower (a full resolve) and needs a registry, so it is never
-   *    preferred — but a missing, unreachable or not-yet-published artefact is now a
-   *    *slower connect* instead of a dead end.
+   * **There used to be a second route and it was removed, not disabled.** It ran
+   * `npm install @deepseek-ai/dsh@<version>` on the node when the artefact could not be had.
+   * That route installs the **upstream release**, and it wrote the same `BUILD_STAMP` this
+   * build writes. So a node that fell back once would read as "in step" forever: one network
+   * blip would pin it to the upstream tree permanently, while the settings page said "ready".
+   * Keeping it behind a flag would keep that trap one config value away. See
+   * `docs/adr-0007-fork-node-runtime.zh.md`.
    *
-   * **What still does not fall through is a broken artefact.** Exit codes 4 and 5 mean the
-   * bytes arrived but did not survive the checksum, the unpack or the shape check. Those
-   * roll the previous runtime back and **throw**: re-resolving the same broken release from
-   * a registry would download more, hide which of the two failed, and leave the node
-   * without the release it had.
+   * **What this means for an upstream bump.** The desktop and the node runtime are built from
+   * the same pinned release, so a desktop upgrade has no artefact until this project rebuilds
+   * one. The connect then fails with the URLs it tried — a decidable failure, on purpose.
    *
-   * The one thing the two routes must agree on is the **stamp**. Both write
-   * `BUILD_STAMP` with the same `RUNTIME_BUILD`, so `inspectRuntime` cannot tell them apart
-   * for usability — it only reports `via`. Without that, a tree installed by npm would read
-   * as "predates build stamps" and be reinstalled on every single connect.
+   * A broken artefact is still a different thing from a missing one: exit codes 4 and 5 mean
+   * the bytes arrived but did not survive the checksum, the unpack or the shape check. Those
+   * roll the previous runtime back and **throw**, so a node keeps the release it had instead of
+   * a mixture of two.
    *
    * The URL is built here rather than by the caller because it needs the **node's**
    * platform, which only the probe knows. A runtime packed on Windows carries
    * `sherpa-onnx-win-x64` and a Windows `node-pty`; unpacking it on Linux would give a node
    * whose terminal fails at first use.
    *
-   * @param {{ npmPath?: string, nodeUsable: boolean, nodeVersion?: string, curlPath?: string, wgetPath?: string, os?: string, arch?: string, libc?: string }} facts
-   * @param {{ mirrors?: string[], sources?: Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}>, routes?: readonly string[], registry?: string }} [options]
-   * @returns {Promise<{ version: string, via: 'artefact' | 'npm', engineWarning?: string }>}
+   * @param {{ nodeUsable: boolean, nodeVersion?: string, curlPath?: string, wgetPath?: string, os?: string, arch?: string }} facts
+   * @param {{ sources?: Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}> }} [options]
+   * @returns {Promise<{ version: string, via: 'artefact' }>}
    */
   async install(facts, options = {}) {
     if (!facts.nodeUsable) {
@@ -353,27 +344,9 @@ export class RemoteHost {
         + 'Install a newer Node.js and connect again.',
       ))
     }
-    const wanted = options.routes ?? RUNTIME_ROUTES
-    if (!Array.isArray(wanted) || wanted.length === 0) {
-      throw toSshError(new Error(
-        `no runtime route is enabled (config \`runtime\` = ${JSON.stringify(options.routes)}). `
-        + `Use one of: 'auto', ${RUNTIME_ROUTES.map(route => `'${route}'`).join(', ')}.`,
-      ))
-    }
     const failures = []
-    for (const route of wanted) {
-      if (route === 'artefact') {
-        const tried = await this.#installFromArtefact(facts, options, failures)
-        if (tried !== undefined) return tried
-        continue
-      }
-      if (route === 'npm') {
-        const tried = await this.#installFromNpm(facts, options, failures)
-        if (tried !== undefined) return tried
-        continue
-      }
-      throw toSshError(new Error(`unknown runtime route ${JSON.stringify(route)}`))
-    }
+    const tried = await this.#installFromArtefact(facts, options, failures)
+    if (tried !== undefined) return tried
     throw toSshError(new Error(
       `the resident DSH ${this.version} could not be installed on this machine:\n`
       + failures.map(line => `  ${line}`).join('\n'),
@@ -381,14 +354,14 @@ export class RemoteHost {
   }
 
   /**
-   * The artefact route. Returns `undefined` when the caller should try the next route.
+   * The artefact route. Returns `undefined` when nothing could be installed, with the reason
+   * appended to `failures`.
    *
-   * A download that could not be **had** (no source, no downloader, every source
-   * refusing) is exactly what the npm route exists for, so it appends a line to `failures`
-   * and returns. Anything that arrived and then failed throws.
+   * A download that could not be **had** (no source, no downloader, every source refusing) is
+   * reported; anything that arrived and then failed throws.
    *
    * @param {object} facts
-   * @param {{ mirrors?: string[], sources?: Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}> }} options
+   * @param {{ sources?: Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}> }} options
    * @param {string[]} failures
    */
   async #installFromArtefact(facts, options, failures) {
@@ -401,10 +374,8 @@ export class RemoteHost {
     }
     const canDownload = (facts.curlPath ?? '') !== '' || (facts.wgetPath ?? '') !== ''
     if (!canDownload) {
-      // Not fatal any more: this is a machine that cannot fetch, and the npm route needs no
-      // downloader at all. Reported rather than thrown so a working npm still installs.
       failures.push('artefact: this machine has neither curl nor wget')
-      this.log('this machine has no curl or wget; skipping the artefact route')
+      this.log('this machine has no curl or wget; the runtime cannot be installed')
       return undefined
     }
     let urls
@@ -412,14 +383,11 @@ export class RemoteHost {
       urls = artefactUrls({
         version: this.version,
         platform,
-        mirrors: options.mirrors,
         sources: options.sources,
       })
     } catch (error) {
-      // An empty source list is no longer a hard configuration error: it is "the
-      // artefact route is switched off", which the npm route already covers.
       failures.push(`artefact: ${error instanceof Error ? error.message : String(error)}`)
-      this.log('no artefact source is configured; skipping the artefact route')
+      this.log('no artefact source is configured; the runtime cannot be installed')
       return undefined
     }
     const script = installScript({
@@ -439,8 +407,7 @@ export class RemoteHost {
     const detail = (attempt.stderr || attempt.stdout).trim()
     if (!detail.includes('ARTEFACT_UNAVAILABLE')) {
       // The download worked but the unpack or verify did not: roll back so the node keeps
-      // the release it had, then report rather than falling through to npm (which would
-      // resolve the same broken release again, more slowly, and hide the real fault).
+      // the release it had, then report rather than leaving a half-swapped directory.
       await this.connection.exec({
         argv: ['sh', '-c', rollbackScript(this.layout.runtime)],
         timeoutMs: 120_000,
@@ -451,62 +418,8 @@ export class RemoteHost {
       `artefact: no source served dsh-${this.version}-${platform} (tried ${String(urls.length)}):\n`
       + urls.map(url => `    ${url}`).join('\n'),
     )
-    this.log(`no source served the ${platform} artefact; falling back to npm on the node`)
+    this.log(`no source served the ${platform} artefact`)
     return undefined
-  }
-
-  /**
-   * The npm route: resolve `@deepseek-ai/dsh@<exact version>` **on the node**.
-   *
-   * Returns `undefined` only when the machine has no npm at all, which is the one case the
-   * caller can still report as "nothing worked".
-   *
-   * @param {object} facts
-   * @param {{ registry?: string }} options
-   * @param {string[]} failures
-   */
-  async #installFromNpm(facts, options, failures) {
-    if ((facts.npmPath ?? '') === '') {
-      failures.push('npm: this machine has no npm on PATH')
-      return undefined
-    }
-    const script = npmInstallScript({
-      version: this.version,
-      runtime: this.layout.runtime,
-      cli: this.layout.cli,
-      flags: npmPlatformFlags(facts),
-      registry: options.registry,
-    })
-    const result = await this.connection.exec({
-      argv: ['sh', '-c', script],
-      timeoutMs: 20 * 60_000,
-      maxBytes: 1024 * 1024,
-    })
-    if (result.code !== 0) {
-      failures.push(`npm: ${(result.stderr || result.stdout).trim().slice(-800)}`)
-      // A resolve can fail halfway and leave a partial tree; the next connect's
-      // `inspectRuntime` sees the version mismatch and reinstalls, but rolling back now
-      // keeps the node on the release it had rather than on a mixture.
-      await this.connection.exec({
-        argv: ['sh', '-c', rollbackScript(this.layout.runtime)],
-        timeoutMs: 120_000,
-      }).catch(() => undefined)
-      return undefined
-    }
-    // The version is the last line the script prints *before* the engine check, and the
-    // engine check prints only on a mismatch, so anything matching `^\d` is the version.
-    const lines = result.stdout.trim().split('\n').map(line => line.trim())
-    const version = lines.find(line => /^\d+\.\d+\.\d+/u.test(line)) ?? this.version
-    const mismatch = result.stdout.match(/ENGINE_MISMATCH (\S+) (\S+)/u)
-    /** @type {{ version: string, via: 'npm', engineWarning?: string }} */
-    const answer = { version, via: 'npm' }
-    if (mismatch !== null) {
-      answer.engineWarning = `this node runs Node ${mismatch[1]}, and DSH ${version} declares `
-        + `engines.node ${mismatch[2]}. It was installed anyway — the artefact route never `
-        + 'checked this either — but upgrade the node to Node 24 if it misbehaves.'
-      this.log(answer.engineWarning)
-    }
-    return answer
   }
 
   /** Read the installed resident version, or `undefined` when absent. */
@@ -527,9 +440,10 @@ export class RemoteHost {
    * produced it. A node on the right version but a different pack is a node this build
    * cannot run, and only the stamp can tell.
    *
-   * The stamp also records **how the tree arrived** (`via`: `artefact` or `npm`). That half
-   * is reported, never judged: the two routes write the same `RUNTIME_BUILD`, and a node
-   * that resolved its own runtime is exactly as usable as one that downloaded it.
+   * The stamp also records **how the tree arrived** (`via`). That half is reported, never
+   * judged: what makes a tree usable is its version and its build, not its route. `npm` no
+   * longer occurs in stamps this build writes — the route was removed in build 4 — but a
+   * node that carries one from before is read, not rejected.
    * @returns {Promise<{ version: string | undefined, build: string | undefined, via: 'artefact' | 'npm' | undefined, usable: boolean, reason: string }>}
    */
   async inspectRuntime() {

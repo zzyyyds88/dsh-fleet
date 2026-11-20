@@ -1,49 +1,46 @@
 #!/usr/bin/env node
 /**
- * Publish the node runtime a desktop release was tested against.
+ * Upload a node runtime archive to the release.
  *
- * A node used to get its DSH by running `npm install` over SSH: several minutes, a
- * working registry, and a tree nobody could reproduce. This is the artefact route
- * instead — the desktop publishes the exact runtime a node should run, and every node
- * downloads that tarball.
+ * The archive itself is built by `build-fork-runtime.mjs` from this project's fork of the
+ * upstream source: a node runs the tree this project built and tested, not the upstream
+ * release (see `docs/adr-0007-fork-node-runtime.zh.md`). This script only carries a built
+ * archive to the two places it is published, and it is the single uploader — the fork build
+ * calls it, so there is one set of release-side quirks to get right instead of two.
  *
- * **Why this does not simply pack the local installation.** A DSH install is not pure
- * JavaScript: `node-pty`, `sharp` and `sherpa-onnx` ship native binaries, and the
+ * **Why an archive at all.** A node used to get its DSH by running `npm install` over SSH:
+ * several minutes, a working registry, and a tree nobody could reproduce. A published
+ * archive is one download, and every node on that platform ends up with the same bytes.
+ *
+ * **Why the tree is resolved rather than copied from a local install.** A DSH installation
+ * is not pure JavaScript: `node-pty`, `sharp` and `sherpa-onnx` ship native binaries, and the
  * installed tree names the platform it was built for (`sherpa-onnx-win-x64`,
- * `@img/sharp-linux-x64`/`sharp-libvips-linux-x64`). Packing this Windows desktop's tree
- * and unpacking it on a Linux node would give a node whose terminal and image tools fail
- * at first use — worse than the slow install it replaced, because it fails later and
- * further from the cause.
- *
- * So the tree is resolved **for the target platform** by npm's own platform flags
- * (`--os --cpu --libc`), from the same version the desktop runs. That keeps the two
- * properties that matter — same release, correct natives — and drops the one that never
- * held (same bytes).
- *
- * **This is a convenience, not a prerequisite.** A node with no artefact available resolves
- * the release itself (`npmInstallScript` in `src/remote/artefact.js`), so publishing here is
- * what turns a slow connect into a fast one — it is not what makes an upgrade possible.
+ * `@img/sharp-linux-x64`/`sharp-libvips-linux-x64`). Copying this Windows desktop's tree and
+ * unpacking it on a Linux node would give a node whose terminal and image tools fail at first
+ * use — worse than the slow install it replaced, because it fails later and further from the
+ * cause. So the fork build resolves **for the target platform** with npm's own platform flags
+ * (`--os --cpu --libc`), and the archive name carries that platform.
  *
  * Usage:
  *   node packages/dsh-fleet/scripts/publish-runtime.mjs [--platform linux-x64[(-musl)]] [--out dist] [--publish] [--cnb]
  *
  * `--platform` accepts the tag form the plugin uses (`linux-x64`, `linux-arm64`,
  * `linux-musl-arm64`, `darwin-arm64`). Nothing is published unless `--publish` or `--cnb` is
- * given. CI runs this per platform (`.github/workflows/release-runtime.yml`) so following an
- * upstream release does not require anyone's laptop.
+ * given. CI runs this per platform (`.github/workflows/release-runtime.yml`).
  *
- * **Two destinations, and they are not alternatives.** `--publish` uploads to the GitHub
- * release, which a node reaches through an accelerator. `--cnb` uploads the same bytes to CNB,
- * which serves them straight — measured at 4 233 285 B/s on the reference node against
- * 0.2–9.6 MB/s through the accelerators, a 40× run-to-run spread. CNB is the primary source
- * (`DEFAULT_SOURCES` in `src/remote/artefact.js`), GitHub is the disaster recovery. The CNB
- * token is read from `CNB_TOKEN` and never written anywhere: this repository is public.
+ * **Two destinations, and they are not alternatives.** `--cnb` uploads to CNB, which is the
+ * **only** source a node downloads from: it serves the archive straight at 4 233 285 B/s on
+ * the reference node, and the machines this project serves cannot reach GitHub at all.
+ * `--publish` uploads the same bytes to the GitHub release as a backup and for the record;
+ * no node reads them from there. The CNB token is read from `CNB_TOKEN` and never written
+ * anywhere: this repository is public.
  */
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ARTEFACT_RESIDUE } from './trim-fork-runtime.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pluginRoot = resolve(here, '..')
@@ -104,9 +101,10 @@ function installedVersion() {
 /**
  * Files a running node never reads.
  *
- * Type declarations, source maps, package docs and per-package test trees are roughly a
- * third of an install and none of it is loaded by `node lib/bin.js`. `LICENSE` files are
- * kept: they are the licence conditions of the packages being redistributed.
+ * The list lives in `trim-fork-runtime.mjs` because the fork build strips the same
+ * files: two copies would drift into two artefact contents at one version, which is
+ * exactly what `RUNTIME_BUILD` exists to catch. `LICENSE` files are kept either way —
+ * they are the licence conditions of the packages being redistributed.
  *
  * **No pattern here may match a directory whose name merely looks like documentation.**
  * `/(^|\/)docs?\//` was in this list and broke the node outright: `yaml` ships
@@ -116,16 +114,7 @@ function installedVersion() {
  * from the path alone — so the rule is gone rather than narrowed. Measured cost of
  * keeping those trees: under 2 MB.
  */
-const STRIPPED = Object.freeze([
-  /\.d\.ts$/u,
-  /\.d\.mts$/u,
-  /\.map$/u,
-  /(^|\/)README(\.[^/]*)?$/iu,
-  /(^|\/)CHANGELOG(\.[^/]*)?$/iu,
-  /(^|\/)\.github\//u,
-  /(^|\/)(test|tests|__tests__)\//u,
-  /(^|\/)\.md$/iu,
-])
+const STRIPPED = ARTEFACT_RESIDUE
 
 function measure(dir) {
   let bytes = 0

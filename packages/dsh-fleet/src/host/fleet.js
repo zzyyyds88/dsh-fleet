@@ -241,9 +241,6 @@ export class Fleet {
    *   read at connect and sync time so a plugin switched on reaches a node without a restart.
    * @param {() => { specOf: (bundle: string) => string | undefined, isLocal: (bundle: string) => boolean, localFiles: (bundle: string) => Record<string, string> } | undefined} [options.pluginSpecs] - where a plugin comes from and how it travels.
    * @param {Array<{kind: 'prefix' | 'template', prefix?: string, template?: string}>} [options.sources] - artefact sources, best first; replaces the default list.
-   * @param {string[]} [options.mirrors] - accelerator prefixes, best first; an empty list means "the artefact route is off".
-   * @param {readonly string[]} [options.routes] - which ways a runtime may arrive, in order.
-   * @param {string} [options.npmRegistry] - registry a node resolves through; omit for the node's own.
    * @param {(nodeId: string, fingerprint: string) => void} [options.onFirstFingerprint] - called
    *   the first time this node's host key is seen, so the registry can record it.
    * @param {(nodeId: string, expected: string, actual: string) => void} [options.onFingerprintMismatch]
@@ -259,20 +256,8 @@ export class Fleet {
     this.onFingerprintMismatch = options.onFingerprintMismatch
     /** The brain build this plugin would install: its own package version. */
     this.brainVersion = options.brainVersion ?? '0.0.0'
-    /** Ordered artefact sources (CNB, then accelerators); `undefined` means the default list. */
+    /** Ordered artefact sources; `undefined` means the default list (CNB). */
     this.sources = options.sources
-    /** GitHub accelerator prefixes for artefact downloads, best first; empty means "off". */
-    this.mirrors = options.mirrors
-    /**
-     * Which routes a runtime may arrive by, in order.
-     *
-     * Read through the same kind of callback as the bundle list, for the same reason: a
-     * person who forces "artefact only" in the settings page expects the next reinstall to
-     * obey it, not the next desktop restart.
-     */
-    this.routes = options.routes ?? (() => undefined)
-    /** Registry a node resolves through; `undefined` means the node's own npm configuration. */
-    this.npmRegistry = options.npmRegistry ?? (() => undefined)
     /**
      * The bundle list a node composes.
      *
@@ -438,17 +423,11 @@ export class Fleet {
         if (gate.action === GATE.INSTALL) {
           const installedRuntime = await runtime.host.install(runtime.facts, {
             sources: this.sources,
-            mirrors: this.mirrors,
-            routes: this.routes(),
-            registry: this.npmRegistry(),
           })
           runtime.runtimeVia = installedRuntime.via
           runtime.log?.(
             `resident DSH ${installedRuntime.version} installed (${installedRuntime.via})`,
           )
-          if (installedRuntime.engineWarning !== undefined) {
-            runtime.log?.(installedRuntime.engineWarning)
-          }
         }
         // Customise the node BEFORE starting it: install the plugins the user chose,
         // restore the brain bundle, point the profile at the list, and write the model

@@ -101,9 +101,10 @@ export const GATE = Object.freeze({
  * @param {string | undefined} [input.nodeRuntime] - why the installed tree is not usable
  *   as-is, when it is on the right version but was packed differently.
  * @param {'artefact' | 'npm' | undefined} [input.nodeVia] - how that tree arrived. Reported
- *   in the message only: the two routes write the same build stamp, so neither is a
- *   reason to reinstall, but "this node built its own runtime" is what explains a node
- *   that behaves differently from its neighbours.
+ *   in the message only: what makes a tree usable is its version and its build, not its
+ *   route. `npm` is a route this plugin no longer has (ADR-0007), so it now only ever
+ *   describes a tree installed by an older build — and the build number, not the route,
+ *   is what gets it reinstalled.
  * @returns {{ action: string, reason: string, message: string }}
  */
 export function decideGate(input) {

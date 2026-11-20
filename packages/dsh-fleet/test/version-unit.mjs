@@ -21,15 +21,12 @@ import {
   RUNTIME_BUILD,
   artefactName,
   artefactUrls,
-  DEFAULT_MIRRORS,
   DEFAULT_SOURCES,
   FETCH_CEILING_SECONDS,
   FETCH_FLOOR_BYTES,
   FETCH_FLOOR_SECONDS,
   inspectRuntime,
   installScript,
-  npmInstallScript,
-  npmPlatformFlags,
   parseStamp,
   platformTag,
   rollbackScript,
@@ -128,37 +125,37 @@ const check = (ok, label, detail) => {
   check(artefactName('0.2.2', 'linux-x64') === 'dsh-0.2.2-linux-x64.tar.gz',
     'the file name carries version and platform', artefactName('0.2.2', 'linux-x64'))
 
-  // A node reaches the artefact through an ordered **source list**: CNB first, then the
-  // GitHub accelerators as disaster recovery. Measured here: CNB served the full 172 683 323
-  // byte archive at 4 233 285 B/s (~33 s, spread under 1% across repeats) while the
-  // accelerators ranged 0.2–9.6 MB/s run to run — a 40× spread, which is the difference
-  // between "connecting" and "hanging".
+  // A node reaches the artefact through a **source list**, and that list is one entry long:
+  // CNB. The GitHub accelerators were removed, not reordered — every one of them measured
+  // between 0.2 and 9.6 MB/s on the same 172 683 323-byte archive (a 40× spread, which is
+  // the difference between "connecting" and "hanging"), and the machines this project serves
+  // cannot reach GitHub at all.
   //
-  // There is deliberately **no direct-GitHub candidate**: "try GitHub anyway" is the one
-  // fallback guaranteed to be worse than reporting, so an empty source list is a
+  // There is deliberately **no direct-GitHub candidate** either: "try GitHub anyway" is the
+  // one fallback guaranteed to be worse than reporting, so an empty source list is a
   // configuration error that throws instead of a quiet slow download.
   const urls = artefactUrls({ version: '0.2.2-rc.3', platform: 'linux-x64' })
-  check(urls.length === DEFAULT_SOURCES.length,
-    'exactly one candidate per source', String(urls.length))
+  check(urls.length === DEFAULT_SOURCES.length && urls.length === 1,
+    'exactly one candidate, because there is exactly one source', String(urls.length))
   check(urls[0] === 'https://cnb.cool/serendipity-archive/dsh-fleet/-/releases/download/v0.2.2-rc.3/dsh-0.2.2-rc.3-linux-x64.tar.gz',
-    'CNB comes first, filled into its own URL shape rather than prefixed', urls[0])
-  check(DEFAULT_MIRRORS.every((mirror, index) => urls[index + 1].startsWith(`${mirror}https://github.com/`)),
-    'the accelerators follow, still as prefixes')
+    'CNB, filled into its own URL shape rather than prefixed', urls[0])
   check(!urls.some(url => url.startsWith('https://github.com/')),
     'GitHub direct is never a candidate — a slow fallback reads as a hang', urls.at(-1))
   check(urls.every(url => url.includes('/releases/download/v0.2.2-rc.3/dsh-0.2.2-rc.3-linux-x64.tar.gz')),
     'every candidate points at the same tag and file name')
   check(new Set(urls).size === urls.length, 'the candidates are distinct')
   let emptyThrew = ''
-  try { artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: [], sources: [] }) }
+  try { artefactUrls({ version: '1.0.0', platform: 'linux-x64', sources: [] }) }
   catch (error) { emptyThrew = String(error.message) }
   check(emptyThrew.includes('no artefact source configured'),
     'no sources is a named error, not a silent direct download', emptyThrew.slice(0, 80))
-  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: ['https://m.example/'] })[1]
-    .startsWith('https://m.example/https://github.com/'), 'a custom accelerator is used verbatim')
-  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: ['https://a/', ''] })
-    .length === 2, 'an empty entry in the list is not a candidate of its own')
-  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', mirrors: DEFAULT_MIRRORS, repository: 'a/b', tag: 'nightly' })[1]
+  // A private mirror is still one configuration value away, which is why the `prefix` kind
+  // survives even though nothing in the defaults uses it.
+  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', sources: [{ kind: 'prefix', prefix: 'https://m.example/' }] })[0]
+    .startsWith('https://m.example/https://github.com/'), 'a configured accelerator is used verbatim')
+  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', sources: [{ kind: 'prefix', prefix: 'https://a/' }, { kind: 'prefix', prefix: '' }] })
+    .length === 1, 'an empty prefix is not a candidate of its own')
+  check(artefactUrls({ version: '1.0.0', platform: 'linux-x64', sources: [{ kind: 'prefix', prefix: 'https://m.example/' }], repository: 'a/b', tag: 'nightly' })[0]
     .includes('/a/b/releases/download/nightly/'), 'the repository and tag are configurable')
   // A template source is a general mechanism, not a hard-coded CNB special case.
   check(artefactUrls({
@@ -445,10 +442,15 @@ const check = (ok, label, detail) => {
 {
   check(parseStamp(stampJson({ via: 'artefact' })).build === RUNTIME_BUILD,
     'a stamp this build writes carries the current build', String(RUNTIME_BUILD))
-  check(parseStamp(stampJson({ via: 'npm' })).via === 'npm',
-    'and records that the node resolved its own tree')
   check(parseStamp(stampJson({ via: 'artefact' })).via === 'artefact',
-    'or that it came from a published artefact')
+    'and records that it came from a published artefact')
+  // `npm` is a route this build no longer has. A node that still carries such a stamp is a
+  // node built by build 3, and build 3 is the upstream tree — the *build* number is what
+  // reinstalls it, not the route it recorded. The reader must not choke on the value.
+  check(parseStamp(stampJson({ via: 'npm' })).via === 'npm',
+    'a stamp from the removed route still parses')
+  check(parseStamp('{"build":4,"via":"carrier-pigeon"}').via === undefined,
+    'while an unknown route reads as no route rather than as itself')
   // Build 2 wrote the bare integer. A node already in service must not be judged unusable
   // by a format change — that would reinstall every node on the planet for one upgrade.
   check(parseStamp('2').build === 2, 'a build-2 stamp still reads as build 2')
@@ -459,56 +461,30 @@ const check = (ok, label, detail) => {
   check(parseStamp('{"build":').build === undefined,
     'and neither is one that was cut off mid-write')
 
-  // `via` is reported, never judged: a node that built its own runtime is not reinstalled
-  // for having done so.
+  // `via` is reported, never judged: what makes a tree usable is its version and its build.
   const built = inspectRuntime({
     version: '0.2.2-rc.3', build: stampJson({ via: 'npm' }), wantedVersion: '0.2.2-rc.3',
   })
-  check(built.usable, 'a tree the node resolved itself is as usable as a downloaded one', built.reason)
+  check(built.usable, 'a stamp recording the removed route is still a usable tree', built.reason)
   check(built.via === 'npm', 'while the stamp still says how it got there')
   check(inspectRuntime({ version: '0.2.2-rc.3', build: '2', wantedVersion: '0.2.2-rc.3' }).usable === false,
-    'a build-2 tree is still reinstalled, because build 3 packs different bytes')
-
-  // The npm script has to write the same stamp, or the tree it installs reads as unstamped
-  // and every connect reinstalls it: a one-minute install becomes a permanent one-minute
-  // connect.
-  const npmScript = npmInstallScript({
-    version: '0.2.2-rc.3',
-    runtime: '/root/.dsh-fleet/runtime',
-    cli: '/root/.dsh-fleet/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js',
-    flags: ['--os=linux', '--cpu=x64', '--libc=glibc'],
-  })
-  check(npmScript.includes(BUILD_STAMP), 'the npm install writes the stamp too')
-  check(npmScript.includes(`"build":${String(RUNTIME_BUILD)}`) && npmScript.includes('"via":"npm"'),
-    'with the same build and its own route')
-  check(npmScript.includes('--os=linux --cpu=x64 --libc=glibc'),
-    'and resolves for the platform it was told, not the one it happens to run on')
-  check(npmScript.includes('--engine-strict=false'),
-    'and fails open on engines, which the artefact route never checked either')
-  check(!npmScript.includes('--ignore-scripts'),
-    'while letting build scripts run: on the node they build for the node')
-
-  // The platform flags are derived from the probe, so the npm route resolves the same
-  // native packages the packer would have.
-  check(npmPlatformFlags({ os: 'Linux', arch: 'x86_64', libc: 'glibc' }).join(' ')
-    === '--os=linux --cpu=x64 --libc=glibc', 'a glibc x86_64 node asks for glibc x64')
-  check(npmPlatformFlags({ os: 'Linux', arch: 'aarch64', libc: 'musl' }).join(' ')
-    === '--os=linux --cpu=arm64 --libc=musl', 'an Alpine arm64 node asks for musl arm64')
-  check(npmPlatformFlags({ os: 'Darwin', arch: 'arm64' }).join(' ') === '--os=darwin --cpu=arm64',
-    'and a Mac is never given a Linux libc flag')
-  check(npmPlatformFlags({ os: 'Plan9', arch: 'mips' }).length === 0,
-    'a platform it cannot name passes no flags, letting the node decide for itself')
+    'a build-2 tree is still reinstalled, because later builds pack different bytes')
+  // The one that matters now: build 3 is the *upstream* tree at the same version, which is a
+  // different runtime. Without this a node that had rc.5 from the old route would never be
+  // moved onto the fork.
+  check(inspectRuntime({ version: '0.2.2-rc.3', build: '3', wantedVersion: '0.2.2-rc.3' }).usable === false,
+    'a build-3 tree is reinstalled, because it is the upstream runtime and this build is the fork')
 }
 
 // ---- the two routes, exercised through the real RemoteHost.install ---------------
-// The connection is a stub: what is being proved is *which commands run, in what order, and
-// what happens to the one that did not work* — not SSH.
+// ---- the one route, exercised through the real RemoteHost.install ---------------
+// The connection is a stub: what is being proved is *which commands run* and *what happens
+// to the one that did not work* — not SSH.
 //
-// The rule these pin down: a tree that could not be **had** falls through to the next
-// route, and a tree that arrived and was **wrong** does not. The first is "no artefact
-// published for this release yet", which must not be a dead end — it is what an upstream
-// DSH bump looks like before anyone packs it. The second is a real fault, and re-resolving
-// the same broken release from a registry would download more, take longer, and hide it.
+// The rule these pin down: a tree that could not be **had** is reported with the URLs it
+// tried, and a tree that arrived and was **wrong** is rolled back and reported. Neither one
+// is retried through a second route, because there is no second route: it was removed
+// together with the ability to install the upstream release (ADR-0007).
 {
   const { RemoteHost } = await import('../src/remote/daemon.js')
   const stub = (answers = {}) => {
@@ -525,7 +501,7 @@ const check = (ok, label, detail) => {
   }
   const facts = {
     nodeUsable: true, nodeVersion: 'v24.21.0', curlPath: '/usr/bin/curl', wgetPath: '',
-    npmPath: '/usr/bin/npm', os: 'Linux', arch: 'x86_64', libc: 'glibc',
+    os: 'Linux', arch: 'x86_64',
   }
   const attempt = async (options, installFacts = facts) => {
     const connection = stub({ 'ARTEFACT-UNAVAILABLE-NEVER-MATCHES': { code: 0 }, ...options.answers })
@@ -536,99 +512,69 @@ const check = (ok, label, detail) => {
     return { error, result, calls: connection.calls }
   }
   const ranNpm = calls => calls.some(call => call.includes('npm install'))
-  const npmCall = calls => calls.find(call => call.includes('npm install')) ?? ''
 
-  // 1. When no accelerator can serve the artefact, the node resolves the same release
-  //    itself. This is the whole point: an upstream bump with no artefact is a slower
-  //    connect, not a dead end.
+  // 1. A successful download is the whole install, and it never touches a registry.
+  const installed = await attempt({})
+  check(installed.error === undefined, 'a served artefact installs',
+    String(installed.error?.message).slice(0, 90))
+  check(installed.result?.via === 'artefact', 'and reports the route it took', installed.result?.via)
+  check(!ranNpm(installed.calls), 'without ever running npm on the node')
+
+  // 2. When nothing serves the artefact the connect fails, naming the URLs it tried. It does
+  //    **not** fall back to the upstream release: that tree would write this build's stamp
+  //    and read as "in step" forever, pinning the node to the upstream runtime after one
+  //    network blip.
   const refused = await attempt({ answers: { 'ARTEFACT_UNAVAILABLE': { code: 3, stderr: 'ARTEFACT_UNAVAILABLE' } } })
-  check(refused.error === undefined, 'a missing artefact is not an error any more',
-    String(refused.error?.message).slice(0, 90))
-  check(refused.result?.via === 'npm', 'the node resolves that release itself instead', refused.result?.via)
-  check(ranNpm(refused.calls), 'which means npm really runs on the node')
-  check(npmCall(refused.calls).includes('"@deepseek-ai/dsh@0.2.2-rc.3"'),
-    'for the exact release, never a range')
-  check(npmCall(refused.calls).includes('--os=linux --cpu=x64 --libc=glibc'),
-    'resolved for the node platform, not whichever machine runs npm')
-  check(npmCall(refused.calls).includes('.fleet-artefact.json'),
-    'and it writes the stamp, so the next connect does not reinstall it')
-  // Every URL the artefact script was given starts at CNB or at an accelerator — never at
-  // GitHub itself. An accelerator URL contains `github.com` as its suffix (that is how
-  // prefixing works), so this looks at where each URL starts.
+  check(refused.error !== undefined, 'a missing artefact fails the connect')
+  const refusedText = String(refused.error?.message)
+  check(refusedText.includes('could not be installed'), 'with a message that says so',
+    refusedText.slice(0, 90))
+  check(refusedText.includes('https://cnb.cool/'), 'naming the URL it tried',
+    refusedText.slice(-160))
+  check(!ranNpm(refused.calls),
+    'and never reaching for the upstream release, which would pin the node to it')
+
+  // 3. Every URL the artefact script is given comes from the one configured source, and none
+  //    starts at GitHub itself: GitHub direct is ~27 KB/s, which reads as a hang.
   const scriptUrls = refused.calls
     .flatMap(call => [...call.matchAll(/'(https:\/\/[^']+)'/gu)].map(match => match[1]))
-  check(scriptUrls.length > 0 && scriptUrls.every(url => !url.startsWith('https://github.com/')),
-    'and the artefact route it tried first still never starts at GitHub directly',
-    scriptUrls.find(url => url.startsWith('https://github.com/')))
-  check(scriptUrls[0]?.startsWith('https://cnb.cool/'),
-    'the node tries CNB first, before any accelerator', scriptUrls[0])
-  check(scriptUrls.every(url => url.startsWith('https://cnb.cool/')
-    || DEFAULT_MIRRORS.some(mirror => url.startsWith(mirror))),
-  'every URL it builds comes from a configured source')
+  check(scriptUrls.length > 0 && scriptUrls.every(url => url.startsWith('https://cnb.cool/')),
+    'every URL it tries comes from CNB', scriptUrls.find(url => !url.startsWith('https://cnb.cool/')))
+  check(scriptUrls.every(url => !url.startsWith('https://github.com/')),
+    'and none starts at GitHub directly')
 
-  // 2. A checksum mismatch is *not* the same thing. The bytes arrived and were wrong, so
-  //    the previous runtime is rolled back and the failure is reported: re-resolving the
-  //    same broken release from a registry would hide which of the two failed.
+  // 4. A checksum mismatch is *not* the same thing. The bytes arrived and were wrong, so the
+  //    previous runtime is rolled back and the failure is reported.
   const mismatch = await attempt({
     answers: { 'ARTEFACT_CHECKSUM_MISMATCH': { code: 4, stderr: 'ARTEFACT_CHECKSUM_MISMATCH a b' } },
   })
   check(mismatch.calls.some(call => call.includes('.previous')),
     'a bad checksum rolls the previous runtime back')
   check(String(mismatch.error?.message).includes('installing the resident host failed'),
-    'and reports rather than resolving it again from npm')
-  check(!ranNpm(mismatch.calls),
-    'so a broken artefact never becomes a registry download')
+    'and reports the checksum rather than the source list')
+  check(!ranNpm(mismatch.calls), 'so a broken artefact is never retried through a registry')
 
-  // 3. With no downloader the artefact route cannot even start — but npm needs no
-  //    downloader, so this is a machine that upgrades instead of a machine that cannot.
+  // 5. A machine that cannot download cannot install, and says which tool is missing. This
+  //    used to be a machine that upgraded itself through npm; it is now a machine that has
+  //    to have `curl` or `wget`, because that is the only way a runtime arrives.
   const noDownloader = await attempt({}, { ...facts, curlPath: '', wgetPath: '' })
-  check(ranNpm(noDownloader.calls), 'a node with no curl and no wget still installs through npm')
-  check(noDownloader.error === undefined, 'and that is not an error',
-    String(noDownloader.error?.message).slice(0, 60))
+  check(noDownloader.error !== undefined, 'a node with no curl and no wget is an error')
+  check(String(noDownloader.error?.message).includes('neither curl nor wget'),
+    'which names the missing downloader', String(noDownloader.error?.message).slice(0, 120))
+  check(!ranNpm(noDownloader.calls), 'and does not try npm instead')
 
-  // 4. An empty accelerator list means "the artefact route is switched off", which the npm
-  //    route already covers — not a configuration error that blocks the install.
-  const noMirrors = await attempt({ install: { mirrors: [] } })
-  check(ranNpm(noMirrors.calls), 'an empty accelerator list falls through to npm')
-  check(noMirrors.error === undefined, 'instead of failing the connect',
-    String(noMirrors.error?.message).slice(0, 60))
-
-  // 5. Both routes can be forced, which is what makes a failure attributable: the settings
-  //    page can say "this node must use an artefact" and then a download failure is real.
-  const artefactOnly = await attempt({
-    install: { routes: ['artefact'] },
-    answers: { 'ARTEFACT_UNAVAILABLE': { code: 3, stderr: 'ARTEFACT_UNAVAILABLE' } },
-  })
-  check(artefactOnly.error !== undefined, 'artefact-only reports a failed download instead of falling through')
-  check(!ranNpm(artefactOnly.calls), 'and never runs npm')
-  check(String(artefactOnly.error?.message).includes(DEFAULT_MIRRORS[0]),
-    'naming the accelerators it tried', String(artefactOnly.error?.message).slice(0, 90))
-  check(String(artefactOnly.error?.message).includes('artefact:'),
-    'and labelling which route failed')
-
-  const npmOnly = await attempt({ install: { routes: ['npm'] } })
-  check(!npmOnly.calls.some(call => call.includes('dsh-0.2.2-rc.3-')),
-    'npm-only builds no artefact URL at all')
-  check(npmOnly.result?.via === 'npm', 'and installs through npm', npmOnly.result?.via)
-
-  // 6. A platform this build has never published for is still the ordinary npm case.
+  // 6. A platform this build has never published for is reported as such, not resolved.
   const untaggable = await attempt({}, { ...facts, os: 'Plan9', arch: 'mips' })
-  check(untaggable.calls.some(call => call.includes('npm install')),
-    'an untaggable platform still installs through npm')
-  // …and a platform it cannot tag is also one it cannot give flags for: asking npm for
-  // `--os=...` from a name it does not recognise would install the wrong native packages.
-  const untaggableNpm = untaggable.calls.find(call => call.includes('npm install')) ?? ''
-  check(!untaggableNpm.includes('--os=') && !untaggableNpm.includes('--libc='),
-    'and passes no platform flags it could not derive, letting the node decide')
+  check(untaggable.error !== undefined, 'an untaggable platform is an error')
+  check(String(untaggable.error?.message).includes('no platform tag'),
+    'naming the reason', String(untaggable.error?.message).slice(0, 120))
+  check(!ranNpm(untaggable.calls), 'and never reaches for a registry')
 
-  // 7. When *nothing* works the message has to name both routes, not just the last one:
-  //    "install curl" and "install npm" are different actions for whoever reads it.
-  const nothing = await attempt({}, { ...facts, curlPath: '', wgetPath: '', npmPath: '' })
-  check(nothing.error !== undefined, 'a machine with neither a downloader nor npm is an error')
-  const nothingText = String(nothing.error?.message)
-  check(nothingText.includes('neither curl nor wget'), 'which names the missing downloader',
-    nothingText.slice(0, 120))
-  check(nothingText.includes('no npm on PATH'), 'and the missing npm')
+  // 7. A node older than the floor is refused before anything is downloaded.
+  const old = await attempt({}, { ...facts, nodeUsable: false, nodeVersion: 'v18.20.0' })
+  check(old.error !== undefined, 'a node below the Node floor is refused')
+  check(!old.calls.some(call => call.includes('dsh-0.2.2-rc.3-')),
+    'before any archive is downloaded')
 }
 
 if (failures.length > 0) {
