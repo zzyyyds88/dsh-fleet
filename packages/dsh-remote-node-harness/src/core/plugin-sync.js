@@ -46,9 +46,11 @@ export const RNH_PACKAGE = '@greatbaby/dsh-remote-node-harness'
  *
  * - `@greatbaby/dsh-remote-node-harness` is the desktop half. Its preset holds the node-management tool,
  *   so a node that mounted it could manage other nodes — the one shape of control a node
- *   must not have. `@local/dsh-remote-node-harness` is listed beside it because that is the same package
- *   before 0.5.0: a profile upgraded in place still carries the old spelling, and "it is
- *   the previous name of me" is not a reason to send it to a node.
+ *   must not have. The two older spellings are listed beside it because they are the same
+ *   package: a profile upgraded in place still carries one of them, and "it is the previous
+ *   name of me" is not a reason to send it to a node.
+ *   - `@local/dsh-fleet` — the name before 0.5.0.
+ *   - `@greatbaby/dsh-fleet` — the name between 0.5.0 and 0.6.0.
  * - `@local/rnh-brain` is the node-side subtraction itself, already in the list.
  * - `ds-harness-remote` (and the older `@dsh-remote/plugin`) makes a Host reachable by a
  *   phone relay. A node is reached *through* this desktop; a second relay entry point on a
@@ -56,8 +58,9 @@ export const RNH_PACKAGE = '@greatbaby/dsh-remote-node-harness'
  */
 export const NODE_NEVER_SYNC = Object.freeze([
   RNH_PACKAGE,
-  // The name this package had before 0.5.0.
-  '@local/dsh-remote-node-harness',
+  // The names this package had before the 0.6.0 rename, newest first.
+  '@greatbaby/dsh-fleet',
+  '@local/dsh-fleet',
   '@local/rnh-brain',
   'ds-harness-remote',
   '@dsh-remote/plugin',

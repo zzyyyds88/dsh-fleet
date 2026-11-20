@@ -1,10 +1,14 @@
 # ADR-0005 发布与维护：包名、发布形态、三条升级链
 
-> 状态：已定（2026-11-18）。用户已确认包名与版权署名。
+> 状态：**部分被推翻**（2026-11-20，0.6.0）。包名与「发 npm」这两条不再成立：项目已改名为
+> `dsh-remote-node-harness`，并且整体放弃 npm，只发 CNB（下载）与 GitHub（发行）。本文其余章节
+> （三条升级链、tarball 形态）仍然有效。改动记在 `CHANGELOG.md` 的 0.6.0 段。
 > 上承 [ADR-0004](adr-0004-node-control-and-picker.zh.md)。
 > 本文只决定「怎么发、怎么维护」，不改任何运行时行为。
 > 现在怎么用：安装与升级步骤见根 [README.md](../README.md) 与
-> [`packages/dsh-fleet/docs/UPGRADE.zh.md`](../packages/dsh-fleet/docs/UPGRADE.zh.md)。
+> [`packages/dsh-remote-node-harness/docs/UPGRADE.zh.md`](../packages/dsh-remote-node-harness/docs/UPGRADE.zh.md)。
+>
+> 下面正文里的 `dsh-fleet` 与 `@greatbaby/dsh-fleet` 是**当时的名字**，保留原样以免伪造事实。
 
 ## 一、背景：要发，但当时发不出去
 

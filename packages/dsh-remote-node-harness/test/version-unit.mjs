@@ -297,10 +297,12 @@ const check = (ok, label, detail) => {
   // so a prefix rule would be wrong in one direction or the other.
   check(isNeverSynced('@greatbaby/dsh-remote-node-harness'),
     'this desktop half holds the node-management tool: a node that ran it could manage other nodes')
-  // A profile installed before 0.5.0 lists the old spelling until it is reinstalled, and
-  // "the previous name of me" is not a reason to send this plugin's preset to a node.
-  check(isNeverSynced('@local/dsh-remote-node-harness'),
-    'and so is the name it had before 0.5.0, which an upgraded profile still lists')
+  // A profile installed before 0.6.0 lists one of the old spellings until it is reinstalled,
+  // and "the previous name of me" is not a reason to send this plugin's preset to a node.
+  check(isNeverSynced('@greatbaby/dsh-fleet'),
+    'and so is the name it had between 0.5.0 and 0.6.0, which an upgraded profile still lists')
+  check(isNeverSynced('@local/dsh-fleet'),
+    'and the name it had before 0.5.0, which an even older profile still lists')
   check(isNeverSynced('ds-harness-remote'), 'a relay plugin on a node would open a second way in')
   check(isNeverSynced('@dsh-remote/plugin'), 'and the older name for the same thing')
   check(isNeverSynced('@local/rnh-brain'), 'the brain bundle is already the node side')
