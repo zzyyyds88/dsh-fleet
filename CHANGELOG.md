@@ -9,7 +9,7 @@
 - 每条都说清「谁受影响」，因为这套东西的读者是「装它的人」，不是写它的人。
 - 与 `docs/ARCHITECTURE.md` 的章节对应，细节不去那边重复。
 
-## [未发布]
+## [0.6.2] — 2026-11-21
 
 ### 修复
 
@@ -25,8 +25,10 @@
 
 ### 变更
 
-- **`patches/node/` 目录随包发布（含 `.gitkeep`）。** 之前它不存在，`listPatches` 对不存在
+- **仓库里补上了 `patches/node/` 目录（含 `.gitkeep`）。** 之前它不存在，`listPatches` 对不存在
   的目录返回空数组，所以测试是绿的，但按 `UPGRADE` 教的第一步往里放补丁时得自己 `mkdir`。
+  这个目录只在打包机上用（`build-fork-runtime.mjs` 从仓库工作树里读），不进插件 tarball ——
+  装插件的人没有也不需要它。
 - **发布说明里的节点安装路径改回 `~/.dsh-remote-node-harness`。** 之前写的是 `~/.dsh-rnh`，
   而 `DEFAULT_REMOTE_ROOT` 从来是前者。这条路径在 `publish-runtime.mjs` 里是第二份拼写
   （那个脚本不能 import daemon，否则会把 `ssh2` 拖进打包脚本），所以
