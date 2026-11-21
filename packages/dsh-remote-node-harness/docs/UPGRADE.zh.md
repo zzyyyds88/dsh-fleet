@@ -286,6 +286,13 @@ git checkout -- .          # 工作树回到 tag 状态，改动只活在补丁�
 `inspectRuntime` 见戳相同就复用，不 bump 就等于只在全新节点上修好，而真正坏着的那些
 节点一个都不会被修。判据：**这次改动要生效，是否必须让节点重装一次？** 是就 bump。
 
+**加一条节点补丁必须同时做三件事**（ADR-0008，build 7 是第一次）：
+
+1. `patches/node/NNNN-slug.patch` —— `git -C <fork> apply --3way` 能过的标准 diff；
+2. `docs/node-patches.zh.md` 补一行六列，缺一列 `test/node-patches-unit.mjs` 就红；
+3. `RUNTIME_BUILD` +1。补丁改的是 `lib/` 里真正跑的字节，所以归档字节会变，
+   不 bump 会让已经装好的节点继续跑旧逻辑而界面显示「已就绪」。
+
 **两个实测撞过的坑，改脚本时别踩回去：**
 
 1. `@deepseek-ai/dsh-web-app` 的 **manifest 必须留着**，哪怕它一个字节都不加载。上游按

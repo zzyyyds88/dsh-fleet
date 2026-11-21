@@ -22,8 +22,10 @@ const check = (ok, label, detail) => {
 
 // ---- the shipped state -------------------------------------------------------
 {
-  // The chain is empty right now, and that is a claim worth asserting rather than assuming:
-  // everything this project does to the node runtime at build 5 is a packaging step.
+  // The chain was empty through build 6 (every difference was a packaging step). Build 7 is the
+  // first build whose SOURCE differs from the upstream tag, so the shipped set is asserted by
+  // name: a patch that disappears, or one that arrives without a ledger row, is a change nobody
+  // decided to ship.
   const patches = listPatches(packageRoot)
   log(`patches on disk: ${String(patches.length)}`)
   const ledger = checkPatches(packageRoot)
@@ -32,7 +34,19 @@ const check = (ok, label, detail) => {
   for (const patch of patches) {
     check(/^\d{4}-[a-z0-9-]+$/u.test(`${String(patch.ordinal).padStart(4, '0')}-${patch.slug}`),
       `${patch.name} is NNNN-slug.patch`)
+    // A patch is a unified diff or it is not applicable; `git apply --check` is what proves the
+    // latter, but this catches a truncated or HTML-escaped file before the fork is involved.
+    const text = readFileSync(patch.path, 'utf8')
+    check(text.startsWith('diff --git '), `${patch.name} starts with a git diff header`)
+    check(/\r/u.test(text) === false, `${patch.name} has LF endings only`,
+      'a CRLF patch cannot apply to a tree checked out with LF')
   }
+  const shipped = patches.map(patch => patch.name)
+  check(JSON.stringify(shipped) === JSON.stringify([
+    '0001-team-write-scope-overlap-all-live-tasks.patch',
+    '0002-fork-seed-covers-requesting-turn.patch',
+  ]), 'the shipped patches are exactly the two upstream defects this build repairs',
+  shipped.join(', '))
 }
 
 // ---- the ordering rules ------------------------------------------------------

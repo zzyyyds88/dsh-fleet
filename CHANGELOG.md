@@ -9,6 +9,53 @@
 - 每条都说清「谁受影响」，因为这套东西的读者是「装它的人」，不是写它的人。
 - 与 `docs/ARCHITECTURE.md` 的章节对应，细节不去那边重复。
 
+## [0.6.4] — 2026-11-21
+
+### 修复
+
+**两条上游缺陷，落成节点补丁链的第一批补丁（`patches/node/0001`、`0002`）。**
+此前 build 5/6 的节点树源码与上游 tag 逐字节相同，本项目的差异全在删包与删文件里；
+这两条改的是上游代码的行为，所以 `RUNTIME_BUILD` 6 → 7、归档重新编译并覆盖发布。
+每一条的发生条件、改动位置、验证方式与「上游改到同一处怎么办」都写在
+[`node-patches.zh.md`](packages/dsh-remote-node-harness/docs/node-patches.zh.md)。
+
+- **Team 的写作用域冲突警告会在兄弟任务一完成时消失。**
+  `projectTaskView` 只拿 `in_progress` 的兄弟任务比对，所以任务 A 与任务 B 都声明
+  同一批路径时，只要 A 先 `complete`，B 看到的警告就变成空的 —— 调用方读到的是
+  「无冲突」，而那批文件刚刚被 A 写过、B 接下来还要再写一遍。这正是最需要提示的时刻。
+  现在比对每一条非 `deleted` 的任务，并在警告里带上对方状态
+  （`write scopes overlap with task-2 (pending)`），调用方能自己分清「正在撞车」和
+  「已经有人写过」。
+- **fork 子会话在该继承的时候什么都没继承。**
+  provider 把切点定死在「最后一个 `turn/end`」：父会话还没完成任何一轮时（首轮就委派、
+  或者第一轮还没跑完）返回空 seed，子会话 `isSeeded: false`、`inheritedEventCount: 0`，
+  而工具描述向模型承诺的是「seeded with all completed turns so far」—— 子 agent 于是
+  回答「看不到这段对话」。父会话已经有若干轮时，切在 `turn/end` 又会丢掉**当前轮的用户
+  请求**，也就是要求它做这件事的那一条。现在切点落在「最后一条携带未应答 tool-call 的
+  `assistant/message` 之前」，再用 `buildForkSeed` 收口：用户请求进了 seed，父级自己那条
+  委派调用被切掉（不给子 agent 一条「后果未知」的合成结果，避免它自己再去委派一次）。
+  工具措辞同步改准：它继承的是「截至本次委派处的对话」，看不到本次委派请求本身，
+  被压缩过的片段以摘要形式到达它。
+
+### 测试
+
+- 上游 fork 侧：`packages/subagent`、`packages/team`、`packages/client/ui-agent-team`
+  共 **57 个测试文件 / 1343 通过 / 1 跳过**（`npx vitest run` 实跑）。新增一条
+  「首轮 fork 也 seeded 且继承用户请求」，重写四条因切点变化而失效的断言
+  （首轮 `isSeeded`、`inheritedEventCount`、seed 末尾事件、继承事件的排序）。
+- 本仓库：`test/node-patches-unit.mjs` 全过（含新增两个真实补丁的台账一致性；
+  `checkPatches` 报告 `{"patches":2,"problems":[]}`），`test/version-unit.mjs`、
+  `test/fork-runtime-unit.mjs` 全过。
+- 未验证：`host-routing` / `workspace-flow` / `tool-parity` / `client-bundle` /
+  `artefact` 五层端到端需要运行中的 Host + 已连接节点（`RNH_TEST_*` 未设置），本轮没跑。
+
+### 构建
+
+- `scripts/build-fork-runtime.mjs` 在 Windows 上改用 corepack 的 JS 入口调用 pnpm。
+  旧的 `run('corepack', …)` 在 Windows 下必失败：`corepack` 只有 `.cmd` 垫片，
+  无 shell 的 `spawnSync` 不按 `PATHEXT` 解析，返回 `status: null`，报错信息里只有一个
+  `exited with null`。这条只影响**打包机**，节点侧无变化。
+
 ## [0.6.3] — 2026-11-21
 
 ### 修复

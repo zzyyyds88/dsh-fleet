@@ -105,9 +105,22 @@ function run(command, commandArgs, options = {}) {
  * The fork declares `packageManager: pnpm@11.28.5`; running whatever pnpm happens
  * to be on PATH would build with a different resolver than the lock file was made
  * by.
+ *
+ * On Windows `corepack` is a `.cmd` shim, and `spawnSync` without a shell does not
+ * apply `PATHEXT` — it looks for `corepack.exe` and fails with status `null`
+ * (`ENOENT`), which is a failure the message below cannot explain. Node's own entry
+ * for it does work, exactly like the npm entry in {@link resolveTree}. Measured
+ * 2026-11-21 on this machine: `corepack pnpm@11.28.5 --version` → `11.28.5`, while
+ * spawning the bare name fails.
  */
 function pnpm(scriptArgs) {
-  run('corepack', [`pnpm@${forkPackageManagerVersion()}`, ...scriptArgs])
+  const version = forkPackageManagerVersion()
+  const entrypoint = join(dirname(process.execPath), 'node_modules', 'corepack', 'dist', 'corepack.js')
+  if (process.platform === 'win32' && existsSync(entrypoint)) {
+    run(process.execPath, [entrypoint, `pnpm@${version}`, ...scriptArgs])
+    return
+  }
+  run('corepack', [`pnpm@${version}`, ...scriptArgs])
 }
 
 /** The exact pnpm version the fork pins. */

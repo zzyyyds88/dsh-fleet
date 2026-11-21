@@ -1,0 +1,73 @@
+diff --git a/packages/team/agent-team/src/task-view.ts b/packages/team/agent-team/src/task-view.ts
+index ac84347e..6d99ecde 100644
+--- a/packages/team/agent-team/src/task-view.ts
++++ b/packages/team/agent-team/src/task-view.ts
+@@ -35,9 +35,14 @@ export function taskReady(state: TeamState, task: TeamTaskSnapshot): boolean {
+ export function projectTaskView(state: TeamState, task: TeamTaskSnapshot): TeamTaskView {
+   const warnings = new Set<string>()
+   for (const other of state.tasks) {
+-    if (other.id === task.id || other.status !== 'in_progress') continue
++    // Every live task is compared, not only the in-progress ones. A pending task starts later
++    // and a completed task already wrote, so both are conflicts the caller has to see; filtering
++    // to `in_progress` made an overlap vanish exactly when a sibling finished, which read as
++    // "no conflict" while the same files were still in play. The status travels with the warning
++    // so the caller can tell a live clash from a finished one.
++    if (other.id === task.id || other.status === 'deleted') continue
+     if (task.writeScopes.some(left => other.writeScopes.some(right => scopesOverlap(left, right)))) {
+-      warnings.add(`write scopes overlap with ${other.id}`)
++      warnings.add(`write scopes overlap with ${other.id} (${other.status})`)
+     }
+   }
+   return {
+diff --git a/packages/team/agent-team/tests/projection-events.spec.ts b/packages/team/agent-team/tests/projection-events.spec.ts
+index 42dbbc53..cdeae8c3 100644
+--- a/packages/team/agent-team/tests/projection-events.spec.ts
++++ b/packages/team/agent-team/tests/projection-events.spec.ts
+@@ -476,11 +476,13 @@ describe('Agent Teams projection events', () => {
+         tasks: [
+           {
+             id: 'task-1', revision: 2, subject: 'subject', description: 'description', status: 'in_progress',
+-            blockedBy: [], writeScopes: ['src'], ownerId: CHILD, ready: false, writeScopeWarnings: [],
++            blockedBy: [], writeScopes: ['src'], ownerId: CHILD, ready: false,
++            writeScopeWarnings: ['write scopes overlap with task-2 (pending)'],
+           },
+           {
+             id: 'task-2', revision: 1, subject: 'subject', description: 'description', status: 'pending',
+-            blockedBy: ['task-1'], writeScopes: ['src/web'], ready: false, writeScopeWarnings: ['write scopes overlap with task-1'],
++            blockedBy: ['task-1'], writeScopes: ['src/web'], ready: false,
++            writeScopeWarnings: ['write scopes overlap with task-1 (in_progress)'],
+           },
+         ],
+       })
+diff --git a/packages/team/agent-team/tests/team.spec.ts b/packages/team/agent-team/tests/team.spec.ts
+index f0724a95..72da89de 100644
+--- a/packages/team/agent-team/tests/team.spec.ts
++++ b/packages/team/agent-team/tests/team.spec.ts
+@@ -567,7 +567,7 @@ describe('Team shared task DAG', () => {
+     })).rejects.toMatchObject({ code: 'TEAM_TASK_ALREADY_CLAIMED' })
+     expect(ctx.agentTeams.getTask(beta, second.id)).toMatchObject({
+       ready: false,
+-      writeScopeWarnings: [`write scopes overlap with ${first.id}`],
++      writeScopeWarnings: [`write scopes overlap with ${first.id} (in_progress)`],
+     })
+     await expect(ctx.agentTeams.updateTask(beta, {
+       taskId: first.id,
+@@ -808,8 +808,16 @@ describe('Team shared task DAG', () => {
+     await ctx.agentTeams.updateTask(lead, {
+       taskId: disjoint.id, expectedRevision: disjoint.revision, action: 'claim',
+     })
+-    expect(ctx.agentTeams.getTask(lead, broad.id).writeScopeWarnings)
+-      .toEqual([`write scopes overlap with ${narrow.id}`])
++    // Three live tasks now share scope with `broad`: `narrow` is in progress under it, the
++    // reassigned `task` is pending with `src/nested`, and `disjoint` ('docs') must not appear.
++    // Pending siblings are included on purpose: a task that will write the same prefix later is
++    // exactly the conflict the caller needs to see before claiming.
++    // Warnings follow the task list's own order (creation order), so the earlier-created
++    // `task` comes before `narrow` even though its status sorts later.
++    expect(ctx.agentTeams.getTask(lead, broad.id).writeScopeWarnings).toEqual([
++      `write scopes overlap with ${task.id} (pending)`,
++      `write scopes overlap with ${narrow.id} (in_progress)`,
++    ])
+ 
+     const rootAssigned = await ctx.agentTeams.updateTask(lead, {
+       taskId: task.id, expectedRevision: unassigned.revision, action: 'reassign', owner: lead.id,

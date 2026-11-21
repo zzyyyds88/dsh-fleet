@@ -33,10 +33,12 @@
 
 | 补丁 | 改了什么 | 移除了什么 | 为什么节点不需要 | 怎么验证的 | 上游改到同一处怎么办 |
 |---|---|---|---|---|---|
-| （暂无） | | | | | |
+| `0001-team-write-scope-overlap-all-live-tasks.patch` | `packages/team/agent-team/src/task-view.ts`：`projectTaskView` 的写作用域比对从「只比 `in_progress` 的兄弟任务」改为「比每一条非 `deleted` 的任务」，并在提示里带上对方状态（`(pending)` / `(completed)` / `(in_progress)`）；配套改 `tests/team.spec.ts`、`tests/projection-events.spec.ts` 三处断言 | 「一个任务完成后，它和别的任务的写作用域冲突就不再出现」这条行为。改动前，兄弟任务一 `complete`，重叠警告立刻消失，调用方看到的是「无冲突」，而已写过的文件仍可能被后一个任务再写一遍 | 不是「节点不需要」，是**上游行为本身就是缺陷**：ADVISORY 的语义是「提示冲突」，过滤掉历史任务等于在最需要提示的时刻（兄弟任务刚写完同一批文件）删掉提示。用户实测报告了这一条（缺陷 2），节点是它唯一的使用面 | 三处断言按新语义重写并跑绿：`npx vitest run packages/team packages/client/ui-agent-team` → **57 文件 / 1343 通过 / 1 跳过**；`npx tsc --noEmit -p packages/team/agent-team` 无输出 | 上游若修了同一处，先看它是否已经改成「比所有活动任务」。是则删掉本补丁与台账行；否（只是重构）则按新行号重出补丁，六列里「移除了什么」一栏改成上游的表述。警告文案是断言的一部分，上游改文案时补丁必然冲突，这是好事 |
+| `0002-fork-seed-covers-requesting-turn.patch` | `packages/subagent/subagent-fork-in-process/src/index.ts`：切点从「最后一个 `turn/end`」改为「最后一条携带未应答 tool-call 的 `assistant/message` 之前」，再用 `buildForkSeed` 收口；`packages/subagent/tool-subagent/src/index.ts` 的模型可见措辞随之改准；`packages/subagent/subagent/src/types.ts` 与 `docs/subsystems/subagent.md`、两个 README 的措辞同步；四处测试断言按新语义重写 | 「首轮委派/轮次中点委派时子 agent 拿不到任何上下文」。改动前，父会话还没有 `turn/end` 时 provider 直接返回空 seed，子会话 `isSeeded: false`、`inheritedEventCount: 0`，而工具描述却向模型承诺「seeded with all completed turns so far」，子 agent 于是回答「看不到这段对话」；父会话已经有若干轮时，切在 `turn/end` 又会丢掉**当前轮的用户请求**——正是要求它做这件事的那一条 | 同上：这是**上游缺陷**，不是节点冗余。缺陷 3 的实测证据：父会话里埋的标记词在子会话里 `sees MARMALADE: false`；录制日志的 34/34 个切点经 `buildForkSeed` 收口后全部被 `Session.create` 接受且 turn 边界平衡 | `npx vitest run packages/subagent packages/team packages/client/ui-agent-team` → **57 文件 / 1343 通过 / 1 跳过**；`npx tsc --noEmit` 逐个包通过；`packages/subagent/subagent-fork-in-process/tests` 13 条全过（含新增「首轮 fork 也 seeded 且继承用户请求」） | 上游若已经改成同样的切点，删本补丁。若上游只是改了 `buildForkSeed` 的签名或 `TurnEndReason`，`--3way` 会重定位；若上游把 `forkCut` 的判断逻辑改写，冲突点就在 `forkCut` 一个函数里，按新事件词汇重写这二十行即可，测试断言可原样保留 |
 
-> 第一个补丁落地时删掉上面这行占位。表为空是当前的事实：截至 build 5，节点树的**源码与上游
-> tag 逐字节相同**，全部差异都在打包步骤里（包集合不变，归档里的文件数 41 846 → 25 038，
-> 删掉 16 808 个）。
-> 下一批候选（`dsh-client-*` 的浏览器半边、`dsh-doc` skill 的 Windows 分支）需要先用
-> 同样的证据标准验一遍，验不过就写在这里标「待观察」，不硬改。
+> 两个补丁都叠在上游 tag `dsh-v0.2.2-rc.5` 之上，构建时 `git apply --3way` 逐个应用，
+> 失败即停（`test/node-patches-unit.mjs` 断言四种情形）。
+> 台账为空曾是 build 5/6 的事实：**源码与上游 tag 逐字节相同**，差异全在打包步骤里
+> （归档文件数 41 846 → 25 038）。build 7 起不再是空集 —— 上面两行是第一批。
+> 剩余候选（`dsh-client-*` 的浏览器半边、`dsh-doc` skill 的 Windows 分支）仍需先过证据
+> 标准，验不过就标「待观察」，不硬改。

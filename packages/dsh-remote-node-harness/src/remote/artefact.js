@@ -154,8 +154,16 @@ export const DEFAULT_SOURCES = Object.freeze([
  * not even contain. The stamp is the only lever that reaches a node already on the same
  * version: `inspectRuntime` reuses a tree whose stamp matches, so without the bump the repair
  * would never run anywhere it is needed. See {@link isArtefactExecutable}.
+ *
+ * Build 7 is the first build whose **source** differs from the upstream tag. Two upstream
+ * defects reached real use on a node and are fixed by the node patch chain
+ * (`patches/node/`, ledger `docs/node-patches.zh.md`): a Team write-scope warning that vanished
+ * the moment a sibling task completed, and a fork child that inherited nothing when the
+ * delegation happened before the parent's first `turn/end`. Unlike build 6, these change the
+ * compiled `lib/` the node loads, so the archive's bytes change too — a stale tree would keep
+ * answering the old way while its stamp claimed to be current.
  */
-export const RUNTIME_BUILD = 6
+export const RUNTIME_BUILD = 7
 
 /** The stamp file, relative to the runtime directory. */
 export const BUILD_STAMP = '.rnh-artefact.json'

@@ -1,0 +1,4 @@
+# Node source patches are byte-exact unified diffs: `git apply` compares their context lines
+# with the file contents, so a line-ending conversion on checkout would turn every hunk into a
+# mismatch. `-text` disables that conversion for the whole directory, on every platform.
+packages/dsh-remote-node-harness/patches/node/*.patch -text

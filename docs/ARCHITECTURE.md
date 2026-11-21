@@ -639,6 +639,10 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 [`node-patches.zh.md`](../packages/dsh-remote-node-harness/docs/node-patches.zh.md)。
 截至 build 6 源码级改动为 **0**：全部差异都在前两种粒度里。build 6 与 build 5 的归档
 **字节完全相同**，只是安装脚本的可执行位规则变了（见下文「可执行位」一节）。
+**build 7 起不再是 0**：两个上游缺陷（Team 写作用域警告、fork 子会话首轮无继承）以
+`patches/node/0001`、`0002` 两条补丁落地，所以归档字节第一次因为「节点跑的代码不同」而变化。
+两条补丁的改动范围、理由、验证与冲突处置写在
+[`node-patches.zh.md`](../packages/dsh-remote-node-harness/docs/node-patches.zh.md)。
 
 **文件级裁掉的四类死字节，每一类都是先量后删。** build 4 的归档 408.2 MiB 里，
 `src/**.ts` 91.9 MiB、`.d.cts` 22.7 MiB、无人读的 `.md` 5.3 MiB、Windows 调试符号与
@@ -710,10 +714,12 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 会把树读成「早于构建戳」→ `decideGate` 返回 `node-runtime-repack` → **每次连接重装一次**。
 `parseStamp` 仍认旧格式的裸整数（现场节点的 `2`），格式升级不能把在用节点判成不可用。
 
-**`RUNTIME_BUILD` 现在是 5。** 3 → 4 是 fork：树的内容变了（少了 500 MiB 包、多了 fork 的字节），
+**`RUNTIME_BUILD` 现在是 7。** 3 → 4 是 fork：树的内容变了（少了 500 MiB 包、多了 fork 的字节），
 版本号表达不了这件事，只有戳能。4 → 5 是**包内裁剪**：包集合没变，同一个包里少了
 TypeScript 源码、`.d.cts` 声明、调试符号与无人读的文档 —— 实测 408.2 → 268.4 MiB。
-**改 `ARTEFACT_RESIDUE`、改裁剪规则、改归档布局、改由谁来解析，
+5 → 6 是**安装脚本**：归档字节完全相同，改的是解包后补可执行位的那一步。6 → 7 是**源码**：
+两条节点补丁改了 `lib/` 里真正跑的代码，所以归档字节第一次因为「代码不同」而变。
+**改 `ARTEFACT_RESIDUE`、改裁剪规则、改归档布局、改由谁来解析、加一条节点补丁，
 都必须同时 bump**，否则老节点读到的戳是「当前」，它会一直跑旧字节 —— 实测过这条链：`doc/` 被
 当文档删掉，`yaml/dist/doc/directives.js` 跟着没了，节点启动即 `MODULE_NOT_FOUND`，而闸门说
 「已就绪」。

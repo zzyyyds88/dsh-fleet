@@ -1,0 +1,732 @@
+diff --git a/docs/subsystems/subagent.md b/docs/subsystems/subagent.md
+index 488ef66a..94d62668 100644
+--- a/docs/subsystems/subagent.md
++++ b/docs/subsystems/subagent.md
+@@ -171,9 +171,11 @@ interface ContinuableCreateRequest {
+  */
+ interface ContinuableCreateSpec {
+   /**
+-   * Completed-turn prefix of the parent's log to seed the child session with,
+-   * or absent for a fresh child. Same durable contract as
+-   * `CreateAgentOptions.seed`: contiguous from seq 0, lossless JSON, balanced.
++   * Prefix of the parent's log to seed the child session with, or absent for
++   * a fresh child. Same durable contract as `CreateAgentOptions.seed`:
++   * contiguous from seq 0, lossless JSON, balanced — a provider that wants to
++   * cut inside an open turn closes the tail with `buildForkSeed` rather than
++   * dropping the turn.
+    */
+   readonly seed?: readonly SessionEvent[]
+ }
+@@ -356,8 +358,8 @@ interface SubagentProvider {
+   /** The start-time features this provider supports (see {@link SubagentCapabilities}). */
+   readonly capabilities: SubagentCapabilities
+   /**
+-   * Whether the child sees the parent's completed-turn prefix. This is descriptive, not a
+-   * service-validated start capability: the model-facing tool derives truthful wording from it.
++   * Whether the child sees the parent's conversation up to the delegation. This is descriptive,
++   * not a service-validated start capability: the model-facing tool derives truthful wording from it.
+    * It says nothing about tool registration, injected services, or authority inheritance.
+    */
+   readonly inheritsParentContext: boolean
+diff --git a/docs/subsystems/subagent.zh.md b/docs/subsystems/subagent.zh.md
+index 8f1d6b74..0854e2ca 100644
+--- a/docs/subsystems/subagent.zh.md
++++ b/docs/subsystems/subagent.zh.md
+@@ -171,9 +171,11 @@ interface ContinuableCreateRequest {
+  */
+ interface ContinuableCreateSpec {
+   /**
+-   * Completed-turn prefix of the parent's log to seed the child session with,
+-   * or absent for a fresh child. Same durable contract as
+-   * `CreateAgentOptions.seed`: contiguous from seq 0, lossless JSON, balanced.
++   * Prefix of the parent's log to seed the child session with, or absent for
++   * a fresh child. Same durable contract as `CreateAgentOptions.seed`:
++   * contiguous from seq 0, lossless JSON, balanced — a provider that wants to
++   * cut inside an open turn closes the tail with `buildForkSeed` rather than
++   * dropping the turn.
+    */
+   readonly seed?: readonly SessionEvent[]
+ }
+@@ -356,8 +358,8 @@ interface SubagentProvider {
+   /** The start-time features this provider supports (see {@link SubagentCapabilities}). */
+   readonly capabilities: SubagentCapabilities
+   /**
+-   * Whether the child sees the parent's completed-turn prefix. This is descriptive, not a
+-   * service-validated start capability: the model-facing tool derives truthful wording from it.
++   * Whether the child sees the parent's conversation up to the delegation. This is descriptive,
++   * not a service-validated start capability: the model-facing tool derives truthful wording from it.
+    * It says nothing about tool registration, injected services, or authority inheritance.
+    */
+   readonly inheritsParentContext: boolean
+diff --git a/packages/subagent/subagent-fork-in-process/README.i18n.yaml b/packages/subagent/subagent-fork-in-process/README.i18n.yaml
+index f33da46d..82740ec2 100644
+--- a/packages/subagent/subagent-fork-in-process/README.i18n.yaml
++++ b/packages/subagent/subagent-fork-in-process/README.i18n.yaml
+@@ -3,14 +3,14 @@
+ # After editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write packages/subagent/subagent-fork-in-process/README.md
+ /:
+-  en: a4a75d423f70c4de
+-  zh: a60816274b877a80
++  en: 8a3f4acbff769bac
++  zh: 77da366adda015bd
+ /deepseek-ai-dsh-subagent-fork-in-process:
+   en: c3a79ac7f78122a5
+   zh: 6617b74690e8a8fb
+ /deepseek-ai-dsh-subagent-fork-in-process/summary:
+-  en: 97309f84ffe50ba9
+-  zh: ce4121b0823b7c7f
++  en: 1e2bc22bdbd4cc47
++  zh: c859496b5f014239
+ /deepseek-ai-dsh-subagent-fork-in-process/table-of-contents:
+   en: d152484eb41ac6b4
+   zh: 09388d293f9be9cb
+@@ -18,11 +18,11 @@
+   en: 71affc798c840594
+   zh: 258a2932c3c04841
+ /deepseek-ai-dsh-subagent-fork-in-process/use-this-package/when-to-choose-it:
+-  en: 05090df7cc302c6a
+-  zh: bd988019ba062e0a
++  en: c78c39acdf8e744c
++  zh: 20d290d0b366956e
+ /deepseek-ai-dsh-subagent-fork-in-process/use-this-package/seed-boundary:
+-  en: f4dfd1ce652f019b
+-  zh: 9bb75239491f07cc
++  en: f7fe90068d8f3452
++  zh: b72484f5b26b38d9
+ /deepseek-ai-dsh-subagent-fork-in-process/use-this-package/minimal-configuration:
+   en: d6058c358890c64c
+   zh: 93f8cc2b60975d42
+@@ -33,14 +33,14 @@
+   en: 6a0fe4b9cc780aaa
+   zh: 50cd69ceb8296827
+ /deepseek-ai-dsh-subagent-fork-in-process/understand-the-implementation/design-concept:
+-  en: 49c8725fee5330ed
+-  zh: 9050680f2011820a
++  en: ef5f16f984433093
++  zh: 85f8b003d80629e8
+ /deepseek-ai-dsh-subagent-fork-in-process/understand-the-implementation/source-map:
+   en: f1f45255fd9f71c1
+   zh: 9a3f016b8fe9754a
+ /deepseek-ai-dsh-subagent-fork-in-process/understand-the-implementation/run-flow:
+-  en: cca92ec964b4314b
+-  zh: edd8ecd4b59dbe8f
++  en: 3881d6637e8ae1f9
++  zh: e25416a2ae53f757
+ /deepseek-ai-dsh-subagent-fork-in-process/understand-the-implementation/lifecycle-binding:
+   en: b4dee8f57a537f0a
+   zh: 0c759154a69de3ba
+@@ -54,11 +54,11 @@
+   en: 91a5bd22001586e9
+   zh: 456e5bf20881a70d
+ /deepseek-ai-dsh-subagent-fork-in-process/model-experience/child-agent-history-and-envelope/what-the-model-sees:
+-  en: d4d51c5937bab67c
+-  zh: e7c07b5a38d68d8e
++  en: 13664be00096b9fd
++  zh: 901e2010d9303110
+ /deepseek-ai-dsh-subagent-fork-in-process/model-experience/child-agent-history-and-envelope/token-effect:
+-  en: 19b588baaa87126b
+-  zh: 7010e93bbe7d71ba
++  en: e4bff8d08e865ded
++  zh: e57aa379471a8ac7
+ /deepseek-ai-dsh-subagent-fork-in-process/model-experience/child-agent-history-and-envelope/kv-cache-effect:
+   en: 1e8f8bbab3052b39
+   zh: 1efff4da78d60ef9
+@@ -75,8 +75,8 @@
+   en: f5d5f97a153f7c70
+   zh: 3d6bc05b9eadfbc2
+ /deepseek-ai-dsh-subagent-fork-in-process/known-limitations-and-deferred-work:
+-  en: 193d3fea02c7ec47
+-  zh: 8a616bcfb97a99c1
++  en: 190c1c32232babb1
++  zh: 73af0dabb249b1db
+ /deepseek-ai-dsh-subagent-fork-in-process/known-limitations-and-deferred-work/dev-note:
+   en: e67f633dc6fe7773
+   zh: 3bb0c20c93f16f98
+diff --git a/packages/subagent/subagent-fork-in-process/README.md b/packages/subagent/subagent-fork-in-process/README.md
+index 556653b0..ba242b9f 100644
+--- a/packages/subagent/subagent-fork-in-process/README.md
++++ b/packages/subagent/subagent-fork-in-process/README.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "In-process fork subagent backend for users and maintainers choosing, configuring, or debugging children seeded with the parent's completed turns."
++description: "In-process fork subagent backend for users and maintainers choosing, configuring, or debugging children seeded with the parent's conversation."
+ kind: "package-reference"
+ ---
+ 
+@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
+ 
+ ## Summary
+ 
+-`dsh-subagent-fork-in-process` is an in-process subagent backend that seeds each child with the parent's completed conversation turns: the child sees every finished turn and none of the in-flight one, so follow-up work builds on the conversation without duplicating it. A delegation tool reaches it under the `fork` provider name, and its behavior matches the spawn backend except for the session seed. Choose it when a subtask continues this conversation; choose spawn when the child must stand alone. The seed is a one-time snapshot taken at fork time: later parent turns never reach the child.
++`dsh-subagent-fork-in-process` is an in-process subagent backend that seeds each child with the parent's conversation up to the point where the delegation was requested, so follow-up work builds on the conversation without duplicating it. A delegation tool reaches it under the `fork` provider name, and its behavior matches the spawn backend except for the session seed. Choose it when a subtask continues this conversation; choose spawn when the child must stand alone. The seed is a one-time snapshot taken at fork time: later parent turns never reach the child.
+ 
+ ## Table of Contents
+ 
+@@ -29,11 +29,11 @@ Mount this backend when delegated work must build on the parent's conversation.
+ 
+ ### When to choose it
+ 
+-Choose fork when the child needs the conversation's completed turns — a follow-up analysis, a review, a continuation. Choose spawn when the child should start clean, or an out-of-process backend when the child must not share this process. The seed carries conversation history only: the child still gets a fresh tool scope and none of the parent's authority.
++Choose fork when the child needs the conversation so far — a follow-up analysis, a review, a continuation. Choose spawn when the child should start clean, or an out-of-process backend when the child must not share this process. The seed carries conversation history only: the child still gets a fresh tool scope and none of the parent's authority.
+ 
+ ### Seed boundary
+ 
+-The seed ends at the parent's last completed turn. A parent's current tool-calling turn is still open when a subagent starts, so that in-flight turn is never included; before the first completed turn the seed is empty and the child behaves like a fresh spawn.
++The seed reaches the parent's log tail, minus the assistant message that requested this delegation. A delegation starts inside an open turn, and that turn is closed into a replayable shape rather than dropped: the child inherits the user request that led to the delegation, while the parent's own tool call is cut away so the child is never told about an unresolved delegation it cannot see. A compacted span reaches the child as the summary, not as the original tool output.
+ 
+ ### Minimal configuration
+ 
+@@ -69,7 +69,7 @@ This section explains the design decisions behind the backend and where the beha
+ 
+ ### Design concept
+ 
+-This backend supplies the balanced completed-turn prefix of the parent log as the child session seed. The subagent service records the inherited range so results contain only the child’s own output.
++This backend supplies the parent log up to the delegation, closed by `buildForkSeed` into a balanced seed, as the child session seed. The subagent service records the inherited range so results contain only the child’s own output.
+ 
+ ### Source map
+ 
+@@ -79,7 +79,7 @@ This backend supplies the balanced completed-turn prefix of the parent log as th
+ 
+ ### Run flow
+ 
+-`prepareContinuable()` captures the parent’s completed-turn prefix once at creation. `startActivation()` creates the child with that seed, and the subagent service composes the inherited preset and optional structured output. The provider advertises agent options, output, and depth capabilities; independent preset selection is unsupported.
++`prepareContinuable()` captures the parent’s prefix once at creation. `startActivation()` creates the child with that seed, and the subagent service composes the inherited preset and optional structured output. The provider advertises agent options, output, and depth capabilities; independent preset selection is unsupported.
+ 
+ ### Lifecycle binding
+ 
+@@ -109,11 +109,11 @@ Read these pages when the package-level contract is not enough; they move from t
+ 
+ #### What the model sees
+ 
+-The child receives the parent's balanced completed-turn prefix, then the new task content verbatim. It joins the parent's preset revision, which supplies persona and tools. Parent agent-local restrictions are not copied. An optional structured-output request adds a child-only tool; the parent's current in-flight turn is excluded.
++The child receives the parent's conversation up to the delegation as a balanced seed, then the new task content verbatim. It joins the parent's preset revision, which supplies persona and tools. Parent agent-local restrictions are not copied. An optional structured-output request adds a child-only tool; the delegating request itself is excluded.
+ 
+ #### Token effect
+ 
+-Forking duplicates retained completed history into the child's request, which then accumulates its own tokens independently. A first-turn fork has no inherited history.
++Forking duplicates retained history into the child's request, which then accumulates its own tokens independently. A first-turn fork inherits the request but no completed turn.
+ 
+ #### KV Cache effect
+ 
+@@ -140,7 +140,8 @@ Append-only; newly visible content follows the reusable request prefix and does
+ 
+ These limits define when the backend is the wrong choice; they are current package constraints.
+ 
+-- **The seed is a one-time snapshot** — the child sees the parent's completed turns as of the fork and nothing the parent logs afterwards; there is no live context sharing.
++- **The seed is a one-time snapshot** — the child sees the parent's conversation as of the fork and nothing the parent logs afterwards; there is no live context sharing.
++- **The delegating request is not inherited** — the cut stops before the assistant message that holds the pending delegation call, so the child sees the task context without seeing the parent's instruction to run it.
+ - **Prefix reuse depends on matching request inputs** — parent and child messaging definitions match byte for byte; structured output, generated-SDK, route changes, or restored historical overrides can still break equality. Rationale: the [cache-preserving fork Agent Note](../../../.agents/notes/implemented/architecture/2026-08-10-fork-children-stay-one-shot.md).
+ - **Shipped fork tools do not expose child LLM route selection** — they inherit the parent's provider and model so the copied history remains eligible for KV Cache reuse. Route selection stays disabled until a change can preserve reuse or expose a bounded recomputation cost.
+ 
+diff --git a/packages/subagent/subagent-fork-in-process/README.zh.md b/packages/subagent/subagent-fork-in-process/README.zh.md
+index 7d232a1e..675726e4 100644
+--- a/packages/subagent/subagent-fork-in-process/README.zh.md
++++ b/packages/subagent/subagent-fork-in-process/README.zh.md
+@@ -1,5 +1,5 @@
+ ---
+-description: "面向用户与维护者的进程内 fork subagent 后端说明，用于选择、配置或排查以父级已完成轮次作初始内容的子 agent（智能体）。"
++description: "面向用户与维护者的进程内 fork subagent 后端说明，用于选择、配置或排查以父级对话作初始内容的子 agent（智能体）。"
+ kind: "package-reference"
+ ---
+ 
+@@ -9,7 +9,7 @@ kind: "package-reference"
+ 
+ ## 概述
+ 
+-`dsh-subagent-fork-in-process` 是一个进程内 subagent 后端：它以父级已完成的对话轮次作为每个子 agent 的初始内容——子 agent 能看到所有已完成轮次，但看不到进行中的轮次，因此后续工作可以在对话基础上继续，而无需重复提供对话内容。委派工具以 `fork` 提供方名称找到它，其行为与 spawn 后端一致，唯一差异是会话初始内容。当子任务延续当前对话时选择它；当子 agent 必须独立运行时选择 spawn。初始内容是 fork 时的一次性快照：此后父级记录的任何内容都不会到达子 agent。
++`dsh-subagent-fork-in-process` 是一个进程内 subagent 后端：它以父级对话截至本次委派请求处的内容作为每个子 agent 的初始内容，因此后续工作可以在对话基础上继续，而无需重复提供对话内容。委派工具以 `fork` 提供方名称找到它，其行为与 spawn 后端一致，唯一差异是会话初始内容。当子任务延续当前对话时选择它；当子 agent 必须独立运行时选择 spawn。初始内容是 fork 时的一次性快照：此后父级记录的任何内容都不会到达子 agent。
+ 
+ ## 目录
+ 
+@@ -29,11 +29,11 @@ kind: "package-reference"
+ 
+ ### 何时选择
+ 
+-当子 agent 需要对话的已完成轮次时——后续分析、审查、延续——选择 fork。当子 agent 应全新开始时选择 spawn；当子 agent 不能共享本进程时选择进程外后端。初始内容只传递对话历史：子 agent 仍获得全新的工具作用域，且不继承父级的任何权限。
++当子 agent 需要此前的对话内容时——后续分析、审查、延续——选择 fork。当子 agent 应全新开始时选择 spawn；当子 agent 不能共享本进程时选择进程外后端。初始内容只传递对话历史：子 agent 仍获得全新的工具作用域，且不继承父级的任何权限。
+ 
+ ### 初始内容边界
+ 
+-初始内容止于父级最后一个已完成的轮次。subagent 启动时，父级当前的工具调用轮次仍在进行，因此该进行中的轮次绝不会被包含；在第一个已完成轮次之前，初始内容为空，子 agent 的行为与全新 spawn 相同。
++初始内容到达父级日志末尾，但减去发起本次委派的那条 assistant 消息。委派总是在一个进行中的轮次里发起，该轮次会被收口成可重放的形状而不是被丢弃：子 agent 继承引出本次委派的用户请求，而父级自己的工具调用被切掉，从而不会被告知一个它看不到结果的未决委派。被压缩过的片段以摘要形式到达子 agent，而不是原始工具输出。
+ 
+ ### 最小配置
+ 
+@@ -69,7 +69,7 @@ kind: "package-reference"
+ 
+ ### 设计理念
+ 
+-本后端把父级日志中已配平的已完成轮次前缀作为子会话初始内容。subagent 服务记录继承范围，因此结果只包含子级自己的输出。
++本后端把父级日志截至委派处、经 `buildForkSeed` 收口成配平形状的前缀作为子会话初始内容。subagent 服务记录继承范围，因此结果只包含子级自己的输出。
+ 
+ ### 源码地图
+ 
+@@ -79,7 +79,7 @@ kind: "package-reference"
+ 
+ ### 运行流程
+ 
+-`prepareContinuable()` 在创建时捕获一次父级已完成轮次前缀。`startActivation()` 以此创建子 agent，由 subagent 服务组装继承的 preset 和可选的结构化输出。提供方声明 agent 选项、输出及深度能力；不支持独立选择 preset。
++`prepareContinuable()` 在创建时捕获一次父级前缀。`startActivation()` 以此创建子 agent，由 subagent 服务组装继承的 preset 和可选的结构化输出。提供方声明 agent 选项、输出及深度能力；不支持独立选择 preset。
+ 
+ ### 生命周期绑定
+ 
+@@ -109,11 +109,11 @@ kind: "package-reference"
+ 
+ #### 模型看到什么
+ 
+-子 agent 先接收由父级已配平的已完成轮次构成的前缀，再逐字接收新的任务内容。它加入父级的 preset 代际，由 preset 提供 persona 和工具。父级 agent 局部限制不会被复制。可选的结构化输出请求会添加仅属于子 agent 的工具；父级当前进行中的轮次会被排除。
++子 agent 先接收父级对话截至委派处的配平前缀，再逐字接收新的任务内容。它加入父级的 preset 代际，由 preset 提供 persona 和工具。父级 agent 局部限制不会被复制。可选的结构化输出请求会添加仅属于子 agent 的工具；发起委派的那条请求本身会被排除。
+ 
+ #### Token 影响
+ 
+-fork 会把保留的已完成历史复制到子 agent 的请求中，子 agent 随后独立累积自己的 token。首轮 fork 没有继承历史。
++fork 会把保留的对话历史复制到子 agent 的请求中，子 agent 随后独立累积自己的 token。首轮 fork 继承用户请求，但没有任何已完成的轮次。
+ 
+ #### KV Cache 影响
+ 
+@@ -140,7 +140,8 @@ fork 会把保留的已完成历史复制到子 agent 的请求中，子 agent 
+ 
+ 这些限制说明何时选择该后端是错误的；它们是当前包约束。
+ 
+-- **初始内容是一次性快照**——子 agent 只能看到 fork 时父级已完成的轮次，看不到父级此后记录的任何内容；不会实时共享上下文。
++- **初始内容是一次性快照**——子 agent 只能看到 fork 时的父级对话，看不到父级此后记录的任何内容；不会实时共享上下文。
++- **发起委派的请求不会被继承**——切点停在携带未决委派调用的那条 assistant 消息之前，因此子 agent 看到任务上下文，但看不到父级要求它执行的那条指令。
+ - **前缀复用取决于请求输入是否匹配**——父级与子级的消息定义都逐字节相同；结构化输出、生成 SDK、路由变化或恢复的历史覆盖仍可破坏相等性。理由见[保持 fork 缓存的 Agent Note](../../../.agents/notes/implemented/architecture/2026-08-10-fork-children-stay-one-shot.zh.md)。
+ - **随附 fork 工具不公开子级 LLM（大语言模型）路由选择**——它们继承父级提供方与模型，使复制的历史仍有资格复用 KV Cache。在某项改动能保留复用或公开有界重算成本前，路由选择保持禁用。
+ 
+diff --git a/packages/subagent/subagent-fork-in-process/src/index.ts b/packages/subagent/subagent-fork-in-process/src/index.ts
+index 38181395..0448b0fe 100644
+--- a/packages/subagent/subagent-fork-in-process/src/index.ts
++++ b/packages/subagent/subagent-fork-in-process/src/index.ts
+@@ -1,14 +1,17 @@
+ /**
+  * The in-process FORK subagent backend: registers a {@link SubagentProvider} on
+- * `ctx.subagents` that runs each child as a child {@link Agent} SEEDED with a prefix of the
++ * `ctx.subagents` that runs each child as a child {@link Agent} SEEDED with a copy of the
+  * parent's session log — so the child inherits the parent's conversation context instead of
+- * starting fresh. The seed ends at the last `turn/end`: the current tool-call turn is
+- * unbalanced and cannot be replayed as a valid child session.
++ * starting fresh. The cut is the parent's current log tail, closed into a replayable shape by
++ * `buildForkSeed`: a fork made inside an open turn therefore still inherits that turn, with the
++ * parent's unanswered tool calls carried as explicitly `forked` results instead of being dropped.
+  * @module @deepseek-ai/dsh-subagent-fork-in-process
+  */
+ 
+ import type { Context } from '@deepseek-ai/cordis'
+ import z from '@deepseek-ai/schemastery'
++import { buildForkSeed } from '@deepseek-ai/dsh-session/fork'
++import { SessionSeq } from '@deepseek-ai/dsh-session'
+ import type { SessionEvent } from '@deepseek-ai/dsh-session'
+ import type { Agent } from '@deepseek-ai/dsh-agent'
+ import type {
+@@ -36,20 +39,75 @@ export const Config: z<Config> = z.object({
+ })
+ 
+ /**
+- * The balanced completed-turn prefix of `parent`'s log: every event up to and including the
+- * last `turn/end`. The in-flight turn is excluded; before any completed turn the child starts
+- * fresh. Because live sequence numbers equal array indexes, the result remains a valid seed
+- * beginning at sequence zero.
+- * @param parent - the agent whose session log to slice.
+- * @returns the seed events, contiguous from seq 0; empty when no turn has completed.
++ * Where the parent's log stops being safe to hand to a child.
++ *
++ * The parent's log currently ends inside an open turn — the one that asked for the delegation.
++ * Copying its tail verbatim would hand the child the parent's own `subagent_fork` tool call,
++ * which `buildForkSeed` then closes as "outcome unknown, it may have had side effects": the
++ * child would be told about a delegation it cannot see the result of, and a careful child may
++ * retry it. So the cut moves back to just before the first assistant message that carries a
++ * tool call with no recorded result yet.
++ *
++ * Everything before that point is kept, including the user message that asked for the
++ * delegation: that is the task's context and the whole reason a fork is seeded at all. What the
++ * child does not see is the parent's request to run it — which is also the truthful statement
++ * about what it inherits.
++ * @param events - the parent's log, contiguous from seq 0.
++ * @returns the inclusive seq to copy; the log's last seq when the tail holds no pending call.
+  */
+-function completedTurnPrefix(parent: Agent): SessionEvent[] {
++function forkCut(events: readonly SessionEvent[]): number {
++  const tail = events.at(-1)
++  if (tail === undefined) return -1
++  // The open turn is the last one; a balanced log needs no cut beyond its own tail.
++  let openTurn: number | undefined
++  for (let index = events.length - 1; index >= 0; index -= 1) {
++    const event = events[index]
++    if (event?.type === 'turn/end') break
++    if (event?.type === 'turn/start') {
++      openTurn = event.data.turn
++      break
++    }
++  }
++  if (openTurn === undefined) return Number(tail.seq)
++
++  // Results the open turn already recorded, so a call is pending only when it has none.
++  const answered = new Set<string>()
++  for (const event of events) {
++    if (event.type === 'tool/result') answered.add(event.data.message.source.callId)
++  }
++  for (let index = events.length - 1; index >= 0; index -= 1) {
++    const event = events[index]
++    if (event === undefined) break
++    if (event.type === 'turn/start' && event.data.turn === openTurn) break
++    if (event.type !== 'assistant/message' || event.data.turn !== openTurn) continue
++    const pending = event.data.message.content.some(block => block.type === 'tool-call' && !answered.has(block.id))
++    if (pending) return Number(event.seq) - 1
++  }
++  return Number(tail.seq)
++}
++
++/**
++ * The parent's log up to {@link forkCut}, closed into a replayable child seed.
++ *
++ * The earlier rule cut at the last `turn/end` and dropped everything after it, because a seed
++ * has to be balanced and the child Session constructor rejects one that ends inside an open
++ * turn. That was too strict for how delegation is used: a fork started from a turn that has not
++ * finished yet — the ordinary case, the Lead delegates mid-turn — inherited nothing at all, so
++ * the child answered that it could not see the conversation while the tool had promised it the
++ * completed turns. `buildForkSeed` already closes an open tail with cause-specific synthetic
++ * results and a `forked` `turn/end`, so the cut does not have to be a `turn/end` at all.
++ *
++ * A fork made from a completed turn is unaffected: the tail is balanced and `buildForkSeed`
++ * only appends its inherited marker.
++ * @param parent - the agent whose session log to copy.
++ * @returns seed events, contiguous from seq 0; empty when the parent has no copyable events.
++ */
++function forkPrefix(parent: Agent): SessionEvent[] {
+   // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+   const events = parent.session.snapshotEvents()
+-  const lastEnd = events.findLast(e => e.type === 'turn/end')
+-  if (lastEnd === undefined) return []
+-  // seq === array index (the append contract), so slice up to and including it.
+-  return events.slice(0, lastEnd.seq + 1)
++  const cut = forkCut(events)
++  if (cut < 0) return []
++  return buildForkSeed(events, SessionSeq(cut))
+ }
+ 
+ /**
+@@ -64,7 +122,7 @@ class ForkInProcessProvider implements SubagentProvider {
+     outputSchema: true,
+     depthLimit: true,
+   }
+-  // Context contract: a forked child IS seeded with the parent's completed-turn prefix.
++  // Context contract: a forked child IS seeded with the parent's log.
+   readonly inheritsParentContext = true
+ 
+   constructor(readonly name: string) {}
+@@ -73,7 +131,7 @@ class ForkInProcessProvider implements SubagentProvider {
+     // The fork prefix is captured ONCE, at creation: it becomes part of the
+     // child's own durable transcript, so a later cold resume replays that
+     // prefix instead of re-forking the parent's newer history.
+-    const seed = completedTurnPrefix(request.parent)
++    const seed = forkPrefix(request.parent)
+     return Promise.resolve(seed.length > 0 ? { seed } : {})
+   }
+ }
+diff --git a/packages/subagent/subagent-fork-in-process/tests/subagent-fork-in-process.spec.ts b/packages/subagent/subagent-fork-in-process/tests/subagent-fork-in-process.spec.ts
+index 601444e5..ab315b32 100644
+--- a/packages/subagent/subagent-fork-in-process/tests/subagent-fork-in-process.spec.ts
++++ b/packages/subagent/subagent-fork-in-process/tests/subagent-fork-in-process.spec.ts
+@@ -59,23 +59,38 @@ describe('dsh-subagent-fork-in-process', () => {
+     await run.dispose()
+   })
+ 
+-  it('forks an UNSEEDED (fresh) child when the parent has no completed turn', async () => {
+-    // The parent has never completed a turn → empty prefix → the provider omits
+-    // the seed → the child runs fresh. Exercises the `seed.length > 0` false arm.
+-    const { ctx, parent } = await setup([textResponse('fresh child')])
++  it('forks a SEEDED child on the first turn, inheriting the request that asked for it', async () => {
++    // The parent has never completed a turn, but it has a request and an open step: a fork made
++    // here must still inherit that request. Cutting at the last `turn/end` left nothing to copy
++    // and the child answered that it could not see the conversation, while the tool had promised
++    // it the context.
++    const { ctx, parent } = await setup(['hang', textResponse('fresh child')])
++    parent.followup(createUserMessage({ content: [{ type: 'text', text: 'the parent request' }], source: { kind: 'user' } }))
++    await new Promise(r => setTimeout(r, 20))
+     const run = await start(ctx, 'fork', { prompt: [{ type: 'text', text: 'child q' }], parent })
+     const result = await run.result
+     expect(result.stopReason).toBe('completed')
+     expect(text(result.output)).toBe('fresh child')
+     const child = run.localAgent
+-    // Only the child's own turn — no seeded parent turns.
+-    expect(child.session.snapshotEvents().filter(e => e.type === 'turn/end')).toHaveLength(1)
+-    expect(child.session.header.isSeeded).toBe(false)
+-    expect(child.session.inheritedEventCount).toBe(0)
++    expect(child.session.header.isSeeded).toBe(true)
++    expect(child.session.inheritedEventCount).toBeGreaterThan(0)
++    // The seeded prefix carries the parent's request, and no synthetic tool result: the parent's
++    // own delegation call is cut away rather than closed as "outcome unknown".
++    const seeded = child.session.snapshotEvents().slice(0, child.session.inheritedEventCount)
++    const seededUser = seeded.filter(e => e.type === 'user/message')
++    expect(seededUser.some(e => JSON.stringify(e.data).includes('the parent request'))).toBe(true)
++    expect(seeded.some(e => e.type === 'tool/result')).toBe(false)
++    // `buildForkSeed` puts its inherited marker after the copied prefix and then closes the open
++    // turn, so the seed's last event is the synthetic `turn/end` for the cut turn.
++    expect(seeded.some(e => e.type === 'session/end-seed' && e.data.inherited === true)).toBe(true)
++    const closer = seeded.at(-1)
++    expect(closer?.type).toBe('turn/end')
++    // The closer is a `forked` end, not an interruption: the parent's turn was cut by this fork.
++    expect(closer?.type === 'turn/end' ? closer.data.reason : undefined).toEqual({ kind: 'forked' })
+     await run.dispose()
+   })
+ 
+-  it('seeds every completed parent turn through the last turn/end', async () => {
++  it('seeds every completed parent turn, plus the inherited marker', async () => {
+     const { ctx, parent } = await setup([textResponse('first'), textResponse('second'), textResponse('child')])
+     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'q1' }], source: { kind: 'user' } }))
+     await parent.whenIdle()
+@@ -87,13 +102,16 @@ describe('dsh-subagent-fork-in-process', () => {
+     await run.result
+     const child = run.localAgent
+     expect(child.session.header.isSeeded).toBe(true)
+-    expect(child.session.inheritedEventCount).toBe(parentPrefixLen)
++    // The parent's whole log, then `buildForkSeed`'s inherited marker. The parent was idle, so
++    // the cut landed on a `turn/end` and no synthetic closer was needed.
++    expect(child.session.inheritedEventCount).toBe(parentPrefixLen + 1)
+     expect(child.session.snapshotEvents().slice(0, parentPrefixLen).at(-1)?.type).toBe('turn/end')
+     expect(child.session.snapshotEvents().slice(0, parentPrefixLen).filter(e => e.type === 'turn/end')).toHaveLength(2)
++    expect(child.session.snapshotEvents()[parentPrefixLen]?.type).toBe('session/end-seed')
+     await run.dispose()
+   })
+ 
+-  it('seeds the child with the parent\'s completed-turn prefix (child inherits context)', async () => {
++  it('seeds the child with the parent\'s history (child inherits context)', async () => {
+     const { ctx, parent } = await setup([textResponse('parent answer'), textResponse('child answer')])
+     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'parent question' }], source: { kind: 'user' } }))
+     await parent.whenIdle()
+@@ -115,7 +133,7 @@ describe('dsh-subagent-fork-in-process', () => {
+     // Logical metadata records lineage while Session state retains the exact
+     // inherited cut for reload and replay.
+     expect(child.session.header.isSeeded).toBe(true)
+-    expect(child.session.inheritedEventCount).toBe(parentPrefixLen)
++    expect(child.session.inheritedEventCount).toBe(parentPrefixLen + 1)
+     await run.dispose()
+   })
+ 
+@@ -130,17 +148,25 @@ describe('dsh-subagent-fork-in-process', () => {
+     parent.followup(createUserMessage({ content: [{ type: 'text', text: 'q2' }], source: { kind: 'user' } }))
+     await new Promise(r => setTimeout(r, 20)) // let the hanging turn open
+ 
+-    // Forking now must NOT throw (the open second turn is excluded from the seed).
++    // Forking now must NOT throw: the open second turn is closed into a replayable shape by
++    // `buildForkSeed` rather than dropped, so the child inherits the request that is still open.
+     const run = await start(ctx, 'fork', { prompt: [{ type: 'text', text: 'child q' }], parent })
+     const result = await run.result
+     expect(result.stopReason).toBe('completed')
+     expect(text(result.output)).toBe('child')
+ 
+     const child = run.localAgent
+-    // The child's seed has exactly the ONE completed parent turn (the open one excluded).
+-    const seedTurnEnds = child.session.snapshotEvents().filter(e => e.type === 'turn/end')
+-    // 1 from the seeded parent turn + 1 from the child's own completed turn.
+-    expect(seedTurnEnds.length).toBe(2)
++    const events = child.session.snapshotEvents()
++    const seedTurnEnds = events.filter(e => e.type === 'turn/end')
++    // 1 from the seeded first parent turn + 1 synthetic closer for the open second turn + 1 from
++    // the child's own completed turn.
++    expect(seedTurnEnds.length).toBe(3)
++    // The synthetic closer says the turn was cut by a fork, not that it was interrupted.
++    expect(seedTurnEnds[1]?.data.reason).toEqual({ kind: 'forked' })
++    // The open turn's request is inside the seed; the parent's delegation call is not.
++    const seeded = events.slice(0, child.session.inheritedEventCount)
++    expect(seeded.some(e => e.type === 'user/message' && JSON.stringify(e.data).includes('q2'))).toBe(true)
++    expect(seeded.some(e => e.type === 'tool/result')).toBe(false)
+ 
+     parent.cancel({ kind: 'user' })
+     await run.dispose()
+@@ -204,13 +230,14 @@ describe('dsh-subagent-fork-in-process', () => {
+     expect(ctx.subagents.getProvider('fork')).toBeUndefined()
+   })
+ 
+-  it('contributes the completed-turn prefix as a continuable child\'s seed', async () => {
++  it('contributes the conversation up to the delegation as a continuable child\'s seed', async () => {
+     const { ctx, parent } = await setup([textResponse('parent turn'), textResponse('child answer')])
+     const provider = ctx.subagents.getProvider('fork')!
+     const signal = new AbortController().signal
+ 
+-    // Before any completed parent turn there is nothing to inherit, so the
+-    // child starts fresh rather than carrying an empty seed.
++    // A parent with no events at all has nothing to copy, so the child starts fresh rather than
++    // carrying an empty seed. (A parent that has merely not COMPLETED a turn does have a seed —
++    // that is the mid-turn case covered by the tests above.)
+     const fresh = await provider.prepareContinuable!({
+       cwd: process.cwd(),
+       sessionId: SessionId('continuable-fresh'),
+@@ -229,9 +256,12 @@ describe('dsh-subagent-fork-in-process', () => {
+       signal,
+     })
+     expect(seeded.seed).toBeDefined()
++    // `buildForkSeed` inserts its inherited marker, then closes any open tail: the last event is
++    // the closer when the cut landed inside a turn, and the marker when the cut was already
++    // balanced. Either shape replays as a valid child log.
+     const lastSeeded = seeded.seed!.at(-1)
+-    // The seed ends at a completed turn, so it replays as a valid child log.
+-    expect(lastSeeded?.type).toBe('turn/end')
++    expect(['turn/end', 'session/end-seed']).toContain(lastSeeded?.type)
++    expect(seeded.seed!.some(event => event.type === 'session/end-seed')).toBe(true)
+     expect(seeded.seed!.map(event => event.seq)).toEqual(seeded.seed!.map((_event, index) => index))
+   })
+ 
+diff --git a/packages/subagent/subagent/README.i18n.yaml b/packages/subagent/subagent/README.i18n.yaml
+index d6864b87..8f2bc471 100644
+--- a/packages/subagent/subagent/README.i18n.yaml
++++ b/packages/subagent/subagent/README.i18n.yaml
+@@ -51,7 +51,7 @@
+   en: 5923a61c09d9ae04
+   zh: 15202a92872a11e9
+ /deepseek-ai-dsh-subagent/understand-the-implementation/provider-preparation-and-structured-output:
+-  en: 61cddba23f4e7d1c
++  en: 6fca3b234bb921a4
+   zh: 052c8331a747403f
+ /deepseek-ai-dsh-subagent/understand-the-implementation/activation-settlement:
+   en: ba22f6dd5f15f405
+diff --git a/packages/subagent/subagent/README.md b/packages/subagent/subagent/README.md
+index a212a1ff..222d4c73 100644
+--- a/packages/subagent/subagent/README.md
++++ b/packages/subagent/subagent/README.md
+@@ -118,7 +118,7 @@ This section explains how the service is built and where the observable behavior
+ 
+ ### Provider preparation and structured output
+ 
+-The service validates requested capabilities and binds execution to that exact provider instance before creation. The manager receives the bound operation rather than a provider lookup. Local providers supply only `prepareContinuable()`: spawn returns fresh state and fork returns a completed-turn seed. The manager captures the parent model settings, delegated permissions, and composition before creating the child. External providers retain `start()` as a transport adapter and retain their own permission systems. The common manager owns their published execution. Structured tools, instructions, validation, and terminal guards belong to one local activation; they are not persisted as resume configuration. The child can submit its structured result after consuming accepted input. Work that depends on descendants must explicitly wait for their results. Staging a result closes further input through tool-result policy and any enclosing PTC execution; a rejected result reopens input, while a committed result keeps it closed. Later cold resume has no structured schema.
++The service validates requested capabilities and binds execution to that exact provider instance before creation. The manager receives the bound operation rather than a provider lookup. Local providers supply only `prepareContinuable()`: spawn returns fresh state and fork returns the parent prefix up to the delegation, closed by `buildForkSeed`. The manager captures the parent model settings, delegated permissions, and composition before creating the child. External providers retain `start()` as a transport adapter and retain their own permission systems. The common manager owns their published execution. Structured tools, instructions, validation, and terminal guards belong to one local activation; they are not persisted as resume configuration. The child can submit its structured result after consuming accepted input. Work that depends on descendants must explicitly wait for their results. Staging a result closes further input through tool-result policy and any enclosing PTC execution; a rejected result reopens input, while a committed result keeps it closed. Later cold resume has no structured schema.
+ 
+ External providers mint a fresh `SubagentRun.id` for each execution in the runtime's shared Session id namespace, across all parents and providers. A collision with a resident Agent, Session, or activation rejects startup with `DUPLICATE_CHILD` and disposes the new external handle without replacing the existing execution.
+ 
+diff --git a/packages/subagent/subagent/src/types.ts b/packages/subagent/subagent/src/types.ts
+index 1786ed8e..ce5536f4 100644
+--- a/packages/subagent/subagent/src/types.ts
++++ b/packages/subagent/subagent/src/types.ts
+@@ -225,9 +225,11 @@ export interface ContinuableCreateRequest {
+  */
+ export interface ContinuableCreateSpec {
+   /**
+-   * Completed-turn prefix of the parent's log to seed the child session with,
+-   * or absent for a fresh child. Same durable contract as
+-   * `CreateAgentOptions.seed`: contiguous from seq 0, lossless JSON, balanced.
++   * Prefix of the parent's log to seed the child session with, or absent for
++   * a fresh child. Same durable contract as `CreateAgentOptions.seed`:
++   * contiguous from seq 0, lossless JSON, balanced — a provider that wants to
++   * cut inside an open turn closes the tail with `buildForkSeed` rather than
++   * dropping the turn.
+    */
+   readonly seed?: readonly SessionEvent[]
+ }
+@@ -324,9 +326,9 @@ export interface SubagentProvider {
+   /** The start-time features this provider supports (see {@link SubagentCapabilities}). */
+   readonly capabilities: SubagentCapabilities
+   /**
+-   * Whether the child sees the parent's completed-turn prefix. This is descriptive, not a
+-   * service-validated start capability: the model-facing tool derives truthful wording from it.
+-   * It says nothing about tool registration, injected services, or authority inheritance.
++   * Whether the child sees the parent's conversation up to the delegation. This is descriptive,
++   * not a service-validated start capability: the model-facing tool derives truthful wording from
++   * it. It says nothing about tool registration, injected services, or authority inheritance.
+    */
+   readonly inheritsParentContext: boolean
+   /**
+diff --git a/packages/subagent/subagent/tests/continuation-inheritance.spec.ts b/packages/subagent/subagent/tests/continuation-inheritance.spec.ts
+index 7e0ae835..66d6b192 100644
+--- a/packages/subagent/subagent/tests/continuation-inheritance.spec.ts
++++ b/packages/subagent/subagent/tests/continuation-inheritance.spec.ts
+@@ -150,8 +150,11 @@ describe('continuable policy inheritance', () => {
+     const started = await starting
+     await waitNoActivation(ctx, started.childId)
+     const loaded = await loadStoredSession(ctx.sessionPersistence, started.childId)
+-    expect(loaded.events.filter(event => event.type === 'permission/preset')).toMatchObject([
+-      { data: { preset: seedPreset } },
++    // The seed now reaches the parent's tail, so the parent's own preset history is inherited.
++    // What this test is about is the child's OWN record: the delegation snapshot is appended
++    // after the inherited prefix, so it is the one that wins the fold.
++    expect(loaded.inheritedEventCount).toBeGreaterThan(0)
++    expect(loaded.events.slice(loaded.inheritedEventCount).filter(event => event.type === 'permission/preset')).toMatchObject([
+       { data: { preset } },
+     ])
+   })
+@@ -302,10 +305,17 @@ describe('continuable policy inheritance', () => {
+ 
+     const loaded = await loadStoredSession(ctx.sessionPersistence, started.childId)
+     expect(loaded.inheritedEventCount).toBeGreaterThan(0)
+-    expect(loaded.events.filter(event => event.type === 'sandbox/mode')).toMatchObject([
++    // The seed now reaches the parent's tail, so BOTH of the parent's switches are inherited
++    // (`workspace-write` inside the turn, `read-only` after it). The delegation snapshot is
++    // appended after the inherited prefix, so it is still the record that wins the fold.
++    const modes = loaded.events.filter(event => event.type === 'sandbox/mode')
++    expect(modes).toMatchObject([
+       { data: { mode: 'workspace-write' } },
++      { data: { mode: 'read-only' } },
+       { data: { mode: 'read-only', source: 'delegation' } },
+     ])
++    expect(loaded.events.slice(loaded.inheritedEventCount).filter(event => event.type === 'sandbox/mode'))
++      .toMatchObject([{ data: { mode: 'read-only', source: 'delegation' } }])
+     expect(foldedSandboxMode(ctx, started.childId, loaded.events)).toBe('read-only')
+   })
+ })
+diff --git a/packages/subagent/tool-subagent/src/index.ts b/packages/subagent/tool-subagent/src/index.ts
+index 5f2f0893..48dbd2d6 100644
+--- a/packages/subagent/tool-subagent/src/index.ts
++++ b/packages/subagent/tool-subagent/src/index.ts
+@@ -105,11 +105,14 @@ export const Config: z<Config> = z.object({
+  * Model-facing wording from the provider's conversation-history descriptor
+  * ({@link SubagentProvider.inheritsParentContext}).
+  * A fresh child needs a standalone prompt; a forked child already sees the
+- * conversation's completed turns — telling the model to restate everything
+- * (or, worse, that the child "does not see this conversation") would be false
+- * for a fork.
++ * conversation up to the point where this delegation was requested, so telling
++ * the model to restate everything (or, worse, that the child "does not see this
++ * conversation") would be false for a fork. It is equally wrong to promise more
++ * than the seed holds: the child does not see the request that asks for the
++ * delegation, and a span the parent compacted reaches it as the summary, not as
++ * the original tool output.
+  * @param inheritsConversation - whether the child's conversation is seeded
+- *   with the parent's completed turns; this says nothing about tool, service,
++ *   with the parent's history; this says nothing about tool, service,
+  *   scope, or authority inheritance.
+  * @returns the tool `description` and the `prompt` parameter description.
+  */
+@@ -117,14 +120,15 @@ function providerWording(inheritsConversation: boolean): { description: string;
+   if (inheritsConversation) {
+     return {
+       description:
+-        'Delegate a task to a subagent that inherits this conversation: a child agent seeded with all '
+-        + 'completed turns so far (it does not see the current in-flight turn). Use this when the subtask '
+-        + 'builds on this conversation\'s context — a follow-up analysis, '
+-        + 'a review, a continuation — without consuming this conversation\'s context for the work itself. '
+-        + 'You receive its result, not its intermediate steps.',
++        'Delegate a task to a subagent that inherits this conversation: a child agent seeded with this '
++        + 'conversation up to the point where this delegation was requested. It does not see this request '
++        + 'itself, and anything this conversation compacted reaches it as the summary rather than as the '
++        + 'original tool output. Use this when the subtask builds on this conversation\'s context — a '
++        + 'follow-up analysis, a review, a continuation — without consuming this conversation\'s context '
++        + 'for the work itself. You receive its result, not its intermediate steps.',
+       promptDescription:
+-        'The task for the subagent. It already sees this conversation\'s completed turns, so build on them '
+-        + 'freely and state only what is new.',
++        'The task for the subagent. It already sees this conversation up to this delegation, so build on '
++        + 'that freely and state only what is new.',
+     }
+   }
+   return {
+diff --git a/packages/subagent/tool-subagent/tests/tool-subagent.spec.ts b/packages/subagent/tool-subagent/tests/tool-subagent.spec.ts
+index 095d1de4..d8cfefad 100644
+--- a/packages/subagent/tool-subagent/tests/tool-subagent.spec.ts
++++ b/packages/subagent/tool-subagent/tests/tool-subagent.spec.ts
+@@ -514,9 +514,14 @@ describe('dsh-tool-subagent', () => {
+     const schema = ctx.tools.schemas().find(s => s.name === 'subagent')!
+     expect(schema.description).toContain('inherits this conversation')
+     expect(schema.description).not.toContain('does not see this conversation')
++    // The promise is about the conversation up to the delegation, and it says what the child does
++    // NOT get: the delegating request itself, and compacted spans in summary form only.
++    expect(schema.description).toContain('this delegation was requested')
++    expect(schema.description).toContain('does not see this request')
++    expect(schema.description).toContain('compacted')
+     expect(schema.description).not.toContain('Inspect options with `list_subagent_models`')
+     const props = (schema.parameters as { properties: Record<string, { description: string }> }).properties
+-    expect(props['prompt']!.description).toContain('completed turns')
++    expect(props['prompt']!.description).toContain('sees this conversation up to this delegation')
+   })
+ 
+   it('skips provider startup for an already-aborted signal', async () => {
