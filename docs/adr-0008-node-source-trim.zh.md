@@ -2,7 +2,10 @@
 
 > 状态：**已采纳**（2026-11-21）。第二节的死字节已全部删除并实测（408.2 → 267.4 MiB
 > 解包，87.6 → 57.9 MiB 归档）；第三节的补丁链已落地为 `scripts/node-patches.mjs` +
-> `patches/node/` + `docs/node-patches.zh.md`。源码级补丁本身仍是空的 —— 见第六节。
+> `patches/node/` + `docs/node-patches.zh.md`。**第六节当时是空的，build 7 填上了第一批**：
+> 两条上游缺陷（Team 写作用域警告、fork 子会话首轮无继承）以补丁 0001/0002 落地，
+> `RUNTIME_BUILD` 6 → 7，归档 58.2 MiB / 25 167 文件。台账见
+> [`node-patches.zh.md`](../packages/dsh-remote-node-harness/docs/node-patches.zh.md)。
 > 上承 [ADR-0007](adr-0007-fork-node-runtime.zh.md)，**推翻其 §五「不改上游语义、裁剪只是打包步骤」**。
 > 本文只决定「节点那棵树改到多深、怎么记录、上游发版时怎么重放」，不改插件侧任何东西。
 
@@ -108,7 +111,8 @@ packages/dsh-remote-node-harness/patches/node/
 
 源码改动的字节差异比删包更难察觉：同一个 `0.2.2-rc.5`、同样的包集合，行为不同。
 所以每加一个补丁或改一条残留规则都要 +1，这是既有的规则（`artefact.js` 的注释已写明），
-本轮执行时一并升到 5。
+build 5 执行时升到 5；build 6 改的是安装脚本，虽然归档字节没变也升到 6；
+**build 7 加了两条补丁，升到 7**。
 
 ## 四、验收
 
@@ -118,7 +122,7 @@ packages/dsh-remote-node-harness/patches/node/
 | 树还能当大脑启动 | 解包后 `--host 127.0.0.1 --port 0 --no-open` 打印 `dsh web: <url>`；换 cookie 得 303；`POST /api/session/list` 得 200 | **过**（WSL Ubuntu 24.04 / Node 24.15.0） |
 | 删的东西没改变任何回答 | 同组合分别喂 build 4 与 build 5，逐端点比状态码与响应体 | **过**：10 个端点差 0 个 |
 | 补丁链能重放 | 在一个真 git 仓库上验四种情形：首次应用、已应用、上游把 hunk 挪位、上游改写同一行 | **过**（`node-patches-unit`，四种情形各自一条断言，冲突时还断言没有 `.rej`/`.orig` 落地） |
-| 台账与补丁一一对应 | `patches/node/*.patch` 的文件名集合 == 台账编号集合 | **过**（当前两边都是空集） |
+| 台账与补丁一一对应 | `patches/node/*.patch` 的文件名集合 == 台账编号集合 | **过**（build 5/6 两边都是空集；build 7 起两边都是 2 条，且 `node-patches-unit` 按名字断言了这个集合） |
 | 每个补丁有理由 | 台账每行六个字段都非空 | **过** |
 
 ## 五、非目标
@@ -130,17 +134,23 @@ packages/dsh-remote-node-harness/patches/node/
 - **不碰上游的 `exports` 契约形状。** 删导出的函数可以，删 `exports` 键不行 ——
   那会让 `require` 的解析路径变化，属于另一类风险。
 
-## 六、下一步：源码级补丁的第一批候选
+## 六、源码级补丁：第一批候选，以及 build 7 实际落了什么
 
-本轮把机制建好了，补丁本身为空。下一批候选是我已经量过的，但**还没到能写进台账的
-证据标准**，所以没动：
+**这一节当时是空的，而空着是对的**：能表达成「删包」或「删文件」的东西不该写成补丁，
+更容易审、更容易回退、也不需要重放。为了填一行而硬改源码，是把机制用成装饰。
+
+**build 7 落下的两条不是「裁剪」，是「修 bug」**，这也是它们够格进补丁链的原因：
+它们不属于任何一条删包/删文件规则能表达的东西，且都已在真实使用中暴露。
+
+| 补丁 | 改了什么 | 为什么必须以补丁形式存在 |
+|---|---|---|
+| `0001-team-write-scope-overlap-all-live-tasks.patch` | `projectTaskView` 的写作用域比对从「只比 `in_progress`」改为「比每一条非 `deleted` 的任务」，警告带对方状态 | 上游行为本身是缺陷：兄弟任务一完成，重叠警告就消失，调用方读到「无冲突」而文件刚被写过。删包表达不了，只能改这一行逻辑 |
+| `0002-fork-seed-covers-requesting-turn.patch` | fork provider 的切点从「最后一个 `turn/end`」改为「最后一条携带未应答 tool-call 的 `assistant/message` 之前」，用 `buildForkSeed` 收口；工具措辞随之改准 | 同上：首轮/轮次中途委派时子 agent 拿到空 seed，而工具描述向模型承诺了继承。这是判断错误，不是冗余代码 |
+
+下面这批「裁剪」候选仍然没动，理由不变：
 
 | 候选 | 体量 | 为什么还没做 |
 |---|---|---|
 | 21 个包声明了 `dsh.client`，其中 20 个的 `./client` 导出**没有任何运行时文件 import**（`dsh-api-gateway/client` 是唯一被宿主 import 的，必须留） | 1 955 KiB | 「没有 import」不等于「没有读者」：这些半边的消费者是浏览器，`dsh-client-modules` 通过 `window.__ModuleLoader__` 装配。删导出会不会让桌面端 `dsh.client` 扫描拿到空模块，需要先读装配逻辑 |
 | `@deepseek-ai/dsh-sandbox-windows-acl` 整个包（节点是 linux） | 14 个文件 | 它在 `dsh-base` 的 `cordis.patch.yml` 里被 `process.platform === 'win32'` 挡住，所以「不加载」不等于「可以删」。删包属打包步骤，但它在 `@deepseek-ai` 作用域内、当前 `DROP_RULES` 没覆盖 —— 应该先加一条包规则，而不是写补丁 |
 | `node_modules/.bin/*.cmd` / `*.ps1`（Windows shim，26 个） | 15 KB | 太小，且属于「按平台删文件」而非「改源码」，走 `ARTEFACT_RESIDUE` 的 `.cmd`/`.ps1` 规则更合适 |
-
-结论：真正需要**补丁**（改源码行为）的候选，我目前一个都没有拿到足够证据。绝大多数
-「节点不需要」的东西都能用删包或删文件表达，那样更容易审、更容易回退，也不需要重放。
-台账空着是诚实的；为了填一行而硬改源码，是把机制用成装饰。

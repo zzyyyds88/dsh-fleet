@@ -9,6 +9,50 @@
 - 每条都说清「谁受影响」，因为这套东西的读者是「装它的人」，不是写它的人。
 - 与 `docs/ARCHITECTURE.md` 的章节对应，细节不去那边重复。
 
+## [0.6.5] — 2026-11-21
+
+### 修复
+
+- **`release-runtime.yml` 里 `--out` 的基准弄错了，这个 workflow 一跑必挂。**
+  `publish-runtime.mjs` 把 `--out` 相对**插件包根**解析（`resolve(pluginRoot, value('out'))`），
+  而 workflow 传的是裸 `dist`、后面 `upload-artifact` 又按**仓库根**取 `dist/dsh-*.tar.gz`，
+  且写了 `if-no-files-found: error`。结果是：四个平台各自打包成功，然后在收集产物那一步
+  全部失败。这个 workflow 从未运行过，所以一直没人发现。改成绝对路径
+  `${GITHUB_WORKSPACE}/dist`，并在注释里写明这个基准，不再依赖读者知道它。
+- **CI 只跑 16 个离线套件里的 9 个，而漏掉的正好包含补丁链守卫。**
+  `ci.yml` 手写了一份套件清单，`run-all.mjs` 里另有一份注册表，两份已经漂移：
+  `node-patches`（保证 `patches/node/*.patch` 与偏差台账一致）、`rnh-lifecycle`、
+  `errors`、`autoconnect`、`packet`、`provision`、`composition` 都不在 CI 里。
+  手抄一份已经存在的清单只会继续烂下去，所以 CI 现在直接
+  `node test/run-all.mjs --layer offline`，清单由注册表决定。两个读 `app.asar` 的套件
+  在没有桌面安装的机器上自己 exit 3，`run-all` 把它们报成 SKIP 并写明原因，不算通过。
+
+### 文档
+
+- **ADR-0008 有三处还在说「补丁链是空的」。** 第六节当时确实空着（那是对的：能用删包/
+  删文件表达的就不该写补丁），但 build 7 落了 0001/0002 两条。第六节重写为「哪些够格进补丁、
+  哪些仍不做」，验收表与 `RUNTIME_BUILD` 段落一并更新。
+- **对外文档的归档数字还停在 build 5。** `README.md`、插件 `README.md`、
+  `ARCHITECTURE.md`、`UPGRADE.zh.md` 写的是 57.9 MiB / 25 038 文件 / 91 839 618 字节 /
+  267.4 MiB 解包，实际 build 7 是 **58.2 MiB / 25 167 文件 / 61 071 397 字节 /
+  269.5 MiB 解包**。ADR-0007 里的历史测量值保持原样（那是决策当时的记录）。
+
+### 清理
+
+- 删掉 `packages/dsh-remote-node-harness/patches/node/.gitkeep`：目录里已有两条真补丁，
+  占位文件不再有意义。
+- 删掉仓库根的 `openspec/`：只有一个 `config.yaml` 和两个空 `.gitkeep`，没有任何 change，
+  属于半套工具痕迹。
+- 公开的 CNB release `v0.2.2-rc.5` 上有一个 2026-11-19 调试残留的 `confirm-probe.txt`
+  （11 字节），已删除；匿名下载现在 404，同 release 的归档仍 200 / 61 071 397 字节。
+- `0.6.4` 的 tarball 从 `packages/dsh-remote-node-harness/dist/` 归位到 `dist/plugin/`，
+  与 0.6.0–0.6.3 及 UPGRADE 文档写的流程一致。
+
+### 未变
+
+- `RUNTIME_BUILD` 仍是 **7**：这一版没有改任何进归档的字节，节点不需要重装运行时。
+  装 0.6.5 只换插件代码。
+
 ## [0.6.4] — 2026-11-21
 
 ### 修复

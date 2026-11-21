@@ -1,23 +1,26 @@
 name: CI
 
-# Only the suites that need nothing but Node and this package's own dependency.
+# The offline layer of `test/run-all.mjs`, and nothing else.
 #
-# `run-all.mjs` has three layers. The offline layer splits again: `provision` and
-# `composition` read `app.asar` through Electron's patched `fs`, and the contract and e2e
-# layers need a running Host and an SSH-reachable node. What runs here needs neither.
+# **The suite list is not repeated here.** It used to be, and it drifted: nine suites were
+# listed while the offline layer registered sixteen, so `node-patches` — the guard that keeps
+# `patches/node/*.patch` and the deviation ledger in agreement — never ran in CI at all, and
+# neither did `rnh-lifecycle`, `errors`, `autoconnect`, `packet`, `provision` or `composition`.
+# A hand-maintained copy of a list that already exists in code can only rot; `run-all.mjs`
+# owns the registry, so CI asks it.
 #
-# `ssh2` is the one real dependency (only `src/ssh/connection.js` imports it). Most of the
-# suites below reach it not at all; `version-unit` does, through
-# `remote/daemon.js` → `ssh/connection.js` — measured by running them all in a copy of the
-# package with no `node_modules`: only `version-unit` failed, with ERR_MODULE_NOT_FOUND for
-# `ssh2`. So dependencies are installed, but with `--ignore-scripts`: ssh2's optional native
-# helper (`cpu-features`) then never builds, and a suite that starts needing a build shows up
-# as a failure rather than being hidden by a working install.
+# What the offline layer contains: every suite that needs nothing but Node and this package's
+# own dependency. Two of the sixteen exit 3 on a machine with no desktop install (`provision`
+# and `composition` read `app.asar` through Electron's patched `fs`), and `run-all` reports
+# those as SKIP with the reason — not as a pass. The contract and e2e layers need a running
+# Host and an SSH-reachable node, so they are not in this job.
 #
-# `fork-runtime-unit` reads the two build scripts as text and checks the trim rules, so it
-# needs neither a fork checkout nor a built archive — it runs here for the same reason the
-# others do: the rules it pins down (keep the `dsh-web-app` manifest, stage by `overrides`)
-# are the ones whose absence produces a runtime that installs fine and cannot boot.
+# `ssh2` is the one real dependency (only `src/ssh/connection.js` imports it). Most suites
+# reach it not at all; `version-unit` and `packet-unit` do, through
+# `remote/daemon.js` → `ssh/connection.js`. So dependencies are installed, but with
+# `--ignore-scripts`: ssh2's optional native helper (`cpu-features`) then never builds, and a
+# suite that starts needing a build shows up as a failure rather than being hidden by a
+# working install.
 
 on:
   push:
@@ -43,19 +46,11 @@ jobs:
         working-directory: packages/dsh-remote-node-harness
         run: npm install --ignore-scripts --no-audit --no-fund
 
-      - name: Unit suites
+      - name: Offline layer
         working-directory: packages/dsh-remote-node-harness
-        run: |
-          set -e
-          node test/routing-unit.mjs
-          node test/routing-extra-unit.mjs
-          node test/multipart-unit.mjs
-          node test/waterfall-unit.mjs
-          node test/version-unit.mjs
-          node test/fork-runtime-unit.mjs
-          node test/picker-paths-unit.mjs
-          node test/install-unit.mjs
-          node test/rnh-control-unit.mjs
+        # No `DSH_INSTALL_DIR` on a bare runner: the two app.asar suites skip themselves and
+        # say so. `run-all` exits non-zero on any FAIL and prints the skips separately.
+        run: node test/run-all.mjs --layer offline
 
       - name: The manifest still packs
         working-directory: packages/dsh-remote-node-harness

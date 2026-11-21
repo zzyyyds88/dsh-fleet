@@ -10,8 +10,9 @@ name: Release node runtime (upstream tree)
 # checkout: it answers "does the release we pinned to still pack cleanly?".
 #
 # Measured on the reference node (Linux x86_64, glibc 2.35, Node v22.20.0): the upstream tree is
-# a 165 MiB download; the fork build is 87.7 MiB and 41 849 files, because it drops the browser
-# surface, the Office engine and the experimental bundles.
+# a 165 MiB download; the fork build is 58.2 MiB and 25 167 files (build 7), because it drops the
+# browser surface, the Office engine and the experimental bundles, then strips the bytes inside
+# the remaining packages that no runtime reads.
 #
 # The matrix packs natively. `publish-runtime.mjs` resolves **for the target platform** with
 # `--os/--cpu/--libc` and `--ignore-scripts`, so running it on the matching runner is not what
@@ -89,11 +90,18 @@ jobs:
         shell: bash
         # `--registry` is what the *packer* can reach. The node later uses whichever registry
         # it is configured with, and the npm route uses the node's own.
+        #
+        # `--out` is resolved **against the plugin package root**, not the repository root:
+        # `publish-runtime.mjs` does `resolve(pluginRoot, value('out'))`. A bare `dist` therefore
+        # wrote to `packages/dsh-remote-node-harness/dist/`, while the artifact step below uploads
+        # `dist/dsh-*.tar.gz` from the repository root with `if-no-files-found: error` — a run
+        # would have packed four platforms and then failed to collect any of them. An absolute
+        # path removes the ambiguity instead of relying on the reader knowing that base.
         run: |
           node packages/dsh-remote-node-harness/scripts/publish-runtime.mjs \
             --version "${{ steps.wanted.outputs.version }}" \
             --platform "${{ matrix.platform }}" \
-            --out dist \
+            --out "${GITHUB_WORKSPACE}/dist" \
             --registry https://registry.npmmirror.com
 
       - name: Keep the archive
