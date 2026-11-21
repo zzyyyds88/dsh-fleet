@@ -368,7 +368,11 @@ function releaseNotes() {
   return [
     `Node runtime for DSH ${version}, built by this project from its fork of the upstream source.`,
     '',
-    'A node downloads one of these instead of resolving a release: `~/.dsh-rnh/runtime`',
+    // The path is `DEFAULT_REMOTE_ROOT` in `src/remote/daemon.js`; it is spelled out here because
+    // this module must not import the daemon (that would drag `ssh2` into a packaging script).
+    // `test/fork-runtime-unit.mjs` asserts the two spellings agree, so a rename cannot leave a
+    // release body telling nodes to look in a directory the plugin never writes.
+    'A node downloads one of these instead of resolving a release: `~/.dsh-remote-node-harness/runtime`',
     'becomes exactly the unpacked tree. The `.sha256` beside each archive is what the node',
     'verifies, and what `installScript` refuses to unpack on a mismatch.',
     '',

@@ -274,6 +274,15 @@ function packageIn(root, name) {
     'the release body is built from every archive in --out, not from the one being uploaded')
   check(/release', 'edit'/u.test(publish), 'and a re-publish rewrites an existing release body')
   check(/method: 'PATCH'/u.test(publish), 'on CNB too, which keeps its own copy of the body')
+  // The release body tells a reader where the archive lands on a node. It cannot import the
+  // daemon (`ssh2` has no business in a packaging script), so the path is a second spelling of
+  // `DEFAULT_REMOTE_ROOT` — exactly the kind of copy that drifts. Measured 2026-11-21: the body
+  // said `~/.dsh-rnh`, the plugin writes `~/.dsh-remote-node-harness`.
+  const daemon = readFileSync(new URL('../src/remote/daemon.js', import.meta.url), 'utf8')
+  const root = /export const DEFAULT_REMOTE_ROOT = '([^']+)'/u.exec(daemon)?.[1]
+  check(typeof root === 'string' && root.length > 0, 'the daemon names one default remote root', root)
+  check(publish.includes(`\`${String(root)}/runtime\``),
+    'and the release body spells that same path, so it cannot point a reader into a directory nothing writes')
 }
 
 // ---- only platforms a node can actually ask for get published ----------------

@@ -9,6 +9,37 @@
 - 每条都说清「谁受影响」，因为这套东西的读者是「装它的人」，不是写它的人。
 - 与 `docs/ARCHITECTURE.md` 的章节对应，细节不去那边重复。
 
+## [未发布]
+
+### 修复
+
+- **补丁链的「已应用」识别是错的，真冲突会被当成正常放行。** `applyPatches` 原来用
+  `git apply --3way --check` 判断能不能应用，而它**对三种情形都返回 0**，只在输出里
+  说「cleanly」还是「with conflicts」。实测（git 2.51，同一个补丁三棵树）：
+  干净应用 0、已应用 0、真冲突 0。于是第二次构建会把「已经在树里」判成 `applied` 并
+  再打一遍，而真冲突也会被当成可应用、随后在真应用时才失败。现在两个判定改成**不带
+  `--3way` 的普通 `--check` / `--check --reverse`**（它们的退出码才区分三态），`--3way`
+  只用于真正落地那一步，并且在 `--3way --check` 报 `with conflicts` 时先抛错、不写树。
+  四种情形都进了 `test/node-patches-unit.mjs`：首次应用、已应用、上游把 hunk 挪位（必须
+  重定位成功）、上游改写同一行（必须抛错且不落 `.rej`/`.orig`）。
+
+### 变更
+
+- **`patches/node/` 目录随包发布（含 `.gitkeep`）。** 之前它不存在，`listPatches` 对不存在
+  的目录返回空数组，所以测试是绿的，但按 `UPGRADE` 教的第一步往里放补丁时得自己 `mkdir`。
+- **发布说明里的节点安装路径改回 `~/.dsh-remote-node-harness`。** 之前写的是 `~/.dsh-rnh`，
+  而 `DEFAULT_REMOTE_ROOT` 从来是前者。这条路径在 `publish-runtime.mjs` 里是第二份拼写
+  （那个脚本不能 import daemon，否则会把 `ssh2` 拖进打包脚本），所以
+  `test/fork-runtime-unit.mjs` 新增一条断言：发布说明里的路径必须等于 daemon 的常量。
+
+### 文档
+
+- ADR-0008 状态行的 `58.0 MiB` 改成 `57.9 MiB`，并修掉指向不存在的「第九节」（实际是第六节）。
+- 台账 `node-patches.zh.md` 的文件数订正：41 846 → 25 038（删 16 808），原文写的
+  `24601−41846` 两个数都不对。
+- CHANGELOG 0.6.0 与 README 的改名表里，节点安装根同样从 `~/.dsh-rnh` 改回
+  `~/.dsh-remote-node-harness`。
+
 ## [0.6.1] — 2026-11-21
 
 ### 变更
@@ -67,7 +98,7 @@
   | 大脑包 | `@local/dsh-fleet-brain` | `@local/rnh-brain` |
   | GitHub 仓库 | `zzyyyds88/dsh-fleet` | `zzyyyds88/dsh-remote-node-harness` |
   | CNB 仓库 | `serendipity-archive/dsh-fleet` | **不变** —— CNB 的 Open API 不能改仓库名 |
-  | 节点安装根 | `~/.dsh-fleet` | `~/.dsh-rnh` |
+  | 节点安装根 | `~/.dsh-fleet` | `~/.dsh-remote-node-harness` |
   | 节点 profile | `~/.dsh/profiles/fleet` | `~/.dsh/profiles/rnh` |
   | 会话 id 前缀 | `fleet_<node>_<uuid>` | `rnh_<node>_<uuid>` |
   | 远端路径命名空间 | `/@fleet` | `/@rnh` |

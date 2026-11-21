@@ -6,10 +6,11 @@
  * change that was quietly dropped. Both directions are checked here, plus the two ordering
  * rules that make replay deterministic.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { checkPatches, listPatches, readLedger } from '../scripts/node-patches.mjs'
+import { spawnSync } from 'node:child_process'
+import { applyPatches, checkPatches, listPatches, readLedger } from '../scripts/node-patches.mjs'
 
 const packageRoot = new URL('..', import.meta.url).pathname.replace(/^\/(?=[A-Za-z]:)/u, '')
 const log = message => process.stdout.write(`[node-patches-unit] ${message}\n`)
@@ -130,6 +131,131 @@ const check = (ok, label, detail) => {
     const row = rows.get('0001-drop-a.patch')
     check(row?.why === 'reason A' && row?.upstream === 'plan A',
       'each column keeps its own meaning', JSON.stringify(row))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+// ---- applying: the three states, and the alarm ---------------------------------
+// The ledger rules above only police paperwork. What decides whether a node keeps its
+// optimisation is `applyPatches`, so it is exercised against a real git repository rather than
+// reasoned about: `applied` (the patch lands), `already` (a rebuilt tree still has it, which must
+// not read as drift), and a genuine conflict (an upstream edit under the same lines), which must
+// throw, name the patch, and leave no `.rej` behind.
+{
+  const root = mkdtempSync(join(tmpdir(), 'node-patches-apply-'))
+  const repo = join(root, 'fork')
+  const git = arguments_ => spawnSync('git', ['-C', repo, ...arguments_], { encoding: 'utf8' })
+  const file = join(repo, 'behaviour.js')
+  const original = 'line1\nline2\nline3\nline4\nline5\n'
+  try {
+    mkdirSync(join(root, 'patches', 'node'), { recursive: true })
+    mkdirSync(join(root, 'docs'), { recursive: true })
+    mkdirSync(repo, { recursive: true })
+    writeFileSync(join(root, 'docs', 'node-patches.zh.md'), [
+      '# ledger',
+      '',
+      '| 补丁 | 改了什么 | 移除了什么 | 为什么节点不需要 | 怎么验证的 | 上游改到同一处怎么办 |',
+      '|---|---|---|---|---|---|',
+      '| `0001-drop-a.patch` | behaviour.js | behaviour A | a node has no window | ran the suite | regenerate against the tag |',
+      '',
+    ].join('\n'), 'utf8')
+    check(git(['init', '-q']).status === 0, 'a scratch repository can be created to apply into')
+    git(['config', 'user.email', 'test@example.invalid'])
+    git(['config', 'user.name', 'test'])
+    // Keep the bytes the patch was cut from: autocrlf would rewrite them on checkout and the
+    // blob hashes in the diff would stop matching.
+    git(['config', 'core.autocrlf', 'false'])
+    writeFileSync(file, original, 'utf8')
+    check(git(['add', 'behaviour.js']).status === 0 && git(['commit', '-qm', 'base']).status === 0,
+      'the base commit is the state the patch was cut from')
+
+    writeFileSync(file, original.replace('line2\n', 'line2-PATCHED\n'), 'utf8')
+    const cut = git(['diff', '--', 'behaviour.js'])
+    check(cut.status === 0 && cut.stdout.includes('+line2-PATCHED'),
+      'a patch can be cut from a working tree', cut.stderr.trim())
+    writeFileSync(join(root, 'patches', 'node', '0001-drop-a.patch'), cut.stdout, 'utf8')
+    git(['checkout', '--', 'behaviour.js'])
+
+    // dryRun: says what it would do, and does nothing.
+    const preview = applyPatches(root, repo, { dryRun: true })
+    check(preview.length === 1 && preview[0].state === 'would-apply',
+      'a dry run reports would-apply', JSON.stringify(preview))
+    check(readFileSync(file, 'utf8') === original, 'and changes nothing on disk')
+
+    const first = applyPatches(root, repo)
+    check(first.length === 1 && first[0].state === 'applied', 'a first apply lands the change',
+      JSON.stringify(first))
+    check(readFileSync(file, 'utf8').includes('line2-PATCHED'), 'the tree now carries it')
+
+    // Rebuild after a rebuild: the change is present, so a forward apply fails — and that must
+    // be `already`, not the drift alarm. This is the state every iteration on the trim rules
+    // passes through.
+    const second = applyPatches(root, repo)
+    check(second.length === 1 && second[0].state === 'already',
+      'a second run recognises the change as already present, not as drift', JSON.stringify(second))
+
+    // Upstream rewrites the same line. The three-way merge cannot place the hunk, and the
+    // failure must surface instead of being swallowed.
+    writeFileSync(file, original.replace('line2\n', 'UPSTREAM-REWRITE\n'), 'utf8')
+    git(['commit', '-qam', 'upstream moves the code underneath the patch'])
+    let drift = ''
+    try { applyPatches(root, repo) } catch (error) { drift = String(error.message) }
+    check(drift.includes('0001-drop-a.patch') && drift.includes('drift alarm'),
+      'an upstream edit under the same lines throws and names the patch', drift.split('\n')[0])
+    check(drift.includes('do not use --reject'), 'and says what not to do about it')
+    const strays = readdirSync(repo).filter(name => name.endsWith('.rej') || name.endsWith('.orig'))
+    check(strays.length === 0, 'no .rej or .orig is left in the tree that gets packed',
+      strays.join(', ') || 'none')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+// ---- a hunk upstream only *moved* still applies ------------------------------
+// This is the case that keeps upstream's own fixes flowing: a release that inserts lines above our
+// hunk changes its offsets but not its content. A plain apply refuses it; `--3way` relocates it.
+// Getting this wrong in the other direction (throwing on every offset change) would make every
+// upstream release look like a conflict and tempt somebody to delete the patch.
+{
+  const root = mkdtempSync(join(tmpdir(), 'node-patches-move-'))
+  const repo = join(root, 'fork')
+  const git = arguments_ => spawnSync('git', ['-C', repo, ...arguments_], { encoding: 'utf8' })
+  const file = join(repo, 'behaviour.js')
+  const original = 'line1\nline2\nline3\nline4\nline5\n'
+  try {
+    mkdirSync(join(root, 'patches', 'node'), { recursive: true })
+    mkdirSync(join(root, 'docs'), { recursive: true })
+    mkdirSync(repo, { recursive: true })
+    writeFileSync(join(root, 'docs', 'node-patches.zh.md'), [
+      '# ledger',
+      '',
+      '| 补丁 | 改了什么 | 移除了什么 | 为什么节点不需要 | 怎么验证的 | 上游改到同一处怎么办 |',
+      '|---|---|---|---|---|---|',
+      '| `0001-drop-a.patch` | behaviour.js | behaviour A | a node has no window | ran the suite | regenerate against the tag |',
+      '',
+    ].join('\n'), 'utf8')
+    git(['init', '-q'])
+    git(['config', 'user.email', 'test@example.invalid'])
+    git(['config', 'user.name', 'test'])
+    git(['config', 'core.autocrlf', 'false'])
+    writeFileSync(file, original, 'utf8')
+    git(['add', 'behaviour.js'])
+    git(['commit', '-qm', 'base'])
+    writeFileSync(file, original.replace('line2\n', 'line2-PATCHED\n'), 'utf8')
+    writeFileSync(join(root, 'patches', 'node', '0001-drop-a.patch'),
+      git(['diff', '--', 'behaviour.js']).stdout, 'utf8')
+    git(['checkout', '--', 'behaviour.js'])
+
+    // Upstream prepends two lines: the hunk's offsets move by two, its content does not.
+    writeFileSync(file, `inserted-a\ninserted-b\n${original}`, 'utf8')
+    git(['commit', '-qam', 'upstream inserts lines above the patched hunk'])
+    const moved = applyPatches(root, repo)
+    check(moved.length === 1 && moved[0].state === 'applied',
+      'a hunk upstream merely shifted is relocated, not reported as drift', JSON.stringify(moved))
+    const after = readFileSync(file, 'utf8')
+    check(after.startsWith('inserted-a\ninserted-b\n') && after.includes('line2-PATCHED'),
+      'and it lands in the shifted position, leaving the inserted lines alone')
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

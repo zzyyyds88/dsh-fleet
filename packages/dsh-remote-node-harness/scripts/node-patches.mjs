@@ -142,33 +142,61 @@ export function checkPatches(packageRoot) {
  * run the forward apply fails simply because the change is present, and that must not be
  * reported as drift. The test is a reverse `--check`: if the patch can be *un*-applied cleanly,
  * it is in.
+ *
+ * **Both probes are plain, without `--3way`, and that is not an accident.** `git apply --3way
+ * --check` exits 0 for all three situations — the hunk applies as-is, the hunk relocates, and the
+ * hunk conflicts — and only *prints* which one it was. A state machine built on its exit code
+ * therefore calls a genuine conflict "fine". Measured 2026-11-21 against git 2.51, one patch,
+ * three trees:
+ *
+ * ```
+ * plain  --check            applied → 1   not applied → 0   conflict → 1
+ * plain  --check --reverse  applied → 0   not applied → 1   conflict → 1
+ * --3way --check            applied → 0   not applied → 0   conflict → 0
+ * ```
+ *
+ * So the plain probes decide *which* state this is, and `--3way` is used only for the apply
+ * itself, where relocating a hunk that upstream merely shifted is exactly what is wanted. A patch
+ * that survives neither plain probe is either a relocation or a conflict; `--3way --check` says
+ * which in its own output, and the conflict case throws before anything is written.
  * @param {string} packageRoot - the plugin package root.
  * @param {string} checkout - the fork's working tree.
  * @returns {ReadonlyArray<{ name: string, state: 'applied' | 'already' | 'would-apply' }>}
  */
 export function applyPatches(packageRoot, checkout, options = {}) {
   const results = []
-  const run = args => spawnSync('git', ['-C', checkout, 'apply', '--3way', ...args], { encoding: 'utf8' })
+  const run = args => spawnSync('git', ['-C', checkout, 'apply', ...args], { encoding: 'utf8' })
   for (const patch of listPatches(packageRoot)) {
-    const check = run(['--check', patch.path])
-    if (check.status === 0) {
+    const forward = run(['--check', patch.path])
+    if (forward.status === 0) {
       if (options.dryRun === true) {
         results.push({ name: patch.name, state: 'would-apply' })
         continue
       }
-      const applied = run([patch.path])
+      const applied = run(['--3way', patch.path])
       if (applied.status !== 0) throw driftError(patch, checkout, applied)
       results.push({ name: patch.name, state: 'applied' })
       continue
     }
-    // The forward check failed. Either the change is already in the tree, or upstream moved
-    // the code underneath it — and those two must not be confused.
+    // The plain apply failed. Either the change is already in the tree, or upstream moved the
+    // code underneath it — and those two must not be confused.
     const reverse = run(['--check', '--reverse', patch.path])
     if (reverse.status === 0) {
       results.push({ name: patch.name, state: 'already' })
       continue
     }
-    throw driftError(patch, checkout, check)
+    // Neither direction applies as-is. `--3way` can still place the hunk if upstream only shifted
+    // the surrounding code; it cannot if upstream rewrote the lines themselves.
+    const merge = run(['--3way', '--check', patch.path])
+    const conflicted = /with conflicts/u.test(`${merge.stdout ?? ''}${merge.stderr ?? ''}`)
+    if (merge.status !== 0 || conflicted) throw driftError(patch, checkout, merge)
+    if (options.dryRun === true) {
+      results.push({ name: patch.name, state: 'would-apply' })
+      continue
+    }
+    const applied = run(['--3way', patch.path])
+    if (applied.status !== 0) throw driftError(patch, checkout, applied)
+    results.push({ name: patch.name, state: 'applied' })
   }
   return results
 }

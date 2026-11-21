@@ -1,8 +1,8 @@
 # ADR-0008 节点运行时做源码级裁剪，并维护一份可重放的偏差台账
 
 > 状态：**已采纳**（2026-11-21）。第二节的死字节已全部删除并实测（408.2 → 267.4 MiB
-> 解包，87.6 → 58.0 MiB 归档）；第三节的补丁链已落地为 `scripts/node-patches.mjs` +
-> `patches/node/` + `docs/node-patches.zh.md`。源码级补丁本身仍是空的 —— 见第九节。
+> 解包，87.6 → 57.9 MiB 归档）；第三节的补丁链已落地为 `scripts/node-patches.mjs` +
+> `patches/node/` + `docs/node-patches.zh.md`。源码级补丁本身仍是空的 —— 见第六节。
 > 上承 [ADR-0007](adr-0007-fork-node-runtime.zh.md)，**推翻其 §五「不改上游语义、裁剪只是打包步骤」**。
 > 本文只决定「节点那棵树改到多深、怎么记录、上游发版时怎么重放」，不改插件侧任何东西。
 
@@ -117,7 +117,7 @@ packages/dsh-remote-node-harness/patches/node/
 | 死字节确实没了 | 重建归档，逐类目重数，与第二节的表对齐 | **过**：五类全为 0 |
 | 树还能当大脑启动 | 解包后 `--host 127.0.0.1 --port 0 --no-open` 打印 `dsh web: <url>`；换 cookie 得 303；`POST /api/session/list` 得 200 | **过**（WSL Ubuntu 24.04 / Node 24.15.0） |
 | 删的东西没改变任何回答 | 同组合分别喂 build 4 与 build 5，逐端点比状态码与响应体 | **过**：10 个端点差 0 个 |
-| 补丁链能重放 | `git apply --3way` 全部成功；已应用则识别为 `already`，漂移则抛错 | **过**（`node-patches-unit`，含伪造漂移用例） |
+| 补丁链能重放 | 在一个真 git 仓库上验四种情形：首次应用、已应用、上游把 hunk 挪位、上游改写同一行 | **过**（`node-patches-unit`，四种情形各自一条断言，冲突时还断言没有 `.rej`/`.orig` 落地） |
 | 台账与补丁一一对应 | `patches/node/*.patch` 的文件名集合 == 台账编号集合 | **过**（当前两边都是空集） |
 | 每个补丁有理由 | 台账每行六个字段都非空 | **过** |
 

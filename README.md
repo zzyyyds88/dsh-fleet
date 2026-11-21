@@ -150,7 +150,7 @@ dsh plugin --profile desktop add -w <仓库绝对路径>/packages/dsh-remote-nod
 
 装完要重启一次 DSH，新装 bundle 的客户端半边才会被加载。`engines.dsh` 是 `>=0.2.2-rc.3 <0.3.0`，版本不匹配时安装被拒绝，而不是只组合一半。
 
-从 0.5.x 或更早升级要换的不只是包名 —— 0.6.0 把 `dsh-fleet` 整个改名为 `dsh-remote-node-harness`，`~/.dsh-fleet` → `~/.dsh-rnh`、`/@fleet` → `/@rnh`、`fleet_` 会话前缀 → `rnh_`。完整对照表与迁移步骤见 [CHANGELOG 0.6.0](CHANGELOG.md)。节点不用手工清，旧目录留着不影响。
+从 0.5.x 或更早升级要换的不只是包名 —— 0.6.0 把 `dsh-fleet` 整个改名为 `dsh-remote-node-harness`，`~/.dsh-fleet` → `~/.dsh-remote-node-harness`、`/@fleet` → `/@rnh`、`fleet_` 会话前缀 → `rnh_`。完整对照表与迁移步骤见 [CHANGELOG 0.6.0](CHANGELOG.md)。节点不用手工清，旧目录留着不影响。
 
 ## 加节点
 
