@@ -9,6 +9,54 @@
 - 每条都说清「谁受影响」，因为这套东西的读者是「装它的人」，不是写它的人。
 - 与 `docs/ARCHITECTURE.md` 的章节对应，细节不去那边重复。
 
+## [未发布]
+
+### 修复
+
+- **节点上的 `glob` 与 `grep` 全部不可用：装好的运行时里 `rg` 没有可执行位。**
+  实测反馈（节点 `linux-x64`，DSH `0.2.2-rc.5`）：任何检索都报
+  `glob subprocess failed before reporting an outcome (ripgrep provider failure)`，
+  而 `read`/`write`/`edit` 正常。根因在制品打包与解包的接缝上：bsdtar 在 Windows
+  打包机上给**每个**条目写 `-rw-rw-rw-`，`chmodSync` 在 Windows 上只剩 `100666`，
+  所以归档里一个 `+x` 都没有（实测发布的那份 rc.5 归档：25 038 个文件，0 个带 `+x`）；
+  而 `installScript` 解包后只补 `node-pty/prebuilds/*/spawn-helper`，**Linux 树里根本
+  没有这个文件**，等于什么都没补。`@vscode/ripgrep-linux-x64/bin/rg` 于是以 0666 落地，
+  `dsh-util-ripgrep` 按路径 spawn 它且**没有系统 `rg` 兜底**，整条检索链路瘫痪，
+  而 `inspectRuntime` 判这棵树「in step」——坏得没有任何提示。
+  - 补位规则改成**按形状**而不是按路径清单（清单会在下一次依赖升级时悄悄失效）：
+    `node_modules/<pkg>/…/bin/` 下的文件、按名字的 `spawn-helper`、按后缀的 `*.node`。
+    判定函数 `isArtefactExecutable` 在 `src/remote/artefact.js`，**打包侧
+    （`publish-runtime.mjs`、`build-fork-runtime.mjs`）与安装侧共用同一个**，
+    两处不可能对「哪些文件是程序」有不同意见。`node_modules/.bin/*` 故意不匹配：
+    那是 npm 给 shell 写的 shim，本运行时没有任何代码解析它。
+  - 补位之后**要验**：`installScript` 对 `bin/rg` 与 `bin/landlock-run` 逐个测 `-x`，
+    不通过就删 staging、`exit 7`（`ARTEFACT_NOT_EXECUTABLE`）让调用方回滚，位置在
+    `mv "$staging" "$runtime"` 之前。补不上却不报错，等于又造一个「看起来装好了、
+    第一次搜索才炸」的节点。
+  - 受影响范围：**每一个装过 0.6.2 及更早版本的节点**。本次修复要靠 `RUNTIME_BUILD`
+    5 → 6 才能触达它们 —— 归档字节与 build 5 完全相同，但戳不同，节点下次连接会重装
+    同一份字节并补上可执行位。
+
+### 测试
+
+- `test/version-unit.mjs` 新增一组：`isArtefactExecutable` 的形状判定（`bin/rg`、
+  `landlock-run`、`spawn-helper`、`*.node` 命中；普通 JS 与 `.bin/*` shim 不命中）、
+  生成的 `find` 表达式在**真 shell** 里对假树跑一遍（本机没有 POSIX shell 时显式 skip，
+  不假装通过）、以及安装脚本里 `ARTEFACT_NOT_EXECUTABLE` 的判定顺序必须早于
+  `mv "$staging" "$runtime"`。
+- `test/fork-runtime-unit.mjs` 新增两条：两个打包脚本都必须 import 并调用同一个
+  `isArtefactExecutable`，且都不再保留旧的 `entry.name !== 'spawn-helper'` 写法 ——
+  规则的第二个副本正是这个缺陷的成因。
+
+### 文档
+
+- `docs/ARCHITECTURE.md`「可执行位」一节重写：旧文写的是「补 `spawn-helper`」，
+  正是这次出错的规则；补上按形状的新规则、`exit 7` 的语义、以及为什么归档字节没变
+  仍要 bump `RUNTIME_BUILD`。
+- `docs/adr-0006-node-runtime-supply.zh.md` §六第 2 条补 2026-11-21 修订说明。
+- `packages/dsh-remote-node-harness/docs/UPGRADE.zh.md` 补一条判据：
+  **改动的是安装脚本、必须让节点重装一次才生效，也要 bump `RUNTIME_BUILD`。**
+
 ## [0.6.2] — 2026-11-21
 
 ### 修复

@@ -280,6 +280,12 @@ git checkout -- .          # 工作树回到 tag 状态，改动只活在补丁�
 它会一直跑旧字节 —— 实测过这条链（`doc/` 被当文档删掉，`yaml/dist/doc/directives.js`
 跟着没了，节点启动即 `MODULE_NOT_FOUND`，而闸门说"已就绪"）。
 
+**内容没变也要加的情况：改动的是安装脚本。** build 6 就是这样：归档字节与 build 5 完全
+相同，但 `installScript` 补可执行位的范围从「只有 `spawn-helper`」改成按形状匹配
+（`isArtefactExecutable`）。戳是唯一能触达「已经装好、版本相同」节点的杠杆 ——
+`inspectRuntime` 见戳相同就复用，不 bump 就等于只在全新节点上修好，而真正坏着的那些
+节点一个都不会被修。判据：**这次改动要生效，是否必须让节点重装一次？** 是就 bump。
+
 **两个实测撞过的坑，改脚本时别踩回去：**
 
 1. `@deepseek-ai/dsh-web-app` 的 **manifest 必须留着**，哪怕它一个字节都不加载。上游按

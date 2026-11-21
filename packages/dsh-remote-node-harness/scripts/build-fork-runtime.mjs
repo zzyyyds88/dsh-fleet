@@ -52,6 +52,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { applyPatches } from './node-patches.mjs'
 import { ARTEFACT_RESIDUE, ARTEFACT_RESIDUE_KEEP, dropPackages, foreignPlatformResidue, stripResidue } from './trim-fork-runtime.mjs'
+import { isArtefactExecutable } from '../src/remote/artefact.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pluginRoot = resolve(here, '..')
@@ -298,7 +299,11 @@ function measure(entry) {
  * does reach a node, bump before touching this again.
  *
  * Executable bits are restored before packing: `tar` on Windows writes `-rw-rw-rw-` for every
- * entry, and `installScript` repairs only the two `spawn-helper` files it knows about.
+ * entry and `chmodSync` there leaves `100666`, so the mode bytes are only ever correct on a
+ * POSIX packer. The rule is `isArtefactExecutable`, shared with `installScript` and the
+ * upstream-archive packer — the old `spawn-helper` + `*.node` rule missed the ripgrep binary
+ * and the sandbox launcher, and a node installed from such an archive had no working
+ * `glob`/`grep`.
  */
 function archive(staging, version) {
   const name = `dsh-${version}-${platform}.tar.gz`
@@ -312,7 +317,7 @@ function archive(staging, version) {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name)
       if (entry.isDirectory()) { restore(full); continue }
-      if (entry.name !== 'spawn-helper' && !entry.name.endsWith('.node')) continue
+      if (!isArtefactExecutable(full)) continue
       try {
         chmodSync(full, 0o755)
         modes += 1

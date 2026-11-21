@@ -253,6 +253,18 @@ function packageIn(root, name) {
   const build = readFileSync(new URL('../scripts/build-fork-runtime.mjs', import.meta.url), 'utf8')
   check(/stripResidue\(staging, \[\.\.\.ARTEFACT_RESIDUE, \.\.\.foreignPlatformResidue\(platform\)\], ARTEFACT_RESIDUE_KEEP\)/u.test(build),
     'the fork build strips with the same list, the same keep list, and the same platform rules')
+  // Both packers must ask the shared predicate which files are programs. The rule used to be
+  // `spawn-helper` + `*.node` in each script independently, and both were wrong the same way:
+  // the ripgrep binary and the sandbox launcher were left 0666, so every `glob`/`grep` on a
+  // node failed with "ripgrep provider failure". A second copy of the rule is how that happens.
+  check(/import \{[^}]*\bisArtefactExecutable\b[^}]*\} from '\.\.\/src\/remote\/artefact\.js'/u.test(publish)
+    && /if \(!isArtefactExecutable\(full\)\) continue/u.test(publish),
+  'publish-runtime asks the shared executable rule, rather than keeping its own list')
+  check(/import \{[^}]*\bisArtefactExecutable\b[^}]*\} from '\.\.\/src\/remote\/artefact\.js'/u.test(build)
+    && /if \(!isArtefactExecutable\(full\)\) continue/u.test(build),
+  'and the fork build asks the same rule, so the two archives cannot disagree about modes')
+  check(!/entry\.name !== 'spawn-helper'/u.test(publish) && !/entry\.name !== 'spawn-helper'/u.test(build),
+    'neither packer still carries the old name-only rule')
   check(/--ignore-scripts/u.test(build), 'the fork build resolves without running install scripts')
   check(/overrides/u.test(build),
     'the fork build stages by override, so only the imported closure is installed')

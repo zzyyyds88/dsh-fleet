@@ -9,6 +9,10 @@
  *
  * Run: `node test/version-unit.mjs`
  */
+import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import {
   GATE,
   compareVersions,
@@ -17,8 +21,10 @@ import {
   requiresProvisioning,
 } from '../src/core/version.js'
 import {
+  ARTEFACT_EXECUTABLE_NAMES,
   BUILD_STAMP,
   RUNTIME_BUILD,
+  artefactExecutableFind,
   artefactName,
   artefactUrls,
   DEFAULT_SOURCES,
@@ -27,6 +33,7 @@ import {
   FETCH_FLOOR_SECONDS,
   inspectRuntime,
   installScript,
+  isArtefactExecutable,
   parseStamp,
   platformTag,
   rollbackScript,
@@ -232,6 +239,110 @@ const check = (ok, label, detail) => {
     'a failed install can be rolled back')
   check(rollback.includes('nothing-to-roll-back'),
     'and reports when there was nothing to roll back to')
+}
+
+// ---- files that must be executable after unpack -----------------------------
+// The defect this covers, measured on a real node on 2026-11-21: every `glob` and `grep` call
+// answered "ripgrep provider failure" because `@vscode/ripgrep-linux-x64/bin/rg` arrived mode
+// 0666. The installer repaired only `spawn-helper`, which a Linux tree does not even contain,
+// and `dsh-util-ripgrep` spawns its bundled binary by path with no system-rg fallback — so the
+// whole search surface was dead on a tree the gate called "in step".
+{
+  // A rule by shape, not a list of paths: the ripgrep binary is one dependency bump away from
+  // a different path, and a hand-maintained list would fail silently when it moved.
+  check(isArtefactExecutable('/s/node_modules/@vscode/ripgrep-linux-x64/bin/rg'),
+    'the bundled ripgrep is executable — every glob/grep on a node spawns it')
+  check(isArtefactExecutable('/s/node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/landlock-run'),
+    'and so is the Linux sandbox launcher')
+  check(isArtefactExecutable('/s/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper'),
+    'spawn-helper is matched by name, because it is not under a bin/')
+  check(isArtefactExecutable('node_modules\\which\\bin\\node-which'),
+    'a backslash path is the same path — the packer walks Windows-shaped entries')
+  check(isArtefactExecutable('/s/node_modules/node-pty/prebuilds/linux-x64/pty.node'),
+    'native addons keep the bit they always had, so this rule is not a regression')
+  check(!isArtefactExecutable('/s/node_modules/x/lib/index.js'),
+    'ordinary JavaScript stays non-executable')
+  // `node_modules/.bin` is npm's shim directory. Matching it would mark 26 `.cmd`/`.ps1`
+  // shims a Linux node never runs, and nothing resolves them (checked in both consumers).
+  check(!isArtefactExecutable('/s/node_modules/.bin/node-which'),
+    'npm`s own .bin shims are not matched — no consumer resolves them')
+  check(!isArtefactExecutable('/s/node_modules/.bin/acorn'), 'including the extensionless one')
+  check(ARTEFACT_EXECUTABLE_NAMES.includes('spawn-helper') && ARTEFACT_EXECUTABLE_NAMES.length === 1,
+    'the by-name list stays the one file that needs it', String(ARTEFACT_EXECUTABLE_NAMES.length))
+
+  const expression = artefactExecutableFind()
+  check(expression.includes('-path') && expression.includes("-name 'spawn-helper'"),
+    'the installer finds payloads by path pattern and by name, not by a hard-coded list',
+    expression.slice(0, 120))
+
+  // The `find` expression is where this rule actually runs on a node, and a `find` expression
+  // one parenthesis away from matching nothing looks exactly like a working one in a diff.
+  // A POSIX `find` cannot be proved on Windows without one, so the shell is looked for rather
+  // than assumed: `sh` first because that is what the node runs the installer with, then Git's
+  // bash, which is the only POSIX shell a Windows dev machine has. When neither is there the
+  // check is skipped out loud — a silent pass would be worse than a stated gap.
+  const candidates = ['sh', 'bash']
+  if (process.platform === 'win32') {
+    candidates.push(join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe'))
+  }
+  const shell = candidates.find(candidate => {
+    const probe = spawnSync(candidate, ['-c', 'command -v find >/dev/null 2>&1 && echo yes'], { encoding: 'utf8' })
+    return probe.status === 0 && probe.stdout.trim() === 'yes'
+  })
+  if (shell !== undefined) {
+    const root = mkdtempSync(join(tmpdir(), 'rnh-exec-'))
+    try {
+      const tree = [
+        'node_modules/@vscode/ripgrep-linux-x64/bin/rg',
+        'node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper',
+        'node_modules/node-pty/prebuilds/linux-x64/pty.node',
+        'node_modules/x/lib/index.js',
+        'node_modules/.bin/node-which',
+      ]
+      for (const path of tree) {
+        mkdirSync(join(root, dirname(path)), { recursive: true })
+        writeFileSync(join(root, path), 'x')
+      }
+      // `.` as the find root: the same relative shape the installer uses, so a `bin` segment
+      // in the caller's root cannot inflate the match.
+      const found = spawnSync(shell, ['-c', `cd ${JSON.stringify(root)} && ${expression} | sort`], { encoding: 'utf8' })
+      const names = found.stdout.split('\n').map(line => line.trim()).filter(Boolean)
+      check(names.includes('./node_modules/@vscode/ripgrep-linux-x64/bin/rg'),
+        'the generated find expression selects the ripgrep binary', String(names.length))
+      check(names.includes('./node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper'),
+        'and spawn-helper')
+      check(names.includes('./node_modules/node-pty/prebuilds/linux-x64/pty.node'), 'and the addon')
+      check(!names.includes('./node_modules/x/lib/index.js'), 'and no ordinary JavaScript')
+      check(!names.some(name => name.includes('node_modules/.bin/')),
+        'and no npm .bin shims', names.filter(name => name.includes('/.bin/')).join(' '))
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  } else {
+    log('skip the find-expression probe: no POSIX shell on this machine to run a find')
+  }
+
+  // The script has to *verify* the result, not just attempt the chmod: an unexecutable payload
+  // must fail the install (rollback) instead of producing a node whose search silently dies.
+  const script = installScript({
+    version: '0.2.2-rc.5',
+    runtime: '/root/.dsh-remote-node-harness/runtime',
+    cli: '/root/.dsh-remote-node-harness/runtime/node_modules/@deepseek-ai/dsh/lib/bin.js',
+    urls: ['https://mirror/x.tar.gz'],
+  })
+  check(script.includes('ARTEFACT_NOT_EXECUTABLE') && script.includes('exit 7'),
+    'an unpacked tree with a non-executable payload fails the install by name')
+  check(/\[ ! -x "\$candidate" \]/u.test(script),
+    'and it decides that by testing the executable bit, not by trusting chmod')
+  check(script.includes('ripgrep-linux-x64/bin/rg'),
+    'the verification names the file whose absence broke search')
+  // Order matters: the check must run before the staging tree is renamed into place, or the
+  // rollback has nothing to restore and the broken tree is already serving.
+  const verifyAt = script.indexOf('ARTEFACT_NOT_EXECUTABLE')
+  const swapAt = script.indexOf('mv "$staging" "$runtime"')
+  check(verifyAt > 0 && swapAt > verifyAt,
+    'the verification runs before the staging tree replaces the live runtime',
+    `${String(verifyAt)} < ${String(swapAt)}`)
 }
 
 // ---- the plugin install script: peers must not drag DSH onto the node -------

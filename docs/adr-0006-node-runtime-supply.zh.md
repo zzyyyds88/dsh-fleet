@@ -160,10 +160,19 @@ session,node-control` 在一个真 Host 上跑了 112.4 s 全绿，之后节点�
    改法：解析加 `--ignore-scripts`（树里每个原生依赖都自带预编译平台包；实测带脚本
    968.2 MiB / 94106 文件，不带 957.3 MiB，四个原生模块都在）。
 2. **可执行位传不了。** 实测 bsdtar 在 Windows 上给每个条目写 `-rw-rw-rw-`，51500 个文件全是，
-   仅 20 个带 `+x` 且全是 `.exe`/`.cmd`；`chmodSync` 在 Windows 是空操作，`--owner/--group`
-   改了也没用。改法：`installScript` 在节点解包后自己 `chmod 0755` 那两个
-   `node-pty/prebuilds/*/spawn-helper` —— 少了这一步，Darwin 节点的终端在第一次打开时才失败，
-   而错误信息一个字都不会提到这个文件。这一条同时修好已经发出去的归档。
+   仅 20 个带 `+x` 且全是 `.exe`/`.cmd`；`chmodSync` 在 Windows 上只剩 `100666`，
+   `--owner/--group` 改了也没用。改法：`installScript` 在节点解包后自己补可执行位 ——
+   少了这一步，Darwin 节点的终端在第一次打开时才失败，而错误信息一个字都不会提到这个文件。
+   这一条同时修好已经发出去的归档。
+
+   **2026-11-21 修订：补位的范围曾经太小，代价是整个文件检索能力。** 当时只补
+   `node-pty/prebuilds/*/spawn-helper`，而 Linux 树里根本没有这个文件，于是
+   `@vscode/ripgrep-linux-x64/bin/rg` 到节点是 0666 —— `dsh-util-ripgrep` 按路径 spawn 它
+   且没有系统 `rg` 兜底，每次 `glob`/`grep` 都报 `ripgrep provider failure`，
+   `inspectRuntime` 却判「in step」。现在规则按形状：`node_modules/<pkg>/…/bin/` 下的文件、
+   按名字的 `spawn-helper`、按后缀的 `*.node`，判定函数 `isArtefactExecutable` 由打包侧与
+   安装侧共用；解包后还逐个测 `-x`，不通过就 `exit 7` 回滚。归档字节没变，
+   `RUNTIME_BUILD` 仍从 5 升到 6 —— 戳是唯一能触达「已装好、版本相同」节点的杠杆。
 
 `RUNTIME_BUILD` 因此从 2 升到 3。
 

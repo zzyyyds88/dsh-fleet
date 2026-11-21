@@ -637,7 +637,8 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 前两种是「删」，第三种是「改」，走补丁链 + 偏差台账，见
 [`adr-0008-node-source-trim.zh.md`](adr-0008-node-source-trim.zh.md) 与
 [`node-patches.zh.md`](../packages/dsh-remote-node-harness/docs/node-patches.zh.md)。
-截至 build 5 源码级改动为 **0**：全部差异都在前两种粒度里。
+截至 build 6 源码级改动为 **0**：全部差异都在前两种粒度里。build 6 与 build 5 的归档
+**字节完全相同**，只是安装脚本的可执行位规则变了（见下文「可执行位」一节）。
 
 **文件级裁掉的四类死字节，每一类都是先量后删。** build 4 的归档 408.2 MiB 里，
 `src/**.ts` 91.9 MiB、`.d.cts` 22.7 MiB、无人读的 `.md` 5.3 MiB、Windows 调试符号与
@@ -668,7 +669,7 @@ bump `RUNTIME_BUILD`。戳的格式与它记录的第二个事实（`via`）在�
 | 情形 | 现在 | 为什么 |
 |---|---|---|
 | CNB 拿不到 / 没有 `curl`、`wget` / 平台打不出标签 / 没配源 | 报错，列出试过的 URL | 没有第二条路可落。这是 fork 路线的代价，写在明面上 |
-| 校验和不符、解包失败、归档里没有 `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 4/5） | 回滚 + **抛错** | 字节到了但是错的。重试同一个坏源只会更慢、还把「哪个源坏了」掩盖 |
+| 校验和不符、解包失败、归档里没有 `node_modules/@deepseek-ai/dsh/lib/bin.js`（退出码 4/5）、解包后某个直接 spawn 的二进制没有 `+x`（退出码 7） | 回滚 + **抛错** | 字节到了但是错的。重试同一个坏源只会更慢、还把「哪个源坏了」掩盖 |
 
 **为什么连 npm 兜底也删了，而不是留着当保险。** 那条兜底装的是**上游发布版**，而且写的是
 同一枚 `{"build":4,"via":"npm"}` 的戳。于是一个走了兜底的节点会被判成「可用」，此后再也不会被
@@ -718,11 +719,30 @@ TypeScript 源码、`.d.cts` 声明、调试符号与无人读的文档 —— �
 「已就绪」。
 
 **可执行位是 `tar` 传不了的那一件事。** 实测 bsdtar 在 Windows 上给每个条目写
-`-rw-rw-rw-`（51500 个文件全是，仅 20 个带 `+x` 且全是 `.exe`/`.cmd`），`chmodSync` 在
-Windows 是空操作，`--owner/--group` 改了也没用。所以 `installScript` 解包后自己补
-`chmod 0755 node-pty/prebuilds/*/spawn-helper`，构建脚本打包前也补 `spawn-helper` 与 `*.node`
-的 0755 —— 少了这一步，Darwin 节点的终端在第一次打开时才失败，而错误信息一个字都不会提到
-这个文件。
+`-rw-rw-rw-`，`chmodSync` 在 Windows 上只剩 `100666`，`--owner/--group` 改了也没用 ——
+打包机根本没有可写进归档的 mode。所以解包后补位这一步是**唯一**能修的地方，而且必须
+在节点上做：已经发布的归档改不了。
+
+**这一条曾经只补 `spawn-helper`，代价是整个文件检索能力。** 2026-11-21 在真节点上实测：
+`@vscode/ripgrep-linux-x64/bin/rg` 到节点是 0666，`dsh-util-ripgrep` 按路径 spawn 它
+且**没有系统 `rg` 兜底**，于是每次 `glob`/`grep` 都报 `ripgrep provider failure`，
+而 `inspectRuntime` 判这棵树「in step」——坏得很安静。Linux 树里根本没有 `spawn-helper`，
+所以旧规则在 Linux 上等于什么都没补。
+
+现在的规则是**按形状**，不是按路径清单（清单会在下一次依赖升级时悄悄失效）：
+`node_modules/<pkg>/…/bin/` 下的文件、按名字的 `spawn-helper`、按后缀的 `*.node`，
+判定函数是 `isArtefactExecutable`（`src/remote/artefact.js`），**打包侧和安装侧共用同一个**，
+两处不可能对「哪些文件是程序」有不同意见。`node_modules/.bin/*` 故意不匹配：那是 npm 给
+shell 写的 shim，本运行时没有任何代码解析它（两个消费方都不出现 `.bin`）。
+
+补位之后还要**验**：`installScript` 对 `bin/rg` 与 `bin/landlock-run` 逐个测 `-x`，
+不通过就删掉 staging、`exit 7`（`ARTEFACT_NOT_EXECUTABLE`）、让调用方回滚 ——
+在 `mv "$staging" "$runtime"` **之前**。补不上却不报错，就是又造一个「看起来装好了、
+第一次搜索才炸」的节点。
+
+**这一条改了 `RUNTIME_BUILD`（5 → 6），虽然归档字节一个没变。** 戳是唯一能触达
+「已经装好、版本相同」节点的杠杆：`inspectRuntime` 见戳相同就直接复用，不 bump 就永远
+不会去修真正需要修的那些节点。
 
 **节点侧不硬拦 `engines`。** 上游 `0.2.2` 的四个 rc 全部声明 `engines.node: ">=24.9.0"`，
 而现场节点是 Node v22.20.0、一直在跑 rc.3。制品路线从不读这个字段（它解包一棵树），

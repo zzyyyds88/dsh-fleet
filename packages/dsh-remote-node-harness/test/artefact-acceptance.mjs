@@ -144,6 +144,35 @@ check(!/win-x64|darwin/u.test(natives), 'and no foreign-platform native came alo
   natives.trim().split('\n').slice(0, 3).join(','))
 check(/sharp-linux-x64/u.test(natives), 'image support is the Linux build too')
 
+// ---- the payloads the runtime spawns directly ------------------------------
+// The defect this exists for, measured on a real node on 2026-11-21: a Windows packer cannot
+// record an executable bit, the installer used to restore only `spawn-helper`, and a Linux
+// tree has no `spawn-helper` — so `@vscode/ripgrep-linux-x64/bin/rg` landed at 0666 and every
+// `glob`/`grep` call answered "ripgrep provider failure" while the gate said "in step".
+// Checking the mode is not enough: what matters is that the binary runs.
+const payloads = await nodeExec(
+  `rg=${runtime}/node_modules/@vscode/ripgrep-linux-x64/bin/rg; `
+  + `test -f "$rg" && echo rg=present || echo rg=absent; `
+  + `test -x "$rg" && echo rgexec=yes || echo rgexec=no; `
+  + `"$rg" --version 2>&1 | head -1 | cut -d' ' -f1-2 | sed 's/^/rgversion=/'; `
+  + `ll=${runtime}/node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/landlock-run; `
+  + `test -x "$ll" && echo landlockexec=yes || echo landlockexec=no`,
+)
+const payloadField = name => payloads.trim().split('\n')
+  .map(line => line.trim())
+  .find(line => line.startsWith(`${name}=`))
+  ?.slice(name.length + 1)
+check(payloadField('rg') === 'present', 'the runtime ships the ripgrep it spawns',
+  payloadField('rg'))
+check(payloadField('rgexec') === 'yes',
+  'and that binary is executable after unpack — this is what glob/grep die without',
+  payloadField('rgexec'))
+check(/^ripgrep/u.test(payloadField('rgversion') ?? ''),
+  'it actually runs, which is the only proof the mode is right',
+  payloadField('rgversion'))
+check(payloadField('landlockexec') === 'yes',
+  'the Linux sandbox launcher is executable too', payloadField('landlockexec'))
+
 // ---- the runtime actually starts -----------------------------------------
 // `--version` is the cheapest thing that imports the real entry point; if a native
 // module were missing or the wrong ABI this is where it fails.

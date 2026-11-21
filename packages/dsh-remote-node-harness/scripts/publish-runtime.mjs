@@ -44,7 +44,7 @@ import { spawnSync } from 'node:child_process'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ARTEFACT_RESIDUE, ARTEFACT_RESIDUE_KEEP, foreignPlatformResidue, stripResidue } from './trim-fork-runtime.mjs'
-import { PUBLISHED_PLATFORMS, isPublishedPlatform } from '../src/remote/artefact.js'
+import { isArtefactExecutable, PUBLISHED_PLATFORMS, isPublishedPlatform } from '../src/remote/artefact.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pluginRoot = resolve(here, '..')
@@ -238,19 +238,22 @@ function pack() {
 
   // Restore the executable bit — but only where the packer has POSIX modes to restore.
   //
-  // Measured, and worse than expected: bsdtar on Windows writes `-rw-rw-rw-` for **every**
-  // entry, `chmodSync` is a no-op there (Windows has no exec bit), and no `tar` flag changes
-  // it — `--owner=0 --group=0` is accepted and changes nothing. So on a Windows packer the
-  // archive *cannot* carry modes at all, which is why the load-bearing fix is the `chmod` in
-  // `installScript` on the node (it also repairs archives already published). This step still
-  // matters for the CI matrix, where the same script runs on ubuntu and macos runners and the
-  // modes it sets are the modes that ship.
+  // Measured: bsdtar on Windows writes `-rw-rw-rw-` for **every** entry, and `chmodSync` there
+  // leaves `100666` (Windows has no exec bit; `--owner/--group` change nothing). So a Windows
+  // packer cannot put modes in the archive at all, which is why the load-bearing repair is the
+  // `chmod` in `installScript` on the node. This step still matters for the CI matrix, where
+  // the same script runs on an ubuntu runner and the modes it sets are the modes that ship.
+  //
+  // The rule is `isArtefactExecutable`, shared with the installer, so the two cannot disagree
+  // about which files are programs. It used to be `spawn-helper` + `*.node`, which missed the
+  // ripgrep binary and the sandbox launcher — the defect that made every `glob`/`grep` on a
+  // node fail with "ripgrep provider failure".
   let chmodded = 0
   const restore = dir => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name)
       if (entry.isDirectory()) { restore(full); continue }
-      if (entry.name !== 'spawn-helper' && !entry.name.endsWith('.node')) continue
+      if (!isArtefactExecutable(full)) continue
       try {
         chmodSync(full, 0o755)
         chmodded += 1

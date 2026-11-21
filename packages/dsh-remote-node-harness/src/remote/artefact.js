@@ -144,11 +144,69 @@ export const DEFAULT_SOURCES = Object.freeze([
  * except the files an agent loads by path (`skills/`, `assets/`, `references/`, `templates/`,
  * `SKILL.md`). Measured on the published build-4 archive: 17 245 files / 139.8 MiB, 408.2 →
  * 268.4 MiB. Same version, same package set, a third fewer bytes — so it needs its own stamp.
+ *
+ * Build 6 changes **no byte of the archive** and still needs its own stamp, because the defect
+ * it repairs is in `installScript` and the archive is what a node has already installed. A
+ * Windows packer cannot record an executable bit at all — measured on the published rc.5
+ * archive: 25 038 files, 0 with `+x`, `chmodSync` leaves `100666` — so `node_modules/@vscode/
+ * ripgrep-linux-x64/bin/rg` arrives mode 0666 and every `glob`/`grep` call answers
+ * "ripgrep provider failure". Build 5 repaired only `spawn-helper`, which the Linux tree does
+ * not even contain. The stamp is the only lever that reaches a node already on the same
+ * version: `inspectRuntime` reuses a tree whose stamp matches, so without the bump the repair
+ * would never run anywhere it is needed. See {@link isArtefactExecutable}.
  */
-export const RUNTIME_BUILD = 5
+export const RUNTIME_BUILD = 6
 
 /** The stamp file, relative to the runtime directory. */
 export const BUILD_STAMP = '.rnh-artefact.json'
+
+/**
+ * Names of files a runtime spawns as a **program**, wherever they sit in the tree.
+ *
+ * `node-pty` spawns `prebuilds/<os>-<arch>/spawn-helper` by path, and a file that arrives
+ * without `+x` fails at the first terminal, days after the install — measured on the Darwin
+ * prebuilds, which is why this name was the first (and for a while the only) entry.
+ */
+export const ARTEFACT_EXECUTABLE_NAMES = Object.freeze(['spawn-helper'])
+
+/**
+ * Suffixes that are marked executable too, though nothing requires it.
+ *
+ * A `.node` addon is `dlopen`ed, not `exec`ed, so the bit is inert. It was in the packer's
+ * old rule and stays: dropping it would be an unmeasured change committed alongside a
+ * measured one, and no archive is one byte smaller for keeping it.
+ */
+export const ARTEFACT_EXECUTABLE_SUFFIXES = Object.freeze(['.node'])
+
+/**
+ * Whether this file must carry an executable bit once unpacked.
+ *
+ * The rule is by **shape**, not by a list of paths, because a list of paths is wrong at the
+ * next dependency bump and nothing would say so. Two shapes, both measured on the published
+ * rc.5 archive:
+ *
+ * - anything directly inside a **`bin/` directory of a package** — `@vscode/ripgrep-linux-x64/
+ *   bin/rg` (the ripgrep every `glob`/`grep` call spawns), `@deepseek-ai/node-addon-system-
+ *   linux-x64/bin/landlock-run` (the Linux sandbox launcher), plus the three npm CLI shims
+ *   this runtime never calls;
+ * - {@link ARTEFACT_EXECUTABLE_NAMES} by name, because `spawn-helper` is not under a `bin/`;
+ * - {@link ARTEFACT_EXECUTABLE_SUFFIXES} by suffix, for native addons.
+ *
+ * `node_modules/.bin/*` is deliberately **not** matched: npm writes those as shims for a
+ * shell, nothing in this runtime resolves them (checked: neither `dsh-util-ripgrep` nor
+ * `node-addon-system` mentions `.bin`), and a `.js` shim that gains `+x` gains nothing.
+ *
+ * @param {string} path - a path in the tree, absolute or relative, either separator.
+ * @returns {boolean}
+ */
+export function isArtefactExecutable(path) {
+  const posix = String(path).replaceAll('\\', '/')
+  const name = posix.slice(posix.lastIndexOf('/') + 1)
+  if (ARTEFACT_EXECUTABLE_NAMES.includes(name)) return true
+  if (ARTEFACT_EXECUTABLE_SUFFIXES.some(suffix => name.endsWith(suffix))) return true
+  // A `bin/` **directory segment**, not the substring: `…/bin/rg` matches, `…/.bin/rg` does not.
+  return posix.includes('/bin/')
+}
 
 /**
  * The stamp one install writes.
@@ -414,6 +472,7 @@ export function artefactUrls({
  * | 4 | checksum mismatch | roll back, report |
  * | 5 | archive is not a DSH runtime | roll back, report |
  * | 6 | the archive arrived but its `.sha256` did not (`ARTEFACT_CHECKSUM_UNAVAILABLE`) | roll back, report — never unpack unverified bytes |
+ * | 7 | a binary the runtime spawns directly is not executable after unpack (`ARTEFACT_NOT_EXECUTABLE`) | roll back, report — the install is otherwise complete but unusable |
  */
 
 /**
@@ -428,6 +487,41 @@ export function artefactUrls({
  */
 function shellPath(path) {
   return path.startsWith('~/') ? `$HOME/${path.slice(2)}` : path
+}
+
+/**
+ * The `find` expression that selects every file {@link isArtefactExecutable} names.
+ *
+ * Relative and rooted at the staging directory on purpose: the staging directory derives from
+ * a caller-supplied remote root, and an absolute `bin` path pattern would match the whole tree
+ * the moment that root had a `bin` segment anywhere in it. Exported so the test can run this
+ * exact expression against a fake tree instead of asserting on a string: a `find` expression
+ * is one parenthesis away from matching nothing, and nothing about that is visible in a diff.
+ * @returns {string}
+ */
+export function artefactExecutableFind() {
+  // Built from parts because the literal `*/bin/*` would close the comment above.
+  const binPattern = `${'*'}/bin/${'*'}`
+  const nameClause = ARTEFACT_EXECUTABLE_NAMES.map(name => `-o -name '${name}'`).join(' ')
+  const suffixClause = ARTEFACT_EXECUTABLE_SUFFIXES.map(suffix => `-o -name '*${suffix}'`).join(' ')
+  return `find . -type f \\( -path "${binPattern}" ${nameClause} ${suffixClause} \\) -print`
+}
+
+/**
+ * Shell lines that put the executable bit on everything {@link isArtefactExecutable} names.
+ *
+ * Generated from the same predicate the packer uses, so the two cannot disagree about which
+ * files are programs. `chmod` failures are swallowed on purpose — a mode bit that cannot be
+ * set (a read-only mount, an exotic filesystem) is then caught by the `-x` verification that
+ * follows, which reports the file by name instead of a bare `chmod` error.
+ * @returns {string}
+ */
+function executableRestoreLines() {
+  return [
+    'for executable in $(cd "$staging" && ' + artefactExecutableFind() + '); do',
+    '  chmod 0755 "$staging/$executable" 2>/dev/null || true',
+    'done',
+  ].join('\n')
 }
 
 /**
@@ -506,13 +600,33 @@ if [ ! -f "$staging/node_modules/@deepseek-ai/dsh/lib/bin.js" ]; then
   echo "ARTEFACT_SHAPE_UNEXPECTED" >&2
   exit 5
 fi
-# tar on a Windows packer writes 0666 for every entry — measured on the rc.5 archive:
-# 51500 files at -rw-rw-rw-, and the only 20 entries carrying +x were Windows .exe/.cmd.
-# On a Darwin node that turns node-pty/prebuilds/*/spawn-helper into a file the terminal
-# can read but not execute, so the PTY fails at first use — later and further from the
-# cause than any install failure. Restoring the bit here rather than only in the packer
-# keeps archives that are already published working.
-find "$staging" -type f -name 'spawn-helper' -exec chmod 0755 {} + 2>/dev/null || true
+# tar on a Windows packer writes 0666 for every entry — measured on the published rc.5
+# archive: 25 038 files, **0** carrying +x. chmodSync on Windows leaves 100666, so the packer
+# cannot help even when it tries; this is the only place the bit can be restored.
+#
+# It used to repair only spawn-helper, on the theory that node-pty's helper was the one file a
+# node spawns directly. That theory was wrong about Linux, and the consequence was total:
+# @vscode/ripgrep-linux-x64/bin/rg arrives mode 0666, dsh-util-ripgrep spawns it by path with
+# **no system-rg fallback**, and every glob/grep call in every session on the node answers
+# "ripgrep provider failure". Not a slow degradation — file search never works, on a tree the
+# gate reports as "in step". The rule is now the same one the packer uses
+# (isArtefactExecutable): every file inside a package's bin/ directory, spawn-helper by name,
+# and native addons by suffix.
+${executableRestoreLines()}
+# **Verified, not assumed.** A tree whose payloads are not executable installs silently and
+# breaks at the first search, so it is checked here, where the exit code can still roll it
+# back. Absent is fine — a Darwin prebuild is not in a Linux archive — but present and not
+# executable is fatal, and says which file.
+broken=
+for candidate in "$staging/node_modules/@vscode/ripgrep-linux-x64/bin/rg" "$staging/node_modules/@deepseek-ai/node-addon-system-linux-x64/bin/landlock-run"; do
+  if [ -f "$candidate" ] && [ ! -x "$candidate" ]; then broken="$broken $candidate"; fi
+done
+if [ -n "$broken" ]; then
+  rm -rf "$staging"
+  rm -f "$archive" "$archive.sha256"
+  echo "ARTEFACT_NOT_EXECUTABLE$broken" >&2
+  exit 7
+fi
 
 rm -rf "$previous"
 if [ -d "$runtime" ]; then mv "$runtime" "$previous"; fi
